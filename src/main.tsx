@@ -104,6 +104,14 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
+  useEffect(() => {
+    const preventBrowserMenu = (event: MouseEvent) => {
+      if ((event.target as HTMLElement).closest(".host-item")) event.preventDefault();
+    };
+    document.addEventListener("contextmenu", preventBrowserMenu);
+    return () => document.removeEventListener("contextmenu", preventBrowserMenu);
+  }, []);
+
   const persistData = (nextServers: Server[], nextAiConfig: AiConfig = aiConfig, nextLanguage: Locale = language) => {
     const data = { servers: nextServers.map(({ status: _status, ...item }) => item), aiConfig: nextAiConfig, language: nextLanguage };
     void invoke("save_local_data", { data }).catch(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(data.servers)); localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(nextAiConfig)); localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage); });
@@ -112,10 +120,13 @@ function App() {
   const update = <K extends keyof ServerForm>(key: K, value: ServerForm[K]) => { setForm((current) => ({ ...current, [key]: value })); setError(""); };
   const updateAi = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => { setAiConfig((current) => ({ ...current, [key]: value })); setModelStatus(""); setError(""); };
   const changeLanguage = (next: Locale) => { setLanguage(next); localStorage.setItem(LANGUAGE_STORAGE_KEY, next); persistData(servers, aiConfig, next); };
-  const openWizard = () => { setForm(initialForm); setError(""); setWizardOpen(true); };
+  const openWizard = () => {
+    const savedForm = server?.status === "saved" ? { ...initialForm, name: server.name, host: server.host, port: String(server.port), username: server.username } : initialForm;
+    setForm(savedForm); setError(""); setWizardOpen(true);
+  };
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
-    if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { setServer(selected); setView("hosts"); setError(text.noCredentials); return; }
+    if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username }); setView("hosts"); setError(""); setWizardOpen(true); return; }
     setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalLines([{ kind: "system", text: `${selected.username}@${selected.host}:${selected.port} · SSH` }]); setView("terminal"); setError("");
   };
 
@@ -242,7 +253,7 @@ function App() {
     <aside className="sidebar">
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
       <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
-      {servers.length > 0 && <div className="host-list"><p className="nav-caption">{text.servers}</p>{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : ""}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host}</small></span></button>)}</div>}
+      {servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : ""}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host}</small></span></button>)}</div>}
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
       <div className="sidebar-note">{text.localFirst}<br />{text.credentialsLocal}</div>
     </aside>

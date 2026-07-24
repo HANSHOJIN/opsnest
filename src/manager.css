@@ -29,3 +29,4 @@
 .manager-input-row textarea:focus { border-color: #5267e8; box-shadow: 0 0 0 3px #eef0ff; }
 .manager-input-row .primary { padding: 11px 17px; }
 .manager-input-row .primary:disabled { opacity: .5; cursor: wait; }
+.host-list { margin-top: 12px; }
