@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="OpsNest icon">
-  <rect width="64" height="64" rx="16" fill="#182553"/>
-  <ellipse cx="32" cy="28" rx="7" ry="9" fill="#F5C66B"/>
-  <path d="M15 35c5 8 11 12 17 12s12-4 17-12" fill="none" stroke="#F5C66B" stroke-width="5" stroke-linecap="round"/>
-  <path d="M19 41c4 5 8 7 13 7s9-2 13-7" fill="none" stroke="#E79A55" stroke-width="4" stroke-linecap="round"/>
-</svg>
