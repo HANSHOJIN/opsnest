@@ -66,7 +66,6 @@ function App() {
     try {
       const result = await invoke<{ system: string }>("test_ssh_connection", {
         request: {
-          name: form.name.trim() || form.host.trim(),
           host: form.host.trim(),
           port: Number(form.port),
           username: form.username.trim(),

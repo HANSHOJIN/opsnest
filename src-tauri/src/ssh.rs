@@ -5,7 +5,6 @@ use std::{io::Read, net::{SocketAddr, TcpStream}, path::Path, time::Duration};
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshTestRequest {
-    pub name: String,
     pub host: String,
     pub port: u16,
     pub username: String,
