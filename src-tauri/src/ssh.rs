@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use ssh2::Session;
+use ssh2::{MethodType, Session};
 use std::{io::Read, net::{TcpStream, ToSocketAddrs}, path::Path, time::Duration};
 
 #[derive(Debug, Deserialize)]
@@ -40,6 +40,10 @@ fn connect_session(request: &SshTestRequest) -> Result<Session, String> {
     let mut session = Session::new().map_err(|error| error.to_string())?;
     session.set_tcp_stream(tcp);
     session.set_timeout(10_000);
+    session.method_pref(MethodType::Kex, "curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,diffie-hellman-group14-sha256")
+        .map_err(|_| "当前 SSH 库不支持服务器所需的密钥交换算法。")?;
+    session.method_pref(MethodType::HostKey, "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256")
+        .map_err(|_| "当前 SSH 库不支持服务器所需的主机密钥算法。")?;
     session.handshake().map_err(|_| "SSH 握手失败，请确认目标端口提供的是 SSH 服务。")?;
     match request.auth_method.as_str() {
         "password" => session.userauth_password(request.username.trim(), request.password.as_deref().unwrap_or("")).map_err(|_| "登录失败，请检查用户名和密码。")?,
