@@ -4,7 +4,7 @@ body { margin: 0; min-width: 960px; }
 button, input, a { font: inherit; } button { cursor: pointer; }
 .shell { display: flex; min-height: 100vh; }
 .sidebar { width: 248px; padding: 28px 20px; background: #fff; border-right: 1px solid #e7e9ee; display: flex; flex-direction: column; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.02em; }.brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 9px; color: #fff; background: #5267e8; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.02em; }.brand-icon { width: 29px; height: 29px; border-radius: 9px; object-fit: cover; }
 nav { display: grid; gap: 8px; margin-top: 48px; } nav a { padding: 11px 13px; border-radius: 9px; color: #687180; text-decoration: none; font-size: 14px; } nav a.active { color: #2738a0; background: #eef0ff; font-weight: 600; }
 .add-host, .primary, .secondary { border: 0; border-radius: 9px; }.add-host { margin-top: 28px; padding: 12px; color: #fff; background: #5267e8; font-weight: 600; }.sidebar-note { margin-top: auto; color: #9aa2ae; font-size: 12px; line-height: 1.7; }
 .content { flex: 1; padding: 38px 58px; }.topbar { display: flex; align-items: flex-start; justify-content: space-between; max-width: 980px; margin: 0 auto; }.eyebrow { margin: 0 0 5px; color: #8d96a5; font-size: 13px; }h1, h2, p { margin-top: 0; } h1 { margin-bottom: 0; font-size: 28px; letter-spacing: -.04em; } h2 { margin-bottom: 10px; font-size: 24px; letter-spacing: -.03em; }.status-pill, .connected-badge { padding: 7px 10px; color: #27804d; background: #eaf8ef; border-radius: 99px; font-size: 12px; }

@@ -87,7 +87,7 @@ function App() {
   return (
     <main className="shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">✦</span><span>OpsNest</span></div>
+        <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
         <nav aria-label="主导航">
           <a className="active" href="#hosts">我的服务器</a>
           <a href="#tasks">任务记录</a>
