@@ -3,6 +3,7 @@ dist/
 .tauri/
 src-tauri/target/
 *.log
+*.tsbuildinfo
 .env
 .env.*
 !.env.example
