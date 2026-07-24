@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
-use std::{io::Read, net::{SocketAddr, TcpStream}, path::Path, time::Duration};
+use std::{io::Read, net::{TcpStream, ToSocketAddrs}, path::Path, time::Duration};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,7 +32,7 @@ pub struct ServerProfile {
 fn connect_session(request: &SshTestRequest) -> Result<Session, String> {
     if request.host.trim().is_empty() { return Err("请输入服务器地址。".into()); }
     if request.username.trim().is_empty() { return Err("请输入用户名。".into()); }
-    let address: SocketAddr = format!("{}:{}", request.host.trim(), request.port).parse().map_err(|_| "服务器地址或端口格式不正确。")?;
+    let address = format!("{}:{}", request.host.trim(), request.port).to_socket_addrs().map_err(|_| "服务器地址或端口格式不正确。")?.next().ok_or("无法解析服务器域名。")?;
     let tcp = TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|_| "无法连接服务器，请检查地址、端口和防火墙。")?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
     tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|error| error.to_string())?;
