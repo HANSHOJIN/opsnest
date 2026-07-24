@@ -58,6 +58,11 @@ type AiConfig = {
   model: string;
 };
 
+type PersistedData = {
+  servers?: Server[];
+  aiConfig?: Partial<AiConfig> | null;
+};
+
 const STORAGE_KEY = "opsnest.servers";
 const AI_STORAGE_KEY = "opsnest.ai-model";
 const initialForm: ServerForm = { name: "", host: "", port: "22", username: "root", authMethod: "password", password: "", privateKeyPath: "", passphrase: "" };
@@ -119,21 +124,46 @@ function App() {
   const activeCredentials = useRef<Record<string, SshRequest>>({});
 
   useEffect(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
-      setServers(saved.map((item) => ({ ...item, status: "saved" })));
-      if (saved[0]) setServer({ ...saved[0], status: "saved" });
-      const savedAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
-      if (savedAi) setAiConfig({ ...defaultAiConfig, ...savedAi });
-    } catch {
-      localStorage.removeItem(STORAGE_KEY);
-      localStorage.removeItem(AI_STORAGE_KEY);
-    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const stored = await invoke<PersistedData>("load_local_data");
+        const legacyServers = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
+        const legacyAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
+        const saved = stored.servers?.length ? stored.servers : legacyServers;
+        const savedAi = stored.aiConfig ?? legacyAi;
+        if (cancelled) return;
+        const restored = saved.map((item) => ({ ...item, status: "saved" as ServerStatus }));
+        setServers(restored);
+        if (restored[0]) setServer(restored[0]);
+        if (savedAi) setAiConfig({ ...defaultAiConfig, ...savedAi });
+        if ((!stored.servers?.length && legacyServers.length) || (!stored.aiConfig && legacyAi)) {
+          await invoke("save_local_data", { data: { servers: legacyServers, aiConfig: savedAi } });
+        }
+      } catch {
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
+        const savedAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
+        if (cancelled) return;
+        const restored = saved.map((item) => ({ ...item, status: "saved" as ServerStatus }));
+        setServers(restored);
+        if (restored[0]) setServer(restored[0]);
+        if (savedAi) setAiConfig({ ...defaultAiConfig, ...savedAi });
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
   }, []);
 
+  const persistData = (nextServers: Server[], nextAiConfig: AiConfig = aiConfig) => {
+    const data = { servers: nextServers.map(({ status: _status, ...item }) => item), aiConfig: nextAiConfig };
+    void invoke("save_local_data", { data }).catch(() => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data.servers));
+      localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(nextAiConfig));
+    });
+  };
   const persistServers = (next: Server[]) => {
     setServers(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next.map(({ status: _status, ...item }) => item)));
+    persistData(next);
   };
   const update = <K extends keyof ServerForm>(key: K, value: ServerForm[K]) => { setForm((current) => ({ ...current, [key]: value })); setError(""); };
   const updateAi = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => { setAiConfig((current) => ({ ...current, [key]: value })); setModelStatus(""); setError(""); };
@@ -191,7 +221,7 @@ function App() {
     if (!aiConfig.model.trim()) return setError("请输入模型名称。");
     if (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim()) return setError("请输入 API Key。");
     const next = { ...aiConfig, baseUrl: normalizeBaseUrl(aiConfig.baseUrl), model: aiConfig.model.trim() };
-    setAiConfig(next); localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(next)); setModelStatus("已保存到本机"); setError("");
+    setAiConfig(next); persistData(servers, next); setModelStatus("已保存到本机"); setError("");
   };
 
   const testAiConfig = async () => {
