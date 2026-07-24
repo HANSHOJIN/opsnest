@@ -1,0 +1,31 @@
+.manager-view { position: fixed; inset: 0 0 0 248px; z-index: 5; display: flex; flex-direction: column; padding: 34px 52px; color: #18202a; background: #f7f8fa; }
+.manager-header { display: flex; align-items: flex-start; justify-content: space-between; max-width: 1060px; width: 100%; margin: 0 auto 24px; }
+.manager-header h1 { margin: 0 0 5px; }
+.manager-header span { color: #8993a2; font-size: 13px; }
+.manager-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 16px; width: 100%; max-width: 1060px; min-height: 0; flex: 1; margin: 0 auto; }
+.manager-inventory, .manager-chat { min-height: 0; border: 1px solid #e2e6ee; border-radius: 16px; background: #fff; }
+.manager-inventory { padding: 18px 14px; overflow: auto; }
+.manager-inventory h3 { margin: 0 0 14px 4px; color: #526071; font-size: 13px; }
+.manager-server { display: flex; align-items: flex-start; gap: 9px; padding: 10px 8px; border-radius: 9px; }
+.manager-server:hover { background: #f6f7fb; }
+.manager-server > div { min-width: 0; }
+.manager-server strong, .manager-server small, .manager-server em { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.manager-server strong { color: #344154; font-size: 12px; }
+.manager-server small { margin-top: 3px; color: #8d98a8; font-size: 11px; }
+.manager-server em { margin-top: 5px; color: #b1b8c2; font-size: 10px; font-style: normal; }
+.manager-empty { padding: 4px; color: #9aa4b1; font-size: 12px; line-height: 1.6; }
+.manager-chat { display: flex; flex-direction: column; overflow: hidden; }
+.manager-messages { flex: 1; overflow: auto; padding: 28px 34px; }
+.manager-intro { max-width: 680px; margin-bottom: 24px; color: #657285; font-size: 14px; line-height: 1.7; }
+.manager-message { display: flex; gap: 12px; max-width: 780px; margin: 14px 0; }
+.manager-message > span { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; border-radius: 9px; color: #5267e8; background: #eef0ff; font-size: 11px; font-weight: 700; }
+.manager-message.user { margin-left: auto; flex-direction: row-reverse; }
+.manager-message.user > span { color: #fff; background: #5267e8; }
+.manager-message pre { max-width: calc(100% - 42px); margin: 0; padding: 11px 14px; border-radius: 12px; color: #3c4858; background: #f4f6fa; white-space: pre-wrap; word-break: break-word; font: 13px/1.7 system-ui, sans-serif; }
+.manager-message.user pre { color: #fff; background: #5267e8; }
+.manager-message.system pre { color: #8a94a2; background: transparent; }
+.manager-input-row { display: flex; align-items: flex-end; gap: 10px; padding: 16px; border-top: 1px solid #edf0f4; background: #fbfcfd; }
+.manager-input-row textarea { flex: 1; min-width: 0; resize: none; padding: 11px 12px; border: 1px solid #d9dee7; border-radius: 9px; outline: none; color: #18202a; background: #fff; font: 13px/1.5 system-ui, sans-serif; }
+.manager-input-row textarea:focus { border-color: #5267e8; box-shadow: 0 0 0 3px #eef0ff; }
+.manager-input-row .primary { padding: 11px 17px; }
+.manager-input-row .primary:disabled { opacity: .5; cursor: wait; }
