@@ -25,6 +25,7 @@ type Locale = "zh-CN" | "en-US";
 type AiProvider = "openai" | "deepseek" | "openrouter" | "ollama" | "custom";
 type AiInterventionMode = "always" | "smart" | "none";
 type ModelConnectionStatus = "unknown" | "connected" | "failed";
+type ManagerServerDetails = { name?: string; host?: string; port?: number; username?: string; password?: string; privateKeyPath?: string };
 
 type ServerProfile = { osName: string; hostname: string; cpuCores: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string };
 type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[] };
@@ -538,21 +539,82 @@ function App() {
     appendLog({ type: "agent", title: "AgentRun cancelled", content: agentRun?.task ?? "", status: "cancelled" });
   };
 
+  const handleManagerAddServer = async (input: string) => {
+    const safeInput = redactLogText(input);
+    const details = extractManagerServerDetails(input);
+    const missing: string[] = [];
+    if (!details.host) missing.push(language === "zh-CN" ? "服务器地址" : "server address");
+    if (!details.username) missing.push(language === "zh-CN" ? "用户名" : "username");
+    if (!details.password && !details.privateKeyPath) missing.push(language === "zh-CN" ? "密码或私钥路径" : "password or private-key path");
+    setManagerInput("");
+    setManagerMessages((messages) => [...messages, { role: "user", text: safeInput }]);
+    if (missing.length) {
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `可以，我会直接添加，不弹窗。还缺少：${missing.join("、")}。你可以按“地址、端口、用户名、密码”的格式继续发给我。` : `I can add it directly without opening a window. Missing: ${missing.join(", ")}. Send the address, port, username and password in your next message.` }]);
+      return;
+    }
+    const host = details.host!;
+    const port = details.port ?? 22;
+    const username = details.username!;
+    const request: SshRequest = { host, port, username, authMethod: details.privateKeyPath ? "privateKey" : "password", password: details.privateKeyPath ? null : details.password ?? null, privateKeyPath: details.privateKeyPath ?? null, passphrase: null };
+    const id = `${host}:${port}`;
+    const name = details.name || host;
+    setManagerThinking(true);
+    setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `正在连接 ${name}，验证成功后会自动保存。` : `Connecting to ${name}; I will save it after the connection succeeds.` }]);
+    try {
+      const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
+      activeCredentials.current[id] = request;
+      await invoke("save_server_credential", { serverId: id, credential: request });
+      let profile: ServerProfile | undefined;
+      try { profile = await invoke<ServerProfile>("inspect_server", { request }); } catch (inspectError) { appendRuntimeLog({ level: "warn", event: "manager.server.inspect.failed", message: "Server added but profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) }); }
+      const nextServer: Server = { id, name, host, port, username, system: profile?.osName ?? result.system, status: "connected", latency: result.latencyMs, profile };
+      const nextServers = [nextServer, ...servers.filter((item) => item.id !== id)];
+      persistServers(nextServers);
+      setServer(nextServer);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `已添加并保存服务器：${name}\n地址：${username}@${host}:${port}\n系统：${nextServer.system}\n延迟：${result.latencyMs}ms\n凭据已保存，下次可以直接连接。` : `Server added and saved: ${name}\nAddress: ${username}@${host}:${port}\nSystem: ${nextServer.system}\nLatency: ${result.latencyMs}ms\nCredentials saved for the next connection.` }]);
+      appendLog({ type: "manager", title: "Server added by manager", content: safeInput, status: "success" });
+    } catch (managerError) {
+      const message = managerError instanceof Error ? managerError.message : String(managerError);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `添加失败：${message}\n服务器尚未保存。` : `Add failed: ${message}\nThe server was not saved.` }]);
+      appendLog({ type: "manager", title: "Manager server add failed", content: `${safeInput}\n${message}`, status: "failed" });
+    } finally {
+      setManagerThinking(false);
+    }
+  };
+
+  const handleManagerDeleteServer = async (input: string) => {
+    const safeInput = redactLogText(input);
+    const matches = servers.filter((item) => input.toLowerCase().includes(item.name.toLowerCase()) || input.toLowerCase().includes(item.host.toLowerCase()));
+    const target = matches.length === 1 ? matches[0] : matches.length === 0 && servers.length === 1 ? servers[0] : null;
+    setManagerInput("");
+    setManagerMessages((messages) => [...messages, { role: "user", text: safeInput }]);
+    if (!target) {
+      const choices = servers.map((item) => `${item.name} (${item.host}:${item.port})`).join("\n");
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `请明确要删除哪台服务器。当前服务器：\n${choices || "暂无服务器"}` : `Please specify which server to remove. Current servers:\n${choices || "No saved servers"}` }]);
+      return;
+    }
+    setManagerThinking(true);
+    try {
+      await invoke("delete_server_credential", { serverId: target.id });
+      delete activeCredentials.current[target.id];
+      const nextServers = servers.filter((item) => item.id !== target.id);
+      persistServers(nextServers);
+      if (server?.id === target.id) setServer(nextServers[0] ?? null);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `已删除服务器“${target.name}”，同时删除了本机保存的登录凭据。远程服务器本身没有被删除。` : `Removed “${target.name}” and deleted its locally saved credential. The remote server itself was not deleted.` }]);
+      appendLog({ type: "manager", title: "Server removed by manager", content: safeInput, status: "success" });
+    } catch (managerError) {
+      const message = managerError instanceof Error ? managerError.message : String(managerError);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? `删除失败：${message}` : `Remove failed: ${message}` }]);
+      appendLog({ type: "manager", title: "Manager server removal failed", content: `${safeInput}\n${message}`, status: "failed" });
+    } finally {
+      setManagerThinking(false);
+    }
+  };
+
   const submitManagerInput = async () => {
     const input = managerInput.trim();
     if (!input) return;
-    const addServerRequest = /(添加|新增|新建).*(服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);
-    if (addServerRequest) {
-      const host = input.match(/(?:地址|IP|主机|host)[:：\s]+([a-z0-9.-]+\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})/i)?.[1] ?? "";
-      const port = input.match(/(?:端口|port)[:：\s]+(\d{1,5})/i)?.[1] ?? "22";
-      const username = input.match(/(?:用户|用户名|user|username)[:：\s]+([a-z_][\w.-]*)/i)?.[1] ?? "root";
-      setManagerInput("");
-      setManagerMessages((messages) => [...messages, { role: "user", text: input }, { role: "assistant", text: language === "zh-CN" ? "好的，已打开添加服务器窗口。请补充密码或 SSH 私钥，然后测试连接。" : "The add-server window is open. Enter the password or SSH private key, then test the connection." }]);
-      setForm({ ...initialForm, host, port, username });
-      setView("hosts");
-      setWizardOpen(true);
-      return;
-    }
+    if (isManagerAddServerRequest(input)) return handleManagerAddServer(input);
+    if (isManagerDeleteServerRequest(input)) return handleManagerDeleteServer(input);
     const connectAllRequest = /连接.*所有|所有.*连接|connect\s+all/i.test(input);
     if (connectAllRequest) {
       setManagerInput("");
@@ -997,7 +1059,7 @@ function App() {
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
       <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
-       <div className="sidebar-note">v0.1.0-alpha.5</div>
+       <div className="sidebar-note">v0.1.0-alpha.6</div>
     </aside>
      <section className="content">
        {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
@@ -1115,12 +1177,35 @@ function TerminalPanel({ server, text, language, input, lines, executing, agentS
 
 function redactLogText(value: string) {
   return value
-    .replace(/(password|passwd|api[_-]?key|authorization|bearer|token|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=***")
+    .replace(/(password|passwd|api[_-]?key|authorization|bearer|token|secret|密码|口令)\s*[:=：]?\s*[^\s,;，；]+/gi, "$1=***")
     .replace(/\b(?:sk|ghp|gsk|xai)-[A-Za-z0-9_-]{12,}\b/g, "***")
     .slice(0, 12000);
 }
 
 function normalizeBaseUrl(value: string) { return value.trim().replace(/\/+$/, ""); }
+
+function isManagerAddServerRequest(input: string) {
+  return /(?:添加|新增|新建|保存).*(?:服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);
+}
+
+function isManagerDeleteServerRequest(input: string) {
+  return /(?:删除|移除|忘记).*(?:服务器|主机)|(?:delete|remove)\s+(?:the\s+)?server/i.test(input);
+}
+
+function extractManagerServerDetails(input: string): ManagerServerDetails {
+  const field = (labels: string) => input.match(new RegExp(`(?:${labels})\\s*[:=：]?\\s*([^\\n\\r,，;；]+)`, "i"))?.[1]?.trim();
+  const host = input.match(/(?:服务器地址|主机地址|地址|IP|host)\s*[:=：]?\s*([a-z0-9.-]+\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})/i)?.[1]?.trim();
+  const portText = field("SSH\\s*端口|端口|port");
+  const port = portText && /^\d{1,5}$/.test(portText) ? Number(portText) : undefined;
+  return {
+    name: field("服务器名称|主机名称|名称|名字|name"),
+    host,
+    port,
+    username: field("用户名|用户|user(?:name)?"),
+    password: field("密码|口令|password|passwd"),
+    privateKeyPath: field("私钥|私钥路径|key|private\\s*key"),
+  };
+}
 
 const shellCommandNames = new Set(["alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami"]);
 function isLikelyShellCommand(input: string) {
