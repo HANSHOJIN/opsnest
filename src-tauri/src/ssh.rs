@@ -33,6 +33,8 @@ pub struct SshTestResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
+    pub os_id: String,
+    pub os_version: String,
     pub os_name: String,
     pub hostname: String,
     pub cpu_cores: String,
@@ -218,6 +220,8 @@ pub async fn inspect_server(request: SshTestRequest) -> Result<ServerProfile, St
     let session = connect_session(&request).await?;
     let command = format!(r#"
 printf 'OPSNEST_OS='; {SYSTEM_INFO_COMMAND}
+printf 'OPSNEST_OS_ID='; if [ -r /etc/os-release ]; then awk -F= '/^ID={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/os-release 2>/dev/null; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_ID={{gsub(/^"|"$/, "", $2); print tolower($2); exit}}' /etc/openwrt_release 2>/dev/null; else printf 'linux'; fi
+printf 'OPSNEST_OS_VERSION='; if [ -r /etc/os-release ]; then awk -F= '/^VERSION_ID={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/os-release 2>/dev/null; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_RELEASE={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/openwrt_release 2>/dev/null; else uname -r 2>/dev/null; fi
 printf '\nOPSNEST_HOSTNAME='; hostname 2>/dev/null || printf 'unknown'
 printf '\nOPSNEST_CPU='; nproc 2>/dev/null || printf 'unknown'
 printf '\nOPSNEST_MEMORY='; awk '/MemTotal/ {{printf "%.1f GB", $2/1024/1024}}' /proc/meminfo 2>/dev/null || printf 'unknown'
@@ -228,6 +232,8 @@ if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; 
     close_session(session).await;
     let docker_installed = value_for(&output, "OPSNEST_DOCKER=", "missing") == "installed";
     Ok(ServerProfile {
+        os_id: value_for(&output, "OPSNEST_OS_ID=", "linux").to_lowercase(),
+        os_version: value_for(&output, "OPSNEST_OS_VERSION=", "").to_string(),
         os_name: value_for(&output, "OPSNEST_OS=", "Linux"),
         hostname: value_for(&output, "OPSNEST_HOSTNAME=", "未知主机"),
         cpu_cores: value_for(&output, "OPSNEST_CPU=", "未知"),

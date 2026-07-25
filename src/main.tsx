@@ -1,6 +1,19 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import debianIcon from "simple-icons/icons/debian.svg?raw";
+import ubuntuIcon from "simple-icons/icons/ubuntu.svg?raw";
+import openwrtIcon from "simple-icons/icons/openwrt.svg?raw";
+import alpineIcon from "simple-icons/icons/alpinelinux.svg?raw";
+import archIcon from "simple-icons/icons/archlinux.svg?raw";
+import fedoraIcon from "simple-icons/icons/fedora.svg?raw";
+import centosIcon from "simple-icons/icons/centos.svg?raw";
+import rockyIcon from "simple-icons/icons/rockylinux.svg?raw";
+import almaIcon from "simple-icons/icons/almalinux.svg?raw";
+import nixosIcon from "simple-icons/icons/nixos.svg?raw";
+import kaliIcon from "simple-icons/icons/kalilinux.svg?raw";
+import gentooIcon from "simple-icons/icons/gentoo.svg?raw";
+import linuxIcon from "simple-icons/icons/linux.svg?raw";
 import "./styles.css";
 import "./manager.css";
 
@@ -10,7 +23,7 @@ type View = "hosts" | "manager" | "settings" | "terminal" | "tasks";
 type TerminalMode = "shell" | "ai";
 type TerminalLine = { kind: "system" | "command" | "output" | "ai"; text: string };
 type ManagerMessage = { role: "user" | "assistant" | "system"; text: string };
-type ConversationLog = { id: string; timestamp: string; sessionId: string; scope: "manager" | "terminal"; role: "user" | "assistant" | "system" | "tool"; serverId?: string; serverName?: string; content: string };
+type ConversationLog = { id: string; timestamp: string; sessionId: string; sessionName?: string; scope: "manager" | "terminal"; role: "user" | "assistant" | "system" | "tool"; serverId?: string; serverName?: string; content: string };
 type RuntimeLog = { id: string; timestamp: string; level: "info" | "warn" | "error"; event: string; message: string; details?: string };
 type ShellPlan = { explanation: string; command: string; verifyCommand?: string; risk?: "low" | "medium" | "high" };
 type DiagnosisResult = { label: string; command: string; output: string; success: boolean };
@@ -27,7 +40,7 @@ type AiInterventionMode = "always" | "smart" | "none";
 type ModelConnectionStatus = "unknown" | "connected" | "failed";
 type ManagerServerDetails = { name?: string; host?: string; port?: number; username?: string; password?: string; privateKeyPath?: string };
 
-type ServerProfile = { osName: string; hostname: string; cpuCores: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string };
+type ServerProfile = { osId?: string; osVersion?: string; osName: string; hostname: string; cpuCores: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string };
 type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[] };
 type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean };
 type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; privateKeyPath: string | null; passphrase: string | null; commandId?: string };
@@ -112,7 +125,8 @@ function App() {
   };
 
   const appendConversationLog = (entry: Omit<ConversationLog, "id" | "timestamp" | "sessionId">) => {
-    const nextEntry: ConversationLog = { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), sessionId: sessionIdRef.current, content: redactLogText(entry.content) };
+    const sessionName = entry.sessionName ?? (entry.scope === "terminal" ? `SSH 终端 - ${entry.serverName ?? "未知服务器"}` : "服务器总管");
+    const nextEntry: ConversationLog = { ...entry, sessionName, serverName: entry.scope === "terminal" ? sessionName : entry.serverName, id: crypto.randomUUID(), timestamp: new Date().toISOString(), sessionId: sessionIdRef.current, content: redactLogText(entry.content) };
     const next = [...conversationLogsRef.current, nextEntry];
     conversationLogsRef.current = next;
     setConversationLogs(next);
@@ -135,7 +149,7 @@ function App() {
         const savedLanguage = stored.language ?? (localStorage.getItem(LANGUAGE_STORAGE_KEY) as Locale | null);
         const savedModelConnection = stored.aiConnectionStatus ?? (localStorage.getItem(AI_CONNECTION_STATUS_KEY) as ModelConnectionStatus | null) ?? (savedAi ? "connected" : "unknown");
         const savedLogs = stored.logs ?? [];
-        const restoredConversations = savedConversationLogs.length ? savedConversationLogs : savedLogs.filter((item) => item.type === "manager" && item.role).map((item) => ({ id: item.id, timestamp: item.timestamp, sessionId: "legacy", scope: "manager" as const, role: item.role as ConversationLog["role"], serverId: item.serverId, serverName: item.serverName, content: item.content }));
+        const restoredConversations = (savedConversationLogs.length ? savedConversationLogs : savedLogs.filter((item) => item.type === "manager" && item.role).map((item) => ({ id: item.id, timestamp: item.timestamp, sessionId: "legacy", scope: "manager" as const, role: item.role as ConversationLog["role"], serverId: item.serverId, serverName: item.serverName, content: item.content }))).map(normalizeConversationLog);
         const restoredMessages = restoredConversations.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
         if (cancelled) return;
         const restored = (saved ?? []).map((item) => ({ ...item, latency: undefined, status: "saved" as ServerStatus }));
@@ -170,9 +184,10 @@ function App() {
         setLogs(savedLogs);
         runtimeLogsRef.current = savedRuntimeLogs;
         setRuntimeLogs(savedRuntimeLogs);
-        conversationLogsRef.current = savedConversationLogs;
-        setConversationLogs(savedConversationLogs);
-        const restoredMessages = savedConversationLogs.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
+        const restoredConversations = savedConversationLogs.map(normalizeConversationLog);
+        conversationLogsRef.current = restoredConversations;
+        setConversationLogs(restoredConversations);
+        const restoredMessages = restoredConversations.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
         managerMessageSnapshotRef.current = restoredMessages;
         setManagerMessages(restoredMessages);
         conversationHydratedRef.current = true;
@@ -1143,6 +1158,44 @@ function getLatencyClass(latency: number | undefined) {
   return "bad";
 }
 
+const systemIconMarkup: Record<string, string> = {
+  debian: debianIcon,
+  ubuntu: ubuntuIcon,
+  openwrt: openwrtIcon,
+  alpine: alpineIcon,
+  arch: archIcon,
+  fedora: fedoraIcon,
+  centos: centosIcon,
+  rocky: rockyIcon,
+  alma: almaIcon,
+  nixos: nixosIcon,
+  kali: kaliIcon,
+  gentoo: gentooIcon,
+  linux: linuxIcon,
+};
+
+function getSystemIconKey(profile?: ServerProfile, system?: string) {
+  const value = `${profile?.osId ?? ""} ${profile?.osName ?? ""} ${system ?? ""}`.toLowerCase();
+  if (/istoreos|immortalwrt|openwrt/.test(value)) return "openwrt";
+  if (/debian/.test(value)) return "debian";
+  if (/ubuntu|kubuntu|lubuntu/.test(value)) return "ubuntu";
+  if (/alpine/.test(value)) return "alpine";
+  if (/arch/.test(value)) return "arch";
+  if (/fedora/.test(value)) return "fedora";
+  if (/centos/.test(value)) return "centos";
+  if (/rocky/.test(value)) return "rocky";
+  if (/alma/.test(value)) return "alma";
+  if (/nixos/.test(value)) return "nixos";
+  if (/kali/.test(value)) return "kali";
+  if (/gentoo/.test(value)) return "gentoo";
+  return "linux";
+}
+
+function SystemIcon({ profile, system }: { profile?: ServerProfile; system?: string }) {
+  const iconKey = getSystemIconKey(profile, system);
+  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"} dangerouslySetInnerHTML={{ __html: systemIconMarkup[iconKey] }} />;
+}
+
 function ServerContextMenu({ text, editLabel, state, onConnect, onTerminal, onEdit }: { text: typeof zh; editLabel: string; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onEdit: () => void }) {
   return <div className="server-context-menu" style={{ left: state.x, top: state.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}><strong>{state.server.name}</strong><button onClick={onConnect}>↻ {text.contextConnect}</button><button onClick={onTerminal}>〉 {text.contextTerminal}</button><button onClick={onEdit}>✎ {editLabel}</button></div>;
 }
@@ -1154,7 +1207,7 @@ function ServerDashboard({ servers, text, language, modelStatusClass, modelStatu
       const profile = item.profile;
       const primaryLabel = item.status === "connected" ? (language === "zh-CN" ? "打开 SSH" : "Open SSH") : item.status === "connecting" ? (language === "zh-CN" ? "连接中…" : "Connecting…") : (language === "zh-CN" ? "连接服务器" : "Connect");
       return <article className="dashboard-card" key={item.id} onDoubleClick={() => onOpen(item)}>
-        <div className="dashboard-card-header"><div className="dashboard-card-title"><div className="server-orb">⌁</div><div><h2>{item.name}</h2><p>{item.username}@{item.host}:{item.port}</p></div></div><span className={`connected-badge ${item.status}-badge`}>● {getServerStatusLabel(item.status, language, text)}</span></div>
+         <div className="dashboard-card-header"><div className="dashboard-card-title"><SystemIcon profile={profile} system={item.system} /><div><h2>{item.name}</h2><p>{item.username}@{item.host}:{item.port}</p></div></div><span className={`connected-badge ${item.status}-badge`}>● {getServerStatusLabel(item.status, language, text)}</span></div>
         <div className="dashboard-meta"><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span><span>{profile?.osName ?? item.system}</span></div>
         {profile ? <div className="dashboard-metrics"><div><span>{text.cpu}</span><strong>{profile.cpuCores} {language === "zh-CN" ? "核" : "cores"}</strong></div><div><span>{text.memory}</span><strong>{profile.memory}</strong></div><div><span>{text.disk}</span><strong>{profile.disk}</strong></div><div><span>{text.docker}</span><strong>{profile.dockerInstalled ? text.installedRunning(profile.dockerContainers) : text.notInstalled}</strong></div></div> : <div className="dashboard-unscanned">{language === "zh-CN" ? "连接后可读取服务器资源信息" : "Connect to read server resources"}</div>}
         <div className="dashboard-actions"><button className="primary small-button" onClick={(event) => { event.stopPropagation(); item.status === "connected" ? onOpen(item) : onConnect(item); }} disabled={item.status === "connecting"}>{primaryLabel}</button><button className="text-button" onClick={(event) => { event.stopPropagation(); onEdit(item); }}>{language === "zh-CN" ? "编辑" : "Edit"}</button></div>
@@ -1211,6 +1264,12 @@ function redactLogText(value: string) {
     .replace(/(password|passwd|api[_-]?key|authorization|bearer|token|secret|密码|口令)\s*[:=：]?\s*[^\s,;，；]+/gi, "$1=***")
     .replace(/\b(?:sk|ghp|gsk|xai)-[A-Za-z0-9_-]{12,}\b/g, "***")
     .slice(0, 12000);
+}
+
+function normalizeConversationLog(log: ConversationLog): ConversationLog {
+  if (log.scope !== "terminal") return { ...log, sessionName: log.sessionName ?? "服务器总管" };
+  const sessionName = log.sessionName ?? (log.serverName?.startsWith("SSH 终端 - ") ? log.serverName : `SSH 终端 - ${log.serverName ?? "未知服务器"}`);
+  return { ...log, sessionName, serverName: sessionName };
 }
 
 function normalizeBaseUrl(value: string) { return value.trim().replace(/\/+$/, ""); }
