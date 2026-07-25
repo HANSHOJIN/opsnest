@@ -70,6 +70,7 @@ function App() {
   const [servers, setServers] = useState<Server[]>([]);
   const [server, setServer] = useState<Server | null>(null);
   const [form, setForm] = useState<ServerForm>(initialForm);
+  const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const [aiConfig, setAiConfig] = useState<AiConfig>(defaultAiConfig);
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("shell");
   const [terminalInput, setTerminalInput] = useState("");
@@ -244,11 +245,19 @@ function App() {
   const updateAi = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => { setAiConfig((current) => ({ ...current, [key]: value })); setModelConnection("unknown"); setModelStatus(""); setError(""); };
   const changeLanguage = (next: Locale) => { setLanguage(next); localStorage.setItem(LANGUAGE_STORAGE_KEY, next); persistData(servers, aiConfig, next, modelConnection); };
   const openWizard = () => {
+    setEditingServerId(null);
     const savedForm = server?.status === "saved" ? { ...initialForm, name: server.name, host: server.host, port: String(server.port), username: server.username, note: server.note ?? "" } : initialForm;
     setForm(savedForm); setError(""); setWizardOpen(true);
   };
-  const editServer = (selected: Server) => {
-    setContextMenu(null); setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username, note: selected.note ?? "" }); setView("hosts"); setError(""); setWizardOpen(true);
+  const editServer = async (selected: Server) => {
+    setContextMenu(null); setServer(selected); setEditingServerId(selected.id); setView("hosts"); setError("");
+    let credential: SshRequest | null = activeCredentials.current[selected.id] ?? null;
+    if (!credential) {
+      try { credential = await invoke<SshRequest | null>("load_server_credential", { serverId: selected.id }); } catch { credential = null; }
+      if (credential) activeCredentials.current[selected.id] = credential;
+    }
+    setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username, note: selected.note ?? "", authMethod: credential?.authMethod ?? "password", privateKeyPath: credential?.privateKeyPath ?? "" });
+    setWizardOpen(true);
   };
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
@@ -278,8 +287,11 @@ function App() {
     }
     try {
       const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
-      appendRuntimeLog({ level: "info", event: "ssh.connection.success", message: "SSH connection succeeded.", details: `${form.host.trim()}:${form.port}` });
-      const connectedServer = { ...selected, system: result.system, latency: result.latencyMs, status: "connected" as ServerStatus };
+      appendRuntimeLog({ level: "info", event: "ssh.connection.success", message: "SSH connection succeeded.", details: `${selected.host}:${selected.port}` });
+      let profile: ServerProfile | undefined;
+      try { profile = await invoke<ServerProfile>("inspect_server", { request }); }
+      catch (inspectError) { appendRuntimeLog({ level: "warn", event: "ssh.inspect.failed", message: "SSH reconnected, but server profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) }); }
+      const connectedServer = { ...selected, system: profile?.osName ?? result.system, latency: result.latencyMs, status: "connected" as ServerStatus, profile };
       setServer(connectedServer);
       setServers((current) => current.map((item) => item.id === selected.id ? connectedServer : item));
       persistData(servers.map((item) => item.id === selected.id ? connectedServer : item));
@@ -976,13 +988,28 @@ function App() {
     if (!form.host.trim()) return setError(text.missingHost);
     if (!form.username.trim()) return setError(text.missingUser);
     if (!/^[1-9]\d{0,4}$/.test(form.port) || Number(form.port) > 65535) return setError(text.invalidPort);
-    if (form.authMethod === "password" && !form.password) return setError(text.missingPassword);
-    if (form.authMethod === "privateKey" && !form.privateKeyPath.trim()) return setError(text.missingKey);
+    if (!editingServerId && form.authMethod === "password" && !form.password) return setError(text.missingPassword);
+    if (!editingServerId && form.authMethod === "privateKey" && !form.privateKeyPath.trim()) return setError(text.missingKey);
     setConnecting(true); setError("");
     try {
-      const request = requestForForm();
+      const editingTarget = editingServerId ? servers.find((item) => item.id === editingServerId) : undefined;
+      let request = requestForForm();
+      if (editingTarget) {
+        const savedCredential = await getCredential(editingTarget);
+        if (!savedCredential) return setError(text.noCredentials);
+        if (savedCredential.authMethod !== form.authMethod && !(form.password.trim() || form.privateKeyPath.trim())) return setError(text.noCredentials);
+        request = {
+          ...request,
+          password: request.password || savedCredential.password,
+          privateKeyPath: request.privateKeyPath || savedCredential.privateKeyPath,
+          passphrase: request.passphrase || savedCredential.passphrase,
+        };
+      }
       const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
-      const nextServer: Server = { id: `${form.host.trim()}:${Number(form.port)}`, name: form.name.trim() || form.host.trim(), host: form.host.trim(), port: Number(form.port), username: form.username.trim(), system: result.system, latency: result.latencyMs, status: "connected" };
+      let profile: ServerProfile | undefined;
+      try { profile = await invoke<ServerProfile>("inspect_server", { request }); }
+      catch (inspectError) { appendRuntimeLog({ level: "warn", event: "ssh.inspect.failed", message: "SSH connected, but server profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) }); }
+      const nextServer: Server = { id: `${form.host.trim()}:${Number(form.port)}`, name: form.name.trim() || form.host.trim(), host: form.host.trim(), port: Number(form.port), username: form.username.trim(), system: profile?.osName ?? result.system, latency: result.latencyMs, status: "connected", profile, note: form.note.trim() || undefined };
       activeCredentials.current[nextServer.id] = request;
       try {
         if (form.rememberCredentials) await invoke("save_server_credential", { serverId: nextServer.id, credential: request });
@@ -990,8 +1017,12 @@ function App() {
       } catch {
         setError(language === "zh-CN" ? "连接成功，但 Windows 安全凭据保存失败。" : "Connected, but Windows could not save the credential.");
       }
-      const next = [{ ...nextServer, note: form.note.trim() || undefined }, ...servers.filter((item) => item.id !== nextServer.id)];
-      persistServers(next); setServer(nextServer); setWizardOpen(false); setView("hosts");
+      if (editingTarget && editingTarget.id !== nextServer.id) {
+        await invoke("delete_server_credential", { serverId: editingTarget.id }).catch(() => undefined);
+        delete activeCredentials.current[editingTarget.id];
+      }
+      const next = [nextServer, ...servers.filter((item) => item.id !== nextServer.id && item.id !== editingTarget?.id)];
+      persistServers(next); setServer(nextServer); setEditingServerId(null); setWizardOpen(false); setView("hosts");
     } catch (connectionError) { appendRuntimeLog({ level: "error", event: "ssh.connection.failed", message: "SSH connection failed.", details: connectionError instanceof Error ? connectionError.message : String(connectionError) }); setError(connectionError instanceof Error ? connectionError.message : typeof connectionError === "string" ? connectionError : text.connectionFailed); }
     finally { setConnecting(false); }
   };

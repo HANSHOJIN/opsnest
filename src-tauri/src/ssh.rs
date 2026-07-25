@@ -183,11 +183,24 @@ fn value_for(output: &str, key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+const SYSTEM_INFO_COMMAND: &str = r#"os_name=""
+if [ -r /etc/os-release ]; then
+  os_name=$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null)
+  if [ -z "$os_name" ]; then os_name=$(awk -F= '/^NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null); fi
+fi
+if [ -z "$os_name" ] && [ -r /etc/openwrt_release ]; then
+  os_name=$(awk -F= '/^DISTRIB_DESCRIPTION=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/openwrt_release 2>/dev/null)
+  if [ -z "$os_name" ]; then os_name=$(awk -F= '/^DISTRIB_ID=/{gsub(/^"|"$/, "", $2); id=$2} /^DISTRIB_RELEASE=/{gsub(/^"|"$/, "", $2); release=$2} END {if (id != "") print id " " release}' /etc/openwrt_release 2>/dev/null); fi
+fi
+if [ -z "$os_name" ]; then os_name=$(uname -srm 2>/dev/null); fi
+printf '%s\n' "${os_name:-Linux}"
+"#;
+
 #[tauri::command]
 pub async fn test_ssh_connection(request: SshTestRequest) -> Result<SshTestResponse, String> {
     let latency_ms = measure_tcp_latency(&request).await?;
     let session = connect_session(&request).await?;
-    let output = run_command(&session, "uname -srm", None).await?;
+    let output = run_command(&session, SYSTEM_INFO_COMMAND, None).await?;
     close_session(session).await;
     let system = output.trim().chars().take(120).collect::<String>();
     Ok(SshTestResponse {
@@ -203,15 +216,15 @@ pub async fn test_ssh_connection(request: SshTestRequest) -> Result<SshTestRespo
 #[tauri::command]
 pub async fn inspect_server(request: SshTestRequest) -> Result<ServerProfile, String> {
     let session = connect_session(&request).await?;
-    let command = r#"
-printf 'OPSNEST_OS='; (grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"') || uname -s
+    let command = format!(r#"
+printf 'OPSNEST_OS='; {SYSTEM_INFO_COMMAND}
 printf '\nOPSNEST_HOSTNAME='; hostname 2>/dev/null || printf 'unknown'
 printf '\nOPSNEST_CPU='; nproc 2>/dev/null || printf 'unknown'
-printf '\nOPSNEST_MEMORY='; awk '/MemTotal/ {printf "%.1f GB", $2/1024/1024}' /proc/meminfo 2>/dev/null || printf 'unknown'
-printf '\nOPSNEST_DISK='; df -h / 2>/dev/null | awk 'NR==2 {print $4 " free of " $2}'
+printf '\nOPSNEST_MEMORY='; awk '/MemTotal/ {{printf "%.1f GB", $2/1024/1024}}' /proc/meminfo 2>/dev/null || printf 'unknown'
+printf '\nOPSNEST_DISK='; df -h / 2>/dev/null | awk 'NR==2 {{print $4 " free of " $2}}'
 if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; printf '\nOPSNEST_CONTAINERS='; docker ps -q 2>/dev/null | wc -l; else printf '\nOPSNEST_DOCKER=missing'; printf '\nOPSNEST_CONTAINERS=0'; fi
-"#;
-    let output = run_command(&session, command, None).await?;
+"#);
+    let output = run_command(&session, &command, None).await?;
     close_session(session).await;
     let docker_installed = value_for(&output, "OPSNEST_DOCKER=", "missing") == "installed";
     Ok(ServerProfile {
