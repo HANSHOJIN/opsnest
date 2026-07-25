@@ -1,7 +1,7 @@
-use russh::{client, keys, ChannelMsg, Disconnect};
+use russh::{client, keys, ChannelMsg, Disconnect, Sig};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::{Arc, Mutex, OnceLock}, time::{Duration, Instant}};
-use tokio::sync::oneshot;
+use std::{collections::HashMap, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,12 +15,20 @@ pub struct SshTestRequest {
     pub passphrase: Option<String>,
     #[serde(default)]
     pub command_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 static COMMAND_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
+static PERSISTENT_SHELLS: OnceLock<Mutex<HashMap<String, Arc<PersistentShell>>>> = OnceLock::new();
+static SHELL_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn command_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
     COMMAND_CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn persistent_shells() -> &'static Mutex<HashMap<String, Arc<PersistentShell>>> {
+    PERSISTENT_SHELLS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Serialize)]
@@ -185,7 +193,142 @@ async fn run_command(
     Ok(String::from_utf8_lossy(&output).into_owned())
 }
 
-async fn close_session(session: client::Handle<OpsNestHandler>) {
+struct PersistentShell {
+    session: client::Handle<OpsNestHandler>,
+    writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
+    output: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
+    command_lock: tokio::sync::Mutex<()>,
+}
+
+async fn create_persistent_shell(request: &SshTestRequest) -> Result<Arc<PersistentShell>, String> {
+    let session = connect_session(request).await?;
+    let channel = session
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("已登录，但无法打开持久 SSH 会话：{error}"))?;
+    let (mut reader, writer) = channel.split();
+    writer
+        .request_shell(true)
+        .await
+        .map_err(|error| format!("无法启动远程 Shell：{error}"))?;
+
+    let (output_sender, output_receiver) = mpsc::channel::<Vec<u8>>(256);
+    tokio::spawn(async move {
+        while let Some(message) = reader.wait().await {
+            let bytes = match message {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => data.to_vec(),
+                ChannelMsg::Close => break,
+                _ => continue,
+            };
+            if output_sender.send(bytes).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    Ok(Arc::new(PersistentShell {
+        session,
+        writer: tokio::sync::Mutex::new(writer),
+        output: tokio::sync::Mutex::new(output_receiver),
+        command_lock: tokio::sync::Mutex::new(()),
+    }))
+}
+
+async fn persistent_shell_for(request: &SshTestRequest, session_id: &str) -> Result<Arc<PersistentShell>, String> {
+    if let Some(shell) = persistent_shells().lock().map_err(|_| "无法读取 SSH 会话表".to_string())?.get(session_id).cloned() {
+        return Ok(shell);
+    }
+    let shell = create_persistent_shell(request).await?;
+    persistent_shells()
+        .lock()
+        .map_err(|_| "无法保存 SSH 会话".to_string())?
+        .insert(session_id.to_string(), shell.clone());
+    Ok(shell)
+}
+
+async fn receive_shell_output(shell: &PersistentShell) -> Option<Vec<u8>> {
+    shell.output.lock().await.recv().await
+}
+
+async fn clear_pending_shell_output(shell: &PersistentShell) -> Result<(), String> {
+    let mut output = shell.output.lock().await;
+    loop {
+        match output.try_recv() {
+            Ok(_) => continue,
+            Err(mpsc::error::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Err("SSH Shell 已断开".into()),
+        }
+    }
+}
+
+async fn interrupt_persistent_shell(shell: &PersistentShell) {
+    let writer = shell.writer.lock().await;
+    let _ = writer.data_bytes(vec![3]).await;
+    let _ = writer.signal(Sig::INT).await;
+}
+
+async fn run_persistent_command(
+    shell: &PersistentShell,
+    command: &str,
+    mut cancellation: Option<oneshot::Receiver<()>>,
+) -> Result<String, String> {
+    let _command_guard = shell.command_lock.lock().await;
+    clear_pending_shell_output(shell).await?;
+
+    let marker_id = SHELL_COMMAND_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let marker = format!("__OPSNEST_COMMAND_END_{marker_id}__");
+    let script = format!("{command}\nprintf '\\n{marker}\\n'\n");
+    shell
+        .writer
+        .lock()
+        .await
+        .data_bytes(script)
+        .await
+        .map_err(|error| format!("无法向远程 Shell 写入命令：{error}"))?;
+
+    let mut output = Vec::new();
+    let mut cancelled = false;
+    loop {
+        let chunk = if cancelled {
+            receive_shell_output(shell).await
+        } else {
+            match cancellation.as_mut() {
+                Some(receiver) => tokio::select! {
+                    _ = receiver => {
+                        cancelled = true;
+                        interrupt_persistent_shell(shell).await;
+                        continue;
+                    }
+                    chunk = receive_shell_output(shell) => chunk,
+                },
+                None => receive_shell_output(shell).await,
+            }
+        };
+        let Some(chunk) = chunk else { return Err("SSH Shell 已断开".into()); };
+        output.extend_from_slice(&chunk);
+        let text = String::from_utf8_lossy(&output);
+        if let Some(marker_position) = text.find(&marker) {
+            let result = text[..marker_position]
+                .trim_matches(['\r', '\n'])
+                .to_string();
+            return if cancelled { Err("命令已停止".into()) } else { Ok(result) };
+        }
+    }
+}
+
+async fn close_persistent_shell(session_id: &str) -> Result<(), String> {
+    let shell = persistent_shells()
+        .lock()
+        .map_err(|_| "无法读取 SSH 会话表".to_string())?
+        .remove(session_id);
+    if let Some(shell) = shell {
+        let _ = shell.writer.lock().await.close().await;
+        close_session(&shell.session).await;
+    }
+    Ok(())
+}
+
+async fn close_session(session: &client::Handle<OpsNestHandler>) {
     let _ = session
         .disconnect(Disconnect::ByApplication, "", "English")
         .await;
@@ -205,8 +348,21 @@ fn shell_quote(value: &str) -> String {
 
 fn cron_line_parts(line: &str, system: bool) -> Option<(String, String, String)> {
     let mut rest = line.trim();
-    if rest.is_empty() || rest.starts_with('#') || rest.starts_with('@') || rest.starts_with("SHELL=") || rest.starts_with("PATH=") || rest.starts_with("MAILTO=") {
+    if rest.is_empty() || rest.starts_with('#') || rest.starts_with("SHELL=") || rest.starts_with("PATH=") || rest.starts_with("MAILTO=") {
         return None;
+    }
+    if rest.starts_with('@') {
+        let mut fields = rest.splitn(3, char::is_whitespace);
+        let schedule = fields.next()?.to_string();
+        let (user, command) = if system {
+            (fields.next()?.to_string(), fields.next()?.trim().to_string())
+        } else {
+            (String::new(), rest.split_once(char::is_whitespace)?.1.trim().to_string())
+        };
+        if command.is_empty() {
+            return None;
+        }
+        return Some((schedule, user, command));
     }
     let field_count = if system { 6 } else { 5 };
     let mut fields = Vec::new();
@@ -276,7 +432,7 @@ fn parse_cron_output(output: &str, username: &str) -> Vec<CronTask> {
     tasks
 }
 
-const CRON_LIST_COMMAND: &str = r#"printf 'OPSNEST_USER_CRON_BEGIN\n'; crontab -l 2>/dev/null || true; printf '\nOPSNEST_USER_CRON_END\n'; printf 'OPSNEST_SYSTEM_CRON_BEGIN\n'; if [ -r /etc/crontab ]; then cat /etc/crontab; fi; for file in /etc/cron.d/*; do if [ -f "$file" ]; then printf 'OPSNEST_FILE=%s\n' "$file"; cat "$file"; fi; done; printf 'OPSNEST_SYSTEM_CRON_END\n'; printf 'OPSNEST_TIMERS_BEGIN\n'; systemctl list-timers --all --no-legend --no-pager 2>/dev/null || true; printf 'OPSNEST_TIMERS_END\n'"#;
+const CRON_LIST_COMMAND: &str = r#"printf 'OPSNEST_USER_NAME='; id -un 2>/dev/null || printf 'unknown'; printf '\nOPSNEST_USER_CRON_BEGIN\n'; user_cron=$(crontab -l 2>/dev/null || true); if [ -n "$user_cron" ]; then printf '%s\n' "$user_cron"; else printf 'OPSNEST_USER_CRON_EMPTY\n'; fi; printf 'OPSNEST_USER_CRON_END\n'; printf 'OPSNEST_SYSTEM_CRON_BEGIN\n'; if [ -r /etc/crontab ]; then cat /etc/crontab; fi; for file in /etc/cron.d/*; do if [ -f "$file" ]; then printf 'OPSNEST_FILE=%s\n' "$file"; cat "$file"; fi; done; printf 'OPSNEST_SYSTEM_CRON_END\n'; printf 'OPSNEST_TIMERS_BEGIN\n'; systemctl list-timers --all --no-legend --no-pager 2>/dev/null || true; printf 'OPSNEST_TIMERS_END\n'"#;
 
 const SYSTEM_INFO_COMMAND: &str = r#"os_name=""
 if [ -r /etc/os-release ]; then
@@ -296,7 +452,7 @@ pub async fn test_ssh_connection(request: SshTestRequest) -> Result<SshTestRespo
     let latency_ms = measure_tcp_latency(&request).await?;
     let session = connect_session(&request).await?;
     let output = run_command(&session, SYSTEM_INFO_COMMAND, None).await?;
-    close_session(session).await;
+    close_session(&session).await;
     let system = output.trim().chars().take(120).collect::<String>();
     Ok(SshTestResponse {
         system: if system.is_empty() {
@@ -322,7 +478,7 @@ printf '\nOPSNEST_DISK='; df -h / 2>/dev/null | awk 'NR==2 {{print $4 " free of 
 if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; printf '\nOPSNEST_CONTAINERS='; docker ps -q 2>/dev/null | wc -l; else printf '\nOPSNEST_DOCKER=missing'; printf '\nOPSNEST_CONTAINERS=0'; fi
 "#);
     let output = run_command(&session, &command, None).await?;
-    close_session(session).await;
+    close_session(&session).await;
     let docker_installed = value_for(&output, "OPSNEST_DOCKER=", "missing") == "installed";
     Ok(ServerProfile {
         os_id: value_for(&output, "OPSNEST_OS_ID=", "linux").to_lowercase(),
@@ -366,7 +522,7 @@ fn cron_mutation_script(id: &str, name: &str, schedule: &str, command: &str, ena
 pub async fn list_server_cron(request: SshTestRequest) -> Result<Vec<CronTask>, String> {
     let session = connect_session(&request).await?;
     let output = run_command(&session, CRON_LIST_COMMAND, None).await?;
-    close_session(session).await;
+    close_session(&session).await;
     Ok(parse_cron_output(&output, request.username.trim()))
 }
 
@@ -382,7 +538,7 @@ pub async fn save_server_cron(request: SshTestRequest, id: String, name: String,
     let session = connect_session(&request).await?;
     let script = cron_mutation_script(&id, &name, &schedule, &command, enabled, false);
     let result = run_command(&session, &script, None).await;
-    close_session(session).await;
+    close_session(&session).await;
     result.map(|_| ())
 }
 
@@ -395,7 +551,7 @@ pub async fn delete_server_cron(request: SshTestRequest, id: String) -> Result<(
     let session = connect_session(&request).await?;
     let script = cron_mutation_script(&id, "", "", "", false, true);
     let result = run_command(&session, &script, None).await;
-    close_session(session).await;
+    close_session(&session).await;
     result.map(|_| ())
 }
 
@@ -452,7 +608,7 @@ pub async fn diagnose_server(request: SshTestRequest, focus: String) -> Result<V
             Err(error) => results.push(DiagnosisResult { label: label.to_string(), command: command.to_string(), output: error, success: false }),
         }
     }
-    close_session(session).await;
+    close_session(&session).await;
     Ok(results)
 }
 
@@ -468,7 +624,6 @@ pub async fn execute_ssh_command(
     if command.len() > 8_000 {
         return Err("命令太长，请分次执行。".into());
     }
-    let session = connect_session(&request).await?;
     let (cancellation, command_id) = if let Some(command_id) = request.command_id.clone().filter(|value| !value.trim().is_empty()) {
         let (sender, receiver) = oneshot::channel();
         command_cancellations().lock().map_err(|_| "无法创建命令控制器".to_string())?.insert(command_id.clone(), sender);
@@ -476,12 +631,28 @@ pub async fn execute_ssh_command(
     } else {
         (None, None)
     };
-    let result = run_command(&session, command, cancellation).await;
+    let result = if let Some(session_id) = request.session_id.as_deref().filter(|value| !value.trim().is_empty()) {
+        let shell = persistent_shell_for(&request, session_id).await?;
+        run_persistent_command(&shell, command, cancellation).await
+    } else {
+        let session = connect_session(&request).await?;
+        let result = run_command(&session, command, cancellation).await;
+        close_session(&session).await;
+        result
+    };
     if let Some(command_id) = command_id {
         if let Ok(mut commands) = command_cancellations().lock() { commands.remove(&command_id); }
     }
-    close_session(session).await;
     result
+}
+
+#[tauri::command]
+pub async fn close_ssh_shell(session_id: String) -> Result<(), String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    close_persistent_shell(session_id).await
 }
 
 #[tauri::command]
@@ -506,6 +677,18 @@ mod tests {
         assert!(tasks[0].editable);
         assert_eq!(tasks[1].source, "系统 Cron");
         assert_eq!(tasks[1].user, "root");
+    }
+
+    #[test]
+    fn parses_user_crontab_and_special_schedules() {
+        let output = "OPSNEST_USER_NAME=root\nOPSNEST_USER_CRON_BEGIN\n0 * * * * /usr/local/bin/sd-server\n@reboot /usr/local/bin/autssh\nOPSNEST_USER_CRON_END\nOPSNEST_SYSTEM_CRON_BEGIN\n@daily root /usr/local/bin/system-job\nOPSNEST_SYSTEM_CRON_END\nOPSNEST_TIMERS_BEGIN\nOPSNEST_TIMERS_END\n";
+        let tasks = parse_cron_output(output, "root");
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].command, "/usr/local/bin/sd-server");
+        assert_eq!(tasks[1].schedule, "@reboot");
+        assert_eq!(tasks[1].command, "/usr/local/bin/autssh");
+        assert_eq!(tasks[2].schedule, "@daily");
+        assert_eq!(tasks[2].user, "root");
     }
 
     #[test]
