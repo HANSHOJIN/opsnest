@@ -16,7 +16,7 @@ type ShellPlan = { explanation: string; command: string; verifyCommand?: string;
 type DiagnosisResult = { label: string; command: string; output: string; success: boolean };
 type AgentStepId = "context" | "memory" | "search" | "explore" | "diagnose" | "plan" | "approval" | "execute" | "verify" | "remember";
 type AgentStep = { id: AgentStepId; label: string; status: "pending" | "running" | "completed" | "failed" | "blocked"; detail?: string };
-type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; result?: string; error?: string };
+type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; result?: string; error?: string; attempt?: number };
 type ServerMemory = { id: string; createdAt: string; summary: string };
 type WebSearchResult = { title: string; url: string; snippet: string };
 type ActivityLog = { id: string; timestamp: string; type: "manager" | "terminal" | "agent" | "system"; role?: ManagerMessage["role"]; serverId?: string; serverName?: string; title: string; content: string; status?: "success" | "failed" | "cancelled" | "info" };
@@ -73,6 +73,7 @@ function App() {
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("shell");
   const [terminalInput, setTerminalInput] = useState("");
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
+  const [terminalAgentStatus, setTerminalAgentStatus] = useState("");
   const [isExecuting, setExecuting] = useState(false);
   const [managerInput, setManagerInput] = useState("");
   const [managerMessages, setManagerMessages] = useState<ManagerMessage[]>([]);
@@ -251,7 +252,7 @@ function App() {
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
     if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username }); setView("hosts"); setError(""); setWizardOpen(true); return; }
-    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current)); setView("terminal"); setError("");
+    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus(""); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current)); setView("terminal"); setError("");
   };
 
   const connectSavedServer = async (selected: Server) => {
@@ -642,14 +643,56 @@ function App() {
       return;
     }
     patchTerminalAgentRun({ phase: "executing" });
+    setTerminalAgentStatus(language === "zh-CN" ? "AI 正在输入并执行命令…" : "AI is entering and executing the command…");
     patchTerminalAgentStep("approval", "completed", "Approved by the local read-only policy or by the user.");
     patchTerminalAgentStep("execute", "running", "Executing through the local SSH gateway.");
+    let handedOff = false;
     try {
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待命令结果…" : "AI is waiting for the command result…");
       const output = await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.command });
-      setTerminalLines((lines) => [...lines, { kind: "command", text: run.plan!.command }, { kind: "output", text: output || "(no output)" }]);
-      appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan.command}\n\n${output || "(no output)"}` });
-      appendLog({ type: "terminal", title: "AgentRun output", serverId: target.id, serverName: target.name, content: `${run.task}\n\n$ ${run.plan.command}\n\n${output || "(no output)"}`, status: "success" });
+      const outputText = output || "(no output)";
+      setTerminalLines((lines) => [...lines, { kind: "command", text: run.plan!.command }, { kind: "output", text: outputText }]);
+      appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan.command}\n\n${outputText}` });
+      appendLog({ type: "terminal", title: "AgentRun output", serverId: target.id, serverName: target.name, content: `${run.task}\n\n$ ${run.plan.command}\n\n${outputText}`, status: "success" });
+
+      if (isRecoverableAgentFailure(outputText) && (run.attempt ?? 0) < 2) {
+        patchTerminalAgentStep("execute", "failed", "The command returned an error; the Agent is diagnosing it instead of stopping.");
+        patchTerminalAgentStep("diagnose", "running", "Reading the failed command and checking the actual environment.");
+        setTerminalLines((lines) => [...lines, { kind: "ai", text: language === "zh-CN" ? "命令没有成功，AI 正在读取错误并继续排查…" : "The command did not succeed. AI is reading the error and continuing the diagnosis…" }]);
+        setTerminalAgentStatus(language === "zh-CN" ? "AI 正在分析错误并重新规划…" : "AI is analyzing the error and replanning…");
+        const recoveryContext = target.profile ? `OS=${target.profile.osName}; hostname=${target.profile.hostname}; CPU=${target.profile.cpuCores}; memory=${target.profile.memory}; disk=${target.profile.disk}; Docker=${target.profile.dockerInstalled ? `${target.profile.dockerContainers} running` : "not installed"}` : `OS=${target.system}; profile not scanned`;
+        const recoveryMemory = (target.memory ?? []).slice(-5).map((note) => note.summary).join("\n") || "No saved memory yet.";
+        const recoveryConversation = conversationLogsRef.current.filter((item) => item.scope === "terminal" && item.serverId === target.id).slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous terminal conversation for this server.";
+        const recoveryPlan = await askAgentRecoveryPlan(aiConfig, run.task, run.plan.command, outputText, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${recoveryContext}`, recoveryMemory, recoveryConversation);
+        if (recoveryPlan.command.trim() === run.plan.command.trim()) throw new Error(language === "zh-CN" ? "Agent 重复了刚才失败的命令，已停止自动重试。" : "The Agent repeated the failed command, so automatic retry was stopped.");
+        patchTerminalAgentStep("diagnose", "completed", "The failed result was passed back to the Agent.");
+        const retryRun: AgentRun = { ...run, attempt: (run.attempt ?? 0) + 1, plan: recoveryPlan, phase: "waiting_approval", steps: run.steps.map((step) => {
+          if (step.id === "diagnose") return { ...step, status: "completed", detail: "The failed result was passed back to the Agent." };
+          if (step.id === "plan") return { ...step, status: "completed", detail: recoveryPlan.explanation };
+          if (step.id === "approval") return { ...step, status: "running", detail: "Waiting for approval for the recovery command." };
+          if (step.id === "execute") return { ...step, status: "pending", detail: "Recovery command ready." };
+          if (step.id === "verify") return { ...step, status: "pending", detail: undefined };
+          return step;
+        }) };
+        setTerminalAgentRun(retryRun);
+        setTerminalLines((lines) => [...lines, { kind: "ai", text: recoveryPlan.explanation }, { kind: "command", text: recoveryPlan.command }]);
+        appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `继续排查：${recoveryPlan.explanation}\n\n$ ${recoveryPlan.command}\n\nVerify: ${recoveryPlan.verifyCommand || "not specified"}` });
+        if (isReadOnlyPlan(recoveryPlan.command, recoveryPlan.risk)) {
+          setTerminalAgentStatus(language === "zh-CN" ? "AI 正在输入恢复命令…" : "AI is entering the recovery command…");
+          const automaticRetry: AgentRun = { ...retryRun, phase: "executing", steps: retryRun.steps.map((step) => step.id === "approval" ? { ...step, status: "completed", detail: "Recovery read-only command auto-approved." } : step) };
+          handedOff = true;
+          await executeTerminalAgentRun(automaticRetry);
+        } else {
+          setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待恢复方案批准…" : "AI is waiting for approval of the recovery plan…");
+          setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "等待批准：输入 approve 或 批准 执行恢复方案；输入 cancel 或 取消 放弃。" : "Approval required: type approve to execute the recovery plan, or cancel to discard it." }]);
+          setExecuting(false);
+          handedOff = true;
+        }
+        return;
+      }
+
       patchTerminalAgentStep("execute", "completed", "Command completed.");
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在验证结果…" : "AI is verifying the result…");
       patchTerminalAgentStep("verify", "running", "Checking the requested result.");
       let verification = "";
       if (run.plan.verifyCommand?.trim()) {
@@ -658,25 +701,33 @@ function App() {
         appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan!.verifyCommand}\n\n${verification || "(no output)"}` });
       }
       patchTerminalAgentStep("verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在总结结果…" : "AI is summarizing the result…");
+      const summary = await summarizeAgentResult(aiConfig, run.task, run.plan.command, outputText, verification, language);
+      setTerminalLines((lines) => [...lines, { kind: "ai", text: summary }]);
+      appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AI 总结：${summary}` });
       patchTerminalAgentStep("remember", "running", "Saving a concise result note locally.");
       const completedAt = new Date().toISOString();
-      const nextServer = { ...target, memory: [...(target.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${run.task}: ${run.plan?.explanation ?? "task completed"}. Execution and verification finished.` }].slice(-20) };
+      const nextServer = { ...target, memory: [...(target.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${run.task}: ${summary}` }].slice(-20) };
       const nextServers = servers.map((item) => item.id === target.id ? nextServer : item);
       persistServers(nextServers);
       setServer(nextServer);
       patchTerminalAgentStep("remember", "completed", "Result summary saved locally.");
-      patchTerminalAgentRun({ phase: "completed", result: `${output || "(no output)"}${verification ? `\n\n${verification}` : ""}` });
-      appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AgentRun completed.\n\n${output || "(no output)"}${verification ? `\n\nVerification:\n${verification}` : ""}` });
+      patchTerminalAgentRun({ phase: "completed", result: summary });
+      appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AgentRun completed.\n\n${summary}` });
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 已完成并保存记忆" : "AI completed and saved memory");
     } catch (agentError) {
       const message = agentError instanceof Error ? agentError.message : String(agentError);
       patchTerminalAgentRun({ phase: "failed", error: message });
       patchTerminalAgentStep("execute", "failed", message);
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 处理失败" : "AI task failed");
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${message}` }]);
       appendRuntimeLog({ level: "error", event: "agent.terminal.failed", message: "Terminal AgentRun failed.", details: `${target.name} · ${message}` });
       appendLog({ type: "agent", title: "Terminal AgentRun failed", serverId: target.id, serverName: target.name, content: `${run.task}\n${message}`, status: "failed" });
     } finally {
-      activeCommandId.current = null;
-      setExecuting(false);
+      if (!handedOff) {
+        activeCommandId.current = null;
+        setExecuting(false);
+      }
     }
   };
 
@@ -695,23 +746,27 @@ function App() {
     setTerminalAgentRun(run);
     appendLog({ type: "agent", title: "Terminal AgentRun request", serverId: target.id, serverName: target.name, content: task, status: "info" });
     appendConversationLog({ scope: "terminal", role: "user", serverId: target.id, serverName: target.name, content: task });
-    setTerminalLines((lines) => [...lines, { kind: "system", text: "AgentRun · context → memory → explore → diagnose → plan" }]);
+    setTerminalAgentStatus(language === "zh-CN" ? "AI 正在理解请求…" : "AI is understanding the request…");
     try {
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在理解这台服务器…" : "AI is understanding this server…");
       patchTerminalAgentStep("context", "running", "Locking the current server as the only target.");
       const context = target.profile ? `OS=${target.profile.osName}; hostname=${target.profile.hostname}; CPU=${target.profile.cpuCores}; memory=${target.profile.memory}; disk=${target.profile.disk}; Docker=${target.profile.dockerInstalled ? `${target.profile.dockerContainers} running` : "not installed"}` : `OS=${target.system}; profile not scanned`;
       patchTerminalAgentStep("context", "completed", "Current server locked.");
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在读取服务器记忆…" : "AI is reading server memory…");
       patchTerminalAgentStep("memory", "running", "Reading saved server notes.");
       const memory = (target.memory ?? []).slice(-5).map((note) => note.summary).join("\n") || "No saved memory yet.";
       patchTerminalAgentStep("memory", "completed", memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded.");
 
       const needsSearch = /联网|搜索|最新|官方|文档|版本|发布|release|latest|documentation|search/i.test(task);
       let webResults: WebSearchResult[] = [];
+      setTerminalAgentStatus(needsSearch ? (language === "zh-CN" ? "AI 正在调用联网搜索…" : "AI is calling web search…") : (language === "zh-CN" ? "AI 正在探索服务器环境…" : "AI is exploring the server environment…"));
       patchTerminalAgentStep("search", "running", needsSearch ? "Searching reference material." : "Not needed for this request.");
       if (needsSearch) {
         try { webResults = await invoke<WebSearchResult[]>("search_web", { request: { query: task } }); } catch (searchError) { appendRuntimeLog({ level: "warn", event: "agent.search.failed", message: "Web search skipped because it failed.", details: searchError instanceof Error ? searchError.message : String(searchError) }); }
       }
       patchTerminalAgentStep("search", "completed", needsSearch ? `${webResults.length} reference result${webResults.length === 1 ? "" : "s"} found.` : "Skipped.");
 
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在调用服务器工具…" : "AI is calling server tools…");
       patchTerminalAgentStep("explore", "running", "Reading the current environment before planning.");
       let exploredServer = target;
       try {
@@ -725,6 +780,7 @@ function App() {
       }
       patchTerminalAgentStep("explore", "completed", "Environment read without changing files or services.");
 
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在诊断问题…" : "AI is diagnosing the request…");
       patchTerminalAgentStep("diagnose", "running", "Running built-in read-only checks before planning.");
       let diagnosis: DiagnosisResult[] = [];
       try { diagnosis = await invoke<DiagnosisResult[]>("diagnose_server", { request, focus: task }); } catch (diagnosisError) { appendRuntimeLog({ level: "warn", event: "agent.diagnose.failed", message: "Read-only diagnosis failed; continuing with available context.", details: diagnosisError instanceof Error ? diagnosisError.message : String(diagnosisError) }); }
@@ -733,6 +789,7 @@ function App() {
       const searchContext = webResults.length ? webResults.map((item) => `${item.title}: ${item.url}\n${item.snippet}`).join("\n") : "No web references.";
       const refreshedContext = exploredServer.profile ? `OS=${exploredServer.profile.osName}; hostname=${exploredServer.profile.hostname}; CPU=${exploredServer.profile.cpuCores}; memory=${exploredServer.profile.memory}; disk=${exploredServer.profile.disk}; Docker=${exploredServer.profile.dockerInstalled ? `${exploredServer.profile.dockerContainers} running` : "not installed"}` : context;
 
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 正在思考下一步命令…" : "AI is thinking about the next command…");
       patchTerminalAgentStep("plan", "running", "Asking the model for a structured plan using the evidence above.");
       const conversationContext = conversationLogsRef.current.filter((item) => item.scope === "terminal" && item.serverId === target.id).slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous terminal conversation for this server.";
       const plan = await askAgentPlan(aiConfig, task, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${refreshedContext}`, memory, searchContext, diagnosisContext, conversationContext);
@@ -750,10 +807,12 @@ function App() {
       setTerminalLines((lines) => [...lines, { kind: "ai", text: plan.explanation }, { kind: "command", text: plan.command }]);
       appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `${plan.explanation}\n\n$ ${plan.command}\n\nVerify: ${plan.verifyCommand || "not specified"}` });
       if (isReadOnlyPlan(plan.command, plan.risk)) {
+        setTerminalAgentStatus(language === "zh-CN" ? "AI 正在输入并执行命令…" : "AI is entering and executing the command…");
         const automaticRun: AgentRun = { ...plannedRun, phase: "executing", steps: plannedRun.steps.map((step) => step.id === "approval" ? { ...step, status: "completed", detail: "Read-only command auto-approved." } : step) };
         setTerminalAgentRun(automaticRun);
         await executeTerminalAgentRun(automaticRun);
       } else {
+        setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待你的批准…" : "AI is waiting for your approval…");
         setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "等待批准：输入 approve 或 批准 执行；输入 cancel 或 取消 放弃。" : "Approval required: type approve to execute, or cancel to discard." }]);
         setExecuting(false);
       }
@@ -761,6 +820,7 @@ function App() {
       const message = agentError instanceof Error ? agentError.message : String(agentError);
       patchTerminalAgentRun({ phase: "failed", error: message });
       patchTerminalAgentStep("plan", "failed", message);
+      setTerminalAgentStatus(language === "zh-CN" ? "AI 处理失败" : "AI task failed");
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${message}` }]);
       appendRuntimeLog({ level: "error", event: "agent.terminal.failed", message: "Terminal AgentRun failed.", details: `${target.name} · ${message}` });
       appendLog({ type: "agent", title: "Terminal AgentRun failed", serverId: target.id, serverName: target.name, content: `${task}\n${message}`, status: "failed" });
@@ -816,6 +876,7 @@ function App() {
     const detectedAsCommand = isLikelyShellCommand(input);
     const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
     setTerminalAgentRun(null);
+    setTerminalAgentStatus("");
     setTerminalLines((lines) => [...lines, { kind: detectedAsCommand ? "command" : "ai", text: input }]);
     setError("");
     if (!detectedAsCommand && aiConfig.interventionMode !== "none" && modelConfigured) {
@@ -834,7 +895,7 @@ function App() {
       appendRuntimeLog({ level: "error", event: "ssh.command.failed", message: "SSH command failed.", details: `${server.name} · ${commandError instanceof Error ? commandError.message : String(commandError)}` });
       appendConversationLog({ scope: "terminal", role: "system", serverId: server.id, serverName: server.name, content: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` });
       appendLog({ type: "terminal", title: "SSH command failed", serverId: server.id, serverName: server.name, content: commandError instanceof Error ? commandError.message : String(commandError), status: "failed" });
-    } finally { activeCommandId.current = null; setExecuting(false); }
+    } finally { activeCommandId.current = null; setExecuting(false); setTerminalAgentStatus(""); }
   };
 
   const connect = async () => {
@@ -924,11 +985,11 @@ function App() {
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
       <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
-       <div className="sidebar-note">v0.1.0-alpha.3</div>
+       <div className="sidebar-note">v0.1.0-alpha.4</div>
     </aside>
      <section className="content">
        {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
-      {view === "terminal" && server && <TerminalPanel server={server} text={text} language={language} input={terminalInput} lines={terminalLines} executing={isExecuting} autoLabel={language === "zh-CN" ? "自动识别" : "Auto detect"} autoPlaceholder={language === "zh-CN" ? "输入命令，或输入 stop 停止当前命令…" : "Enter a command, or type stop to stop…"} actionLabel={language === "zh-CN" ? "发送" : "Send"} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={() => setView("hosts")} />}
+      {view === "terminal" && server && <TerminalPanel server={server} text={text} language={language} input={terminalInput} lines={terminalLines} executing={isExecuting} agentStatus={terminalAgentStatus} autoLabel={language === "zh-CN" ? "自动识别" : "Auto detect"} autoPlaceholder={language === "zh-CN" ? "输入命令，或输入 stop 停止当前命令…" : "Enter a command, or type stop to stop…"} actionLabel={language === "zh-CN" ? "发送" : "Send"} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={() => setView("hosts")} />}
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
       {contextMenu && <ServerContextMenu text={text} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
       {view === "hosts" && <ServerDashboard servers={servers} text={text} language={language} modelStatusClass={modelStatusClass} modelStatusLabel={modelStatusLabel} onAdd={openWizard} onOpen={openTerminal} onConnect={(item) => { void connectSavedServer(item); }} onEdit={editServer} />}
@@ -1018,7 +1079,7 @@ function AgentRunPanel({ run, language, onApprove, onReject }: { run: AgentRun; 
   return <div className={`agent-run-panel ${run.phase}`}><div className="agent-run-heading"><strong>AgentRun</strong><span>{run.phase === "waiting_approval" ? (language === "zh-CN" ? "等待你的决定" : "Waiting for your approval") : run.phase}</span></div><div className="agent-run-steps">{run.steps.map((step) => <div className={`agent-run-step ${step.status}`} key={step.id}><span className="agent-run-dot"></span><div><strong>{labels[step.id]}</strong><small>{statusLabel(step.status)}{step.detail ? ` · ${step.detail}` : ""}</small></div></div>)}</div>{run.plan && <div className="agent-run-plan"><p>{run.plan.explanation}</p><code>$ {run.plan.command}</code>{run.plan.verifyCommand && <small>Verify: {run.plan.verifyCommand}</small>}<small>Risk: {run.plan.risk ?? "medium"}</small></div>}{run.error && <div className="agent-run-error">{run.error}</div>}{run.phase === "waiting_approval" && <div className="agent-run-actions"><button className="secondary" onClick={onReject}>{language === "zh-CN" ? "取消" : "Cancel"}</button><button className="primary" onClick={onApprove}>{language === "zh-CN" ? "批准执行" : "Approve and execute"}</button></div>}</div>;
 }
 
-function TerminalPanel({ server, text, language, input, lines, executing, autoLabel, autoPlaceholder, actionLabel, onInputChange, onSubmit, onStop, onExit }: { server: Server; text: typeof zh; language: Locale; input: string; lines: TerminalLine[]; executing: boolean; autoLabel: string; autoPlaceholder: string; actionLabel: string; onInputChange: (value: string) => void; onSubmit: () => void; onStop: () => void; onExit: () => void }) {
+function TerminalPanel({ server, text, language, input, lines, executing, agentStatus, autoLabel, autoPlaceholder, actionLabel, onInputChange, onSubmit, onStop, onExit }: { server: Server; text: typeof zh; language: Locale; input: string; lines: TerminalLine[]; executing: boolean; agentStatus: string; autoLabel: string; autoPlaceholder: string; actionLabel: string; onInputChange: (value: string) => void; onSubmit: () => void; onStop: () => void; onExit: () => void }) {
   const screenRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -1028,7 +1089,7 @@ function TerminalPanel({ server, text, language, input, lines, executing, autoLa
   }, [lines, executing]);
   return <section className="terminal-view">
     <div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><button className="secondary terminal-exit" onClick={onExit}>{text.terminalExit}</button></div>
-    <div className="terminal-toolbar"><span className="terminal-mode active">✦ {autoLabel}</span><span className="terminal-status">● {executing ? text.terminalConnecting : text.connected}</span></div>
+    <div className="terminal-toolbar"><span className="terminal-mode active">✦ {autoLabel}</span><span className="terminal-status">● {agentStatus || (executing ? text.terminalConnecting : text.connected)}</span></div>
     <div className="terminal-screen" ref={screenRef}>
       {lines.map((line, index) => <div className={"terminal-line " + line.kind} key={index}><span className="terminal-prefix">{line.kind === "command" ? "$" : line.kind === "ai" ? "✦" : line.kind === "system" ? "•" : ""}</span><pre>{line.text}</pre></div>)}
       <form className="terminal-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
@@ -1069,6 +1130,10 @@ function isReadOnlyPlan(command: string, risk?: ShellPlan["risk"]) {
   return /^(?:apt(?:-get)?\s+(?:list|show|policy|search)|dpkg\s+-l|rpm\s+-qa|dnf\s+(?:list|info)|yum\s+(?:list|info)|pacman\s+-Q|command\s+-v|which\s+|type\s+|systemctl\s+(?:status|is-active|is-enabled|list-units|list-sockets|list-timers)|docker\s+(?:ps|images|info|inspect|version)|ss\s|netstat\s|df\s|du\s|free\s|uname\s|uptime\b|hostname\b|whoami\b|id\b|ps\s|cat\s|grep\s|head\s|tail\s|find\s)/i.test(command.trim());
 }
 
+function isRecoverableAgentFailure(output: string) {
+  return /command not found|not found|no such file or directory|unknown command|cannot execute/i.test(output);
+}
+
 async function listModels(config: AiConfig) {
   const response = await fetch(`${normalizeBaseUrl(config.baseUrl)}/models`, { headers: config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey.trim()}` } : {} });
   if (!response.ok) throw new Error(`${response.status} ${(await response.text()).slice(0, 180)}`);
@@ -1088,6 +1153,33 @@ async function askModel(config: AiConfig, prompt: string, language: Locale) {
     },
   });
   return response.trim() || (language === "zh-CN" ? "模型没有返回可显示的内容。" : "The model returned no displayable content.");
+}
+
+async function summarizeAgentResult(config: AiConfig, task: string, command: string, output: string, verification: string, language: Locale) {
+  const system = language === "zh-CN"
+    ? "你是 OpsNest 的结果解释器。根据真实的命令输出和验证输出，用简洁、准确、适合新手的中文总结结果。必须说明：是否完成、关键发现、是否有异常、下一步建议。不要复制完整原始输出，不要编造信息，不要提出未经证据支持的结论。"
+    : "You are the OpsNest result interpreter. Summarize the real command and verification output clearly for a beginner. State whether it completed, key findings, anomalies, and next steps. Do not repeat the full raw output or invent facts.";
+  const prompt = language === "zh-CN"
+    ? `用户任务：${task}\n\n执行命令：${command}\n\n原始输出：\n${redactLogText(output)}\n\n验证输出：\n${redactLogText(verification || "未提供验证输出")}\n\n请直接给出结论，不要输出命令。`
+    : `User task: ${task}\n\nExecuted command: ${command}\n\nRaw output:\n${redactLogText(output)}\n\nVerification output:\n${redactLogText(verification || "No verification output")}\n\nGive the conclusion directly. Do not output commands.`;
+  try {
+    return await askModelWithSystem(config, system, prompt);
+  } catch {
+    return language === "zh-CN" ? "命令已执行，完整结果已显示在上方；AI 暂时无法生成摘要。" : "The command completed and the full result is shown above; AI could not generate a summary right now.";
+  }
+}
+
+async function askModelWithSystem(config: AiConfig, system: string, prompt: string) {
+  const response = await invoke<string>("chat_completion", {
+    request: {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.apiKey.trim(),
+      model: config.model.trim(),
+      system,
+      prompt,
+    },
+  });
+  return response.trim() || "No summary returned.";
 }
 
 async function askShellCommand(config: AiConfig, prompt: string, language: Locale): Promise<ShellPlan> {
@@ -1128,6 +1220,13 @@ async function askAgentPlan(config: AiConfig, task: string, language: Locale, co
   }
   const fallback = await askShellCommand(config, prompt, language);
   return { ...fallback, verifyCommand: "", risk: "medium" };
+}
+
+async function askAgentRecoveryPlan(config: AiConfig, originalTask: string, failedCommand: string, failedOutput: string, language: Locale, context: string, memory: string, conversation: string): Promise<ShellPlan> {
+  const task = language === "zh-CN"
+    ? `继续完成用户原始任务：${originalTask}\n\n上一条命令没有成功：\n$ ${failedCommand}\n${redactLogText(failedOutput)}\n\n请先理解失败原因，再提出下一步可执行命令。不要重复失败命令；如果是 command not found、路径不存在或安装来源不明，先用只读方式确认真实命令名、PATH 或安装来源。不要因为一次失败就结束任务。`
+    : `Continue the original user task: ${originalTask}\n\nThe previous command did not succeed:\n$ ${failedCommand}\n${redactLogText(failedOutput)}\n\nUnderstand the failure first, then propose the next executable command. Do not repeat the failed command. If this is command not found, a missing path, or an unknown installation source, use a read-only check to discover the actual command, PATH, or installation source first. Do not end the task after one failure.`;
+  return askAgentPlan(config, task, language, context, memory, "No additional web references.", `Previous failed command result:\n${redactLogText(failedOutput)}`, conversation);
 }
 
 createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);

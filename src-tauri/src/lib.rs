@@ -6,7 +6,7 @@ mod ai;
 mod web;
 
 #[tauri::command]
-fn app_version() -> &'static str { "0.1.0-alpha.3" }
+fn app_version() -> &'static str { "0.1.0-alpha.4" }
 
 pub fn run() {
     tauri::Builder::default()
