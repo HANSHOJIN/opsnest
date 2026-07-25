@@ -233,9 +233,22 @@ fn diagnosis_commands(focus: &str) -> Vec<(&'static str, &'static str)> {
         ("磁盘空间", "df -hP"),
         ("内存状态", "free -h 2>/dev/null || true"),
         ("失败服务", "systemctl --failed --no-legend --no-pager 2>/dev/null || true"),
+        ("监听端口", "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true"),
         ("Docker 容器", "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null || true"),
     ];
-    if focus.contains("网站") || focus.contains("网页") || focus.contains("nginx") || focus.contains("502") || focus.contains("打不开") || focus.contains("website") || focus.contains("http") {
+    if focus.contains("网站")
+        || focus.contains("网页")
+        || focus.contains("nginx")
+        || focus.contains("502")
+        || focus.contains("打不开")
+        || focus.contains("website")
+        || focus.contains("web site")
+        || focus.contains("web")
+        || focus.contains("http")
+        || focus.contains("https")
+        || focus.contains("site")
+        || focus.contains("gateway")
+    {
         commands.extend([
             ("Web 端口", "ss -lntp 2>/dev/null | grep -E ':(80|443)\\b' || true"),
             ("Nginx 配置", "if command -v nginx >/dev/null 2>&1; then nginx -t 2>&1; else printf 'nginx not installed\\n'; fi"),
