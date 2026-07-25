@@ -10,7 +10,9 @@ OpsNest aims to be powerful without becoming difficult to use. It brings SSH, se
 
 > Connect your server, describe what you need in plain language, and let OpsNest handle the rest.
 
-![OpsNest server dashboard](docs/assets/dashboard.png)
+![OpsNest server dashboard](docs/assets/dashboard-en.png)
+
+![OpsNest SSH terminal](docs/assets/terminal-en.png)
 
 OpsNest is currently in the Alpha stage. It is evolving from an early architecture prototype into a usable desktop application. It can store multiple SSH servers, run AgentRun locally, and provide both a traditional terminal and natural-language operations in the same app.
 

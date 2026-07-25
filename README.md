@@ -12,6 +12,8 @@ OpsNest 的开发目标，是做成一款功能强大但非常易用的服务器
 
 ![OpsNest server dashboard](docs/assets/dashboard.png)
 
+![OpsNest SSH terminal](docs/assets/terminal.png)
+
 OpsNest 目前处于 Alpha 阶段，正在从早期架构原型逐步进入可实际使用的半成品阶段。它支持保存多台 SSH 服务器，在本地运行 AgentRun，并把传统终端和自然语言操作放在同一个桌面应用中。
 
 ## 当前版本
