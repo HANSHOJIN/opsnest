@@ -38,6 +38,17 @@ nav { display: grid; gap: 8px; margin-top: 48px; } nav button { padding: 11px 13
 .terminal-submit { padding: 0; border: 0; color: #65d995; background: transparent; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 18px; }
 .terminal-submit:disabled { opacity: .35; }
 .terminal-stop { padding: 4px 10px; border: 1px solid #8d4a54; border-radius: 6px; color: #ffb6bd; background: #351d24; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; cursor: pointer; }
+.terminal-agent-run { margin: 14px 0; font-family: ui-sans-serif, system-ui, sans-serif; }
+.terminal-agent-run .agent-run-panel { margin: 0; padding: 12px; border-color: #2c3848; border-radius: 8px; color: #dbe4f2; background: #171b21; box-shadow: none; }
+.terminal-agent-run .agent-run-heading { margin-bottom: 10px; color: #dbe4f2; }
+.terminal-agent-run .agent-run-heading span, .terminal-agent-run .agent-run-step small { color: #8d9aae; }
+.terminal-agent-run .agent-run-step { background: #20252d; }
+.terminal-agent-run .agent-run-step.running { background: #26315a; }
+.terminal-agent-run .agent-run-step.completed { background: #1e352b; }
+.terminal-agent-run .agent-run-step.failed, .terminal-agent-run .agent-run-step.blocked { background: #3a2429; }
+.terminal-agent-run .agent-run-step strong { color: #dbe4f2; }
+.terminal-agent-run .agent-run-plan { margin-top: 10px; padding: 10px; background: #0b0e12; }
+.terminal-agent-run .agent-run-actions { justify-content: flex-start; }
 .terminal-stop:hover { color: #fff; background: #57252f; }
 .host-list::after { content: "双击“我的服务器”与服务器总管对话"; display: block; margin: 12px 12px 0; color: #9aa4b1; font-size: 11px; line-height: 1.5; }
 .dashboard-header > div > span { color: #8b95a4; font-size: 13px; }
