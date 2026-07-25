@@ -30,8 +30,7 @@ fn append_log_line(app: &AppHandle, filename: &str, entry: Value) -> Result<(), 
         Vec::new()
     };
     lines.push(serde_json::to_string(&entry).map_err(|error| error.to_string())?);
-    let start = lines.len().saturating_sub(2000);
-    let content = lines[start..].join("\n") + "\n";
+    let content = lines.join("\n") + "\n";
     let temporary = path.with_extension("tmp");
     fs::write(&temporary, content).map_err(|error| error.to_string())?;
     if path.exists() {

@@ -102,7 +102,7 @@ function App() {
 
   const appendRuntimeLog = (entry: Omit<RuntimeLog, "id" | "timestamp">) => {
     const nextEntry: RuntimeLog = { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), message: redactLogText(entry.message), details: entry.details ? redactLogText(entry.details) : undefined };
-    const next = [...runtimeLogsRef.current, nextEntry].slice(-2000);
+    const next = [...runtimeLogsRef.current, nextEntry];
     runtimeLogsRef.current = next;
     setRuntimeLogs(next);
     void invoke("append_runtime_log", { entry: nextEntry }).catch(() => { localStorage.setItem("opsnest.runtime-logs", JSON.stringify(next)); });
@@ -110,7 +110,7 @@ function App() {
 
   const appendConversationLog = (entry: Omit<ConversationLog, "id" | "timestamp" | "sessionId">) => {
     const nextEntry: ConversationLog = { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), sessionId: sessionIdRef.current, content: redactLogText(entry.content) };
-    const next = [...conversationLogsRef.current, nextEntry].slice(-2000);
+    const next = [...conversationLogsRef.current, nextEntry];
     conversationLogsRef.current = next;
     setConversationLogs(next);
     void invoke("append_conversation_log", { entry: nextEntry }).catch(() => { localStorage.setItem("opsnest.conversation-logs", JSON.stringify(next)); });
@@ -133,7 +133,7 @@ function App() {
         const savedModelConnection = stored.aiConnectionStatus ?? (localStorage.getItem(AI_CONNECTION_STATUS_KEY) as ModelConnectionStatus | null) ?? (savedAi ? "connected" : "unknown");
         const savedLogs = stored.logs ?? [];
         const restoredConversations = savedConversationLogs.length ? savedConversationLogs : savedLogs.filter((item) => item.type === "manager" && item.role).map((item) => ({ id: item.id, timestamp: item.timestamp, sessionId: "legacy", scope: "manager" as const, role: item.role as ConversationLog["role"], serverId: item.serverId, serverName: item.serverName, content: item.content }));
-        const restoredMessages = restoredConversations.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).slice(-100).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
+        const restoredMessages = restoredConversations.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
         if (cancelled) return;
         const restored = (saved ?? []).map((item) => ({ ...item, latency: undefined, status: "saved" as ServerStatus }));
         setServers(restored);
@@ -169,7 +169,7 @@ function App() {
         setRuntimeLogs(savedRuntimeLogs);
         conversationLogsRef.current = savedConversationLogs;
         setConversationLogs(savedConversationLogs);
-        const restoredMessages = savedConversationLogs.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).slice(-100).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
+        const restoredMessages = savedConversationLogs.filter((item) => item.scope === "manager" && (item.role === "user" || item.role === "assistant" || item.role === "system")).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content }));
         managerMessageSnapshotRef.current = restoredMessages;
         setManagerMessages(restoredMessages);
         conversationHydratedRef.current = true;
@@ -251,7 +251,7 @@ function App() {
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
     if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username }); setView("hosts"); setError(""); setWizardOpen(true); return; }
-    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalLines([{ kind: "system", text: `${selected.username}@${selected.host}:${selected.port} · SSH` }]); setView("terminal"); setError("");
+    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current)); setView("terminal"); setError("");
   };
 
   const connectSavedServer = async (selected: Server) => {
@@ -289,7 +289,7 @@ function App() {
   };
 
   const openManager = () => {
-    setManagerMessages([{ role: "system", text: text.managerSystem }]);
+    setManagerMessages((current) => current.length ? current : [{ role: "system", text: text.managerSystem }]);
     setManagerInput("");
     setView("manager");
     setError("");
@@ -797,11 +797,13 @@ function App() {
     setExecuting(true);
     try {
       const output = await invoke<string>("execute_ssh_command", { request: commandRequest, command: input });
+      appendConversationLog({ scope: "terminal", role: "tool", serverId: server.id, serverName: server.name, content: `$ ${input}\n\n${output || "(no output)"}` });
       appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: output || "(no output)", status: "success" });
       setTerminalLines((lines) => [...lines, { kind: "output", text: output || "(no output)" }]);
     } catch (commandError) {
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` }]);
       appendRuntimeLog({ level: "error", event: "ssh.command.failed", message: "SSH command failed.", details: `${server.name} · ${commandError instanceof Error ? commandError.message : String(commandError)}` });
+      appendConversationLog({ scope: "terminal", role: "system", serverId: server.id, serverName: server.name, content: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` });
       appendLog({ type: "terminal", title: "SSH command failed", serverId: server.id, serverName: server.name, content: commandError instanceof Error ? commandError.message : String(commandError), status: "failed" });
     } finally { activeCommandId.current = null; setExecuting(false); }
   };
@@ -907,6 +909,25 @@ function App() {
      </section>
     {isWizardOpen && <div className="modal-backdrop" role="presentation"><section className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title"><div className="wizard-header"><div><p className="eyebrow">{text.firstStep}</p><h2 id="wizard-title">{text.addWizardTitle}</h2></div><button className="close-button" onClick={() => setWizardOpen(false)} aria-label={text.close}>×</button></div><p className="wizard-intro">{text.wizardIntro}</p><label>{text.serverName}<span>{text.optional}</span><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder={text.serverNamePlaceholder} /></label><label>{language === "zh-CN" ? "备注" : "Note"}<span>{language === "zh-CN" ? "可选" : "Optional"}</span><textarea value={form.note} onChange={(event) => update("note", event.target.value)} placeholder={language === "zh-CN" ? "例如：负责商城 API 的 Docker 主机" : "For example: Docker host for the shop API"} rows={2} /></label><div className="field-row"><label>{text.serverAddress}<input value={form.host} onChange={(event) => update("host", event.target.value)} placeholder={text.serverAddressPlaceholder} autoFocus /></label><label className="port-field">{text.port}<input value={form.port} onChange={(event) => update("port", event.target.value)} inputMode="numeric" /></label></div><label>{text.username}<input value={form.username} onChange={(event) => update("username", event.target.value)} placeholder={text.usernamePlaceholder} /></label><div className="auth-tabs"><button className={form.authMethod === "password" ? "selected" : ""} onClick={() => update("authMethod", "password")}>{text.passwordLogin}</button><button className={form.authMethod === "privateKey" ? "selected" : ""} onClick={() => update("authMethod", "privateKey")}>{text.privateKey}</button></div>{form.authMethod === "password" ? <label>{text.password}<input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder={text.passwordPlaceholder} /></label> : <><label>{text.keyPath}<input value={form.privateKeyPath} onChange={(event) => update("privateKeyPath", event.target.value)} placeholder={text.keyPathPlaceholder} /></label><label>{text.passphrase}<span>{text.optional}</span><input type="password" value={form.passphrase} onChange={(event) => update("passphrase", event.target.value)} /></label></>}{error && <div className="error-box">{error}</div>}<div className="wizard-footer"><button className="secondary" onClick={() => setWizardOpen(false)}>{text.cancel}</button><button className="primary" onClick={connect} disabled={isConnecting}>{isConnecting ? text.connecting : text.connect}</button></div></section></div>}
   </main>;
+}
+
+function restoreTerminalLines(server: Server, conversations: ConversationLog[]): TerminalLine[] {
+  const lines: TerminalLine[] = [{ kind: "system", text: `${server.username}@${server.host}:${server.port} · SSH` }];
+  conversations
+    .filter((item) => item.scope === "terminal" && item.serverId === server.id)
+    .forEach((item) => {
+      if (!item.content.trim()) return;
+      if (item.role === "tool") {
+        const sections = item.content.split(/\n\n/);
+        const command = sections.shift()?.trim() ?? "";
+        if (command.startsWith("$ ")) lines.push({ kind: "command", text: command.slice(2) });
+        const output = sections.join("\n\n").trim();
+        if (output) lines.push({ kind: "output", text: output });
+        return;
+      }
+      lines.push({ kind: item.role === "assistant" ? "ai" : item.role === "user" ? (isLikelyShellCommand(item.content) ? "command" : "ai") : "system", text: item.content });
+    });
+  return lines;
 }
 
 function getServerStatusLabel(status: ServerStatus, language: Locale, text: typeof zh) {
