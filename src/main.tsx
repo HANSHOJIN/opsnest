@@ -5,27 +5,37 @@ import "./styles.css";
 import "./manager.css";
 
 type AuthMethod = "password" | "privateKey";
-type ServerStatus = "connected" | "saved";
-type View = "hosts" | "manager" | "settings" | "terminal";
+type ServerStatus = "connected" | "saved" | "connecting" | "failed";
+type View = "hosts" | "manager" | "settings" | "terminal" | "tasks";
 type TerminalMode = "shell" | "ai";
 type TerminalLine = { kind: "system" | "command" | "output" | "ai"; text: string };
 type ManagerMessage = { role: "user" | "assistant" | "system"; text: string };
+type ShellPlan = { explanation: string; command: string; verifyCommand?: string; risk?: "low" | "medium" | "high" };
+type AgentStepId = "context" | "memory" | "search" | "explore" | "plan" | "approval" | "execute" | "verify" | "remember";
+type AgentStep = { id: AgentStepId; label: string; status: "pending" | "running" | "completed" | "failed" | "blocked"; detail?: string };
+type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; result?: string; error?: string };
+type ServerMemory = { id: string; createdAt: string; summary: string };
+type WebSearchResult = { title: string; url: string; snippet: string };
+type ActivityLog = { id: string; timestamp: string; type: "manager" | "terminal" | "agent" | "system"; role?: ManagerMessage["role"]; serverId?: string; serverName?: string; title: string; content: string; status?: "success" | "failed" | "cancelled" | "info" };
 type ContextMenuState = { server: Server; x: number; y: number } | null;
 type Locale = "zh-CN" | "en-US";
 type AiProvider = "openai" | "deepseek" | "openrouter" | "ollama" | "custom";
+type AiInterventionMode = "always" | "smart" | "none";
+type ModelConnectionStatus = "unknown" | "connected" | "failed";
 
 type ServerProfile = { osName: string; hostname: string; cpuCores: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string };
-type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; profile?: ServerProfile; aiSummary?: string };
-type ServerForm = { name: string; host: string; port: string; username: string; authMethod: AuthMethod; password: string; privateKeyPath: string; passphrase: string };
-type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; privateKeyPath: string | null; passphrase: string | null };
-type AiConfig = { provider: AiProvider; apiKey: string; baseUrl: string; model: string };
-type PersistedData = { servers?: Server[]; aiConfig?: Partial<AiConfig> | null; language?: Locale };
+type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[] };
+type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean };
+type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; privateKeyPath: string | null; passphrase: string | null; commandId?: string };
+type AiConfig = { provider: AiProvider; apiKey: string; baseUrl: string; model: string; interventionMode: AiInterventionMode };
+type PersistedData = { servers?: Server[]; aiConfig?: Partial<AiConfig> | null; aiConnectionStatus?: ModelConnectionStatus; language?: Locale; logs?: ActivityLog[] };
 
 const STORAGE_KEY = "opsnest.servers";
 const AI_STORAGE_KEY = "opsnest.ai-model";
+const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
 const LANGUAGE_STORAGE_KEY = "opsnest.language";
-const initialForm: ServerForm = { name: "", host: "", port: "22", username: "root", authMethod: "password", password: "", privateKeyPath: "", passphrase: "" };
-const defaultAiConfig: AiConfig = { provider: "deepseek", apiKey: "", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat" };
+const initialForm: ServerForm = { name: "", host: "", port: "22", username: "root", note: "", authMethod: "password", password: "", privateKeyPath: "", passphrase: "", rememberCredentials: true };
+const defaultAiConfig: AiConfig = { provider: "deepseek", apiKey: "", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", interventionMode: "smart" };
 const providerPresets: Record<AiProvider, { label: string; baseUrl: string; model: string; keyRequired: boolean }> = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", keyRequired: true },
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", keyRequired: true },
@@ -35,22 +45,23 @@ const providerPresets: Record<AiProvider, { label: string; baseUrl: string; mode
 };
 
 const zh = {
-  welcome: "欢迎回来", hosts: "我的服务器", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
+  welcome: "欢迎回来", hosts: "我的服务器", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
   addAiModel: "添加一个 AI 模型", aiModelIntro: "模型只负责理解你的描述和服务器状态，所有 SSH 操作仍由本地安全流程控制。", modelService: "模型服务", apiAddress: "API 地址", apiKey: "API Key", optional: "可选", modelName: "模型名称", modelPlaceholder: "例如：deepseek-chat", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "输入你的 API Key", ollamaKey: "本地 Ollama 不需要 Key", testConnection: "测试连接", testing: "正在测试…", saveModel: "保存模型", savedLocal: "已保存到本机", connectionFound: (count: number) => `连接成功，发现 ${count} 个模型`, connectionNoList: "连接成功，可以手动填写模型名称", keyLocalNote: "API Key 目前仅保存在当前电脑的本地配置中，不会上传到 OpsNest。建议使用权限受限、额度可控的 Key。", language: "语言", simplifiedChinese: "简体中文", english: "English", languageNote: "更改语言后，界面会立即更新。",
-  connectFirst: "连接你的第一台服务器", connectIntro: "输入 IP 地址、用户名和密码，然后用人话描述你想做什么。", startConnect: "开始连接", demo: "查看演示", connected: "已连接", saved: "已保存", system: "系统", connectionMethod: "连接方式", ssh: "SSH", addAnother: "添加另一台服务器", serverProfile: "AI 服务器档案", understood: "我已经了解这台服务器", readOnly: "只读扫描", profileIntro: "已读取基础环境信息。没有修改文件、安装软件或启动服务。", hostname: "主机名", cpu: "CPU", memory: "内存", disk: "磁盘", docker: "Docker", installedRunning: (count: string) => `已安装 · ${count} 个运行中`, notInstalled: "未安装", rescan: "重新扫描", analyzeServer: "让 AI 解读这台服务器", analyzing: "AI 正在分析…", aiInterpretation: "AI 解读", nextStep: "下一步：让 AI 了解这台服务器", understanding: "正在了解这台服务器…", scanIntro: "读取系统、资源和 Docker 状态，不会自动修改任何内容。", scanWait: "只读取基础环境信息，请稍候。", principles: ["先检查，再行动", "AI 会先解释计划和风险", "每一步都可追踪", "查看完整操作时间线", "危险操作需批准", "你始终掌握最终决定权"],
+  connectFirst: "连接你的第一台服务器", connectIntro: "输入 IP 地址、用户名和密码，然后用人话描述你想做什么。", startConnect: "开始连接", demo: "查看演示", connected: "已连接", saved: "已保存", notConnected: "未连接", system: "系统", connectionMethod: "连接方式", ssh: "SSH", addAnother: "添加另一台服务器", serverProfile: "AI 服务器档案", understood: "我已经了解这台服务器", readOnly: "只读扫描", profileIntro: "已读取基础环境信息。没有修改文件、安装软件或启动服务。", hostname: "主机名", cpu: "CPU", memory: "内存", disk: "磁盘", docker: "Docker", installedRunning: (count: string) => `已安装 · ${count} 个运行中`, notInstalled: "未安装", rescan: "重新扫描", analyzeServer: "让 AI 解读这台服务器", analyzing: "AI 正在分析…", aiInterpretation: "AI 解读", nextStep: "下一步：让 AI 了解这台服务器", understanding: "正在了解这台服务器…", scanIntro: "读取系统、资源和 Docker 状态，不会自动修改任何内容。", scanWait: "只读取基础环境信息，请稍候。", principles: ["先检查，再行动", "AI 会先解释计划和风险", "每一步都可追踪", "查看完整操作时间线", "危险操作需批准", "你始终掌握最终决定权"],
   addWizardTitle: "添加你的服务器", firstStep: "第一步 · 连接服务器", wizardIntro: "只需要填写你已有的信息。OpsNest 会先测试连接，不会修改服务器。", serverName: "服务器名称", serverNamePlaceholder: "例如：我的网站", serverAddress: "服务器地址", serverAddressPlaceholder: "例如：203.0.113.10", port: "SSH 端口", username: "用户名", usernamePlaceholder: "例如：root 或 ubuntu", passwordLogin: "密码登录", privateKey: "SSH 私钥", password: "密码", passwordPlaceholder: "只在本次连接中使用", keyPath: "私钥文件路径", keyPathPlaceholder: "例如：C:\\Users\\你\\.ssh\\id_ed25519", passphrase: "私钥密码", cancel: "取消", connecting: "正在测试连接…", connect: "测试并连接", close: "关闭", missingHost: "请输入服务器地址。", missingUser: "请输入用户名。", invalidPort: "端口号需要是 1 到 65535 之间的数字。", missingPassword: "请输入密码。", missingKey: "请输入私钥文件路径。", reconnect: "请重新连接服务器后再进行扫描。", noCredentials: "当前会话没有保存登录凭据，请重新连接服务器。", connectionFailed: "连接失败，请检查地址、端口和登录方式。", scanFailed: "扫描失败，请重新连接服务器后再试。", configureAi: "请先在设置中完成 AI 模型配置。", aiFailed: "AI 调用失败，请检查模型设置。", apiMissing: "请输入 API 地址。", modelMissing: "请输入模型名称。", keyMissing: "请输入 API Key。", modelFailed: "模型连接失败，请检查地址和 Key。", taskComing: "任务记录将在下一阶段加入。", terminalShell: "Shell", terminalAi: "AI 助手", terminalPlaceholder: "输入命令，或切换到 AI 模式用自然语言描述…", terminalAiPlaceholder: "例如：查看磁盘还有多少空间", terminalEmpty: "双击左侧服务器名称即可进入 SSH。", terminalConnecting: "正在连接…", terminalExit: "退出终端", terminalCommandFailed: "命令执行失败：", terminalAiNeedModel: "请先在设置中配置 AI 模型。", managerTitle: "服务器总管", managerSubtitle: "管理所有已保存的服务器", managerIntro: "你好，我可以同时了解你的服务器，并帮你规划检查、排障和维护任务。", managerPlaceholder: "例如：检查所有服务器的磁盘空间", managerSend: "发送", managerExit: "退出总管", managerNoServers: "还没有保存的服务器。", managerThinking: "总管正在分析…", managerSystem: "服务器总管已就绪。", contextConnect: "连接服务器", contextTerminal: "打开 SSH 会话", contextView: "查看服务器",
 };
 
 const en = {
-  welcome: "Welcome back", hosts: "My servers", tasks: "Task history", settings: "Settings", servers: "Servers", addServer: "Add server", localFirst: "Local-first", credentialsLocal: "Credentials are used only while connecting", localMode: "● Local mode", localConfig: "Local configuration", aiModel: "AI model", localOnly: "● Local only", apiDirect: "Direct API",
+  welcome: "Welcome back", hosts: "My servers", tasks: "Task history", settings: "Settings", servers: "Servers", addServer: "Add server", localFirst: "Local-first", credentialsLocal: "Credentials are used only while connecting", localMode: "● Local mode", aiStatusNotConfigured: "● AI not configured", aiStatusConnected: "● AI connected", aiStatusFailed: "● AI connection failed", aiStatusNotTested: "● AI not tested", localConfig: "Local configuration", aiModel: "AI model", localOnly: "● Local only", apiDirect: "Direct API",
   addAiModel: "Add an AI model", aiModelIntro: "The model only interprets your request and server status. SSH actions remain controlled by the local safety flow.", modelService: "Model provider", apiAddress: "API URL", apiKey: "API key", optional: "Optional", modelName: "Model name", modelPlaceholder: "For example: gpt-4o-mini", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "Enter your API key", ollamaKey: "Ollama runs locally and does not need a key", testConnection: "Test connection", testing: "Testing…", saveModel: "Save model", savedLocal: "Saved on this computer", connectionFound: (count: number) => `Connected, found ${count} model${count === 1 ? "" : "s"}`, connectionNoList: "Connected. You can enter a model name manually.", keyLocalNote: "The API key is stored only on this computer and is not sent to OpsNest. Use a key with limited permissions and spending.", language: "Language", simplifiedChinese: "简体中文", english: "English", languageNote: "The interface updates immediately after changing the language.",
-  connectFirst: "Connect your first server", connectIntro: "Enter the IP address, username and password, then describe what you want to do in plain language.", startConnect: "Start connecting", demo: "View demo", connected: "Connected", saved: "Saved", system: "System", connectionMethod: "Connection", ssh: "SSH", addAnother: "Add another server", serverProfile: "AI server profile", understood: "I understand this server", readOnly: "Read-only scan", profileIntro: "Basic environment information was read. No files were changed, software installed or services started.", hostname: "Hostname", cpu: "CPU", memory: "Memory", disk: "Disk", docker: "Docker", installedRunning: (count: string) => `Installed · ${count} running`, notInstalled: "Not installed", rescan: "Scan again", analyzeServer: "Ask AI to explain this server", analyzing: "AI is analyzing…", aiInterpretation: "AI interpretation", nextStep: "Next: let AI understand this server", understanding: "Learning about this server…", scanIntro: "Read system, resource and Docker status. Nothing will be changed automatically.", scanWait: "Reading basic environment information…", principles: ["Check first, then act", "AI explains the plan and risk first", "Every step is traceable", "View the complete operation timeline", "Risky actions require approval", "You always make the final decision"],
+  connectFirst: "Connect your first server", connectIntro: "Enter the IP address, username and password, then describe what you want to do in plain language.", startConnect: "Start connecting", demo: "View demo", connected: "Connected", saved: "Saved", notConnected: "Not connected", system: "System", connectionMethod: "Connection", ssh: "SSH", addAnother: "Add another server", serverProfile: "AI server profile", understood: "I understand this server", readOnly: "Read-only scan", profileIntro: "Basic environment information was read. No files were changed, software installed or services started.", hostname: "Hostname", cpu: "CPU", memory: "Memory", disk: "Disk", docker: "Docker", installedRunning: (count: string) => `Installed · ${count} running`, notInstalled: "Not installed", rescan: "Scan again", analyzeServer: "Ask AI to explain this server", analyzing: "AI is analyzing…", aiInterpretation: "AI interpretation", nextStep: "Next: let AI understand this server", understanding: "Learning about this server…", scanIntro: "Read system, resource and Docker status. Nothing will be changed automatically.", scanWait: "Reading basic environment information…", principles: ["Check first, then act", "AI explains the plan and risk first", "Every step is traceable", "View the complete operation timeline", "Risky actions require approval", "You always make the final decision"],
   addWizardTitle: "Add your server", firstStep: "Step 1 · Connect a server", wizardIntro: "Enter the information you already have. OpsNest tests the connection before doing anything else.", serverName: "Server name", serverNamePlaceholder: "For example: My website", serverAddress: "Server address", serverAddressPlaceholder: "For example: 203.0.113.10", port: "SSH port", username: "Username", usernamePlaceholder: "For example: root or ubuntu", passwordLogin: "Password", privateKey: "SSH private key", password: "Password", passwordPlaceholder: "Used only for this connection", keyPath: "Private key path", keyPathPlaceholder: "For example: C:\\Users\\you\\.ssh\\id_ed25519", passphrase: "Key passphrase", cancel: "Cancel", connecting: "Testing connection…", connect: "Test and connect", close: "Close", missingHost: "Enter the server address.", missingUser: "Enter a username.", invalidPort: "The port must be a number between 1 and 65535.", missingPassword: "Enter the password.", missingKey: "Enter the private key path.", reconnect: "Reconnect to the server before scanning it.", noCredentials: "This session has no login credentials. Reconnect to the server first.", connectionFailed: "Connection failed. Check the address, port and login method.", scanFailed: "Scan failed. Reconnect to the server and try again.", configureAi: "Complete the AI model settings first.", aiFailed: "The AI request failed. Check the model settings.", apiMissing: "Enter the API URL.", modelMissing: "Enter a model name.", keyMissing: "Enter an API key.", modelFailed: "The model connection failed. Check the URL and key.", taskComing: "Task history will be added in the next stage.", terminalShell: "Shell", terminalAi: "AI assistant", terminalPlaceholder: "Enter a command, or switch to AI mode and describe what you need…", terminalAiPlaceholder: "For example: How much disk space is left?", terminalEmpty: "Double-click a server on the left to open SSH.", terminalConnecting: "Connecting…", terminalExit: "Exit terminal", terminalCommandFailed: "Command failed: ", terminalAiNeedModel: "Configure an AI model in Settings first.", managerTitle: "Server manager", managerSubtitle: "Manage all saved servers", managerIntro: "Hello. I can understand your servers together and help plan checks, troubleshooting and maintenance tasks.", managerPlaceholder: "For example: Check disk space on all servers", managerSend: "Send", managerExit: "Exit manager", managerNoServers: "No saved servers yet.", managerThinking: "The manager is analyzing…", managerSystem: "Server manager is ready.", contextConnect: "Connect server", contextTerminal: "Open SSH session", contextView: "View server",
 };
 
 function App() {
   const [language, setLanguage] = useState<Locale>("zh-CN");
-  const text = language === "zh-CN" ? zh : en;
+  const localizedText = language === "zh-CN" ? zh : en;
+  const text = { ...localizedText, understood: language === "zh-CN" ? "服务器基础信息已读取" : "Server information loaded" };
   const [view, setView] = useState<View>("hosts");
   const [servers, setServers] = useState<Server[]>([]);
   const [server, setServer] = useState<Server | null>(null);
@@ -62,7 +73,9 @@ function App() {
   const [isExecuting, setExecuting] = useState(false);
   const [managerInput, setManagerInput] = useState("");
   const [managerMessages, setManagerMessages] = useState<ManagerMessage[]>([]);
+  const [logs, setLogs] = useState<ActivityLog[]>([]);
   const [isManagerThinking, setManagerThinking] = useState(false);
+  const [agentRun, setAgentRun] = useState<AgentRun | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [isWizardOpen, setWizardOpen] = useState(false);
   const [isConnecting, setConnecting] = useState(false);
@@ -70,8 +83,11 @@ function App() {
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isTestingModel, setTestingModel] = useState(false);
   const [modelStatus, setModelStatus] = useState("");
+  const [modelConnection, setModelConnection] = useState<ModelConnectionStatus>("unknown");
   const [error, setError] = useState("");
   const activeCredentials = useRef<Record<string, SshRequest>>({});
+  const activeCommandId = useRef<string | null>(null);
+  const logsRef = useRef<ActivityLog[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -83,22 +99,34 @@ function App() {
         const saved = stored.servers?.length ? stored.servers : legacyServers;
         const savedAi = stored.aiConfig ?? legacyAi;
         const savedLanguage = stored.language ?? (localStorage.getItem(LANGUAGE_STORAGE_KEY) as Locale | null);
+        const savedModelConnection = stored.aiConnectionStatus ?? (localStorage.getItem(AI_CONNECTION_STATUS_KEY) as ModelConnectionStatus | null) ?? (savedAi ? "connected" : "unknown");
+        const savedLogs = stored.logs ?? [];
         if (cancelled) return;
-        const restored = (saved ?? []).map((item) => ({ ...item, status: "saved" as ServerStatus }));
+        const restored = (saved ?? []).map((item) => ({ ...item, latency: undefined, status: "saved" as ServerStatus }));
         setServers(restored);
+        logsRef.current = savedLogs;
+        setLogs(savedLogs);
+        setManagerMessages(savedLogs.filter((item) => item.type === "manager" && item.role).slice(-100).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content })));
         if (restored[0]) setServer(restored[0]);
         if (savedAi) setAiConfig({ ...defaultAiConfig, ...savedAi });
+        setModelConnection(savedModelConnection);
         if (savedLanguage === "zh-CN" || savedLanguage === "en-US") setLanguage(savedLanguage);
-        if ((!stored.servers?.length && legacyServers.length) || (!stored.aiConfig && legacyAi)) await invoke("save_local_data", { data: { servers: legacyServers, aiConfig: savedAi, language: savedLanguage ?? "zh-CN" } });
+        if ((!stored.servers?.length && legacyServers.length) || (!stored.aiConfig && legacyAi)) await invoke("save_local_data", { data: { servers: legacyServers, aiConfig: savedAi, aiConnectionStatus: savedModelConnection, language: savedLanguage ?? "zh-CN" } });
       } catch {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
         const savedAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
         const savedLanguage = localStorage.getItem(LANGUAGE_STORAGE_KEY) as Locale | null;
+        const savedModelConnection = localStorage.getItem(AI_CONNECTION_STATUS_KEY) as ModelConnectionStatus | null;
+        const savedLogs = JSON.parse(localStorage.getItem("opsnest.logs") ?? "[]") as ActivityLog[];
         if (cancelled) return;
-        const restored = saved.map((item) => ({ ...item, status: "saved" as ServerStatus }));
+        const restored = saved.map((item) => ({ ...item, latency: undefined, status: "saved" as ServerStatus }));
         setServers(restored);
+        logsRef.current = savedLogs;
+        setLogs(savedLogs);
+        setManagerMessages(savedLogs.filter((item) => item.type === "manager" && item.role).slice(-100).map((item) => ({ role: item.role as ManagerMessage["role"], text: item.content })));
         if (restored[0]) setServer(restored[0]);
         if (savedAi) setAiConfig({ ...defaultAiConfig, ...savedAi });
+        setModelConnection(savedModelConnection ?? (savedAi ? "connected" : "unknown"));
         if (savedLanguage === "zh-CN" || savedLanguage === "en-US") setLanguage(savedLanguage);
       }
     };
@@ -121,17 +149,34 @@ function App() {
     return () => { document.removeEventListener("contextmenu", handleContextMenu); document.removeEventListener("click", closeContextMenu); };
   }, [servers]);
 
-  const persistData = (nextServers: Server[], nextAiConfig: AiConfig = aiConfig, nextLanguage: Locale = language) => {
-    const data = { servers: nextServers.map(({ status: _status, ...item }) => item), aiConfig: nextAiConfig, language: nextLanguage };
-    void invoke("save_local_data", { data }).catch(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(data.servers)); localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(nextAiConfig)); localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage); });
+  useEffect(() => {
+    if (error === text.taskComing) {
+      setError("");
+      setView("tasks");
+    }
+  }, [error, text.taskComing]);
+
+  const persistData = (nextServers: Server[], nextAiConfig: AiConfig = aiConfig, nextLanguage: Locale = language, nextModelConnection: ModelConnectionStatus = modelConnection, nextLogs: ActivityLog[] = logsRef.current) => {
+    const data = { servers: nextServers.map(({ status: _status, latency: _latency, ...item }) => item), aiConfig: nextAiConfig, aiConnectionStatus: nextModelConnection, language: nextLanguage, logs: nextLogs.slice(-500) };
+    void invoke("save_local_data", { data }).catch(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(data.servers)); localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(nextAiConfig)); localStorage.setItem(AI_CONNECTION_STATUS_KEY, nextModelConnection); localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage); localStorage.setItem("opsnest.logs", JSON.stringify(data.logs)); });
   };
   const persistServers = (next: Server[]) => { setServers(next); persistData(next); };
+  const appendLog = (entry: Omit<ActivityLog, "id" | "timestamp">) => {
+    const next = [...logsRef.current, { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), content: redactLogText(entry.content) }].slice(-500);
+    logsRef.current = next;
+    setLogs(next);
+    persistData(servers, aiConfig, language, modelConnection, next);
+  };
+  const clearLogs = () => { logsRef.current = []; setLogs([]); setManagerMessages([]); persistData(servers, aiConfig, language, modelConnection, []); };
   const update = <K extends keyof ServerForm>(key: K, value: ServerForm[K]) => { setForm((current) => ({ ...current, [key]: value })); setError(""); };
-  const updateAi = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => { setAiConfig((current) => ({ ...current, [key]: value })); setModelStatus(""); setError(""); };
-  const changeLanguage = (next: Locale) => { setLanguage(next); localStorage.setItem(LANGUAGE_STORAGE_KEY, next); persistData(servers, aiConfig, next); };
+  const updateAi = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => { setAiConfig((current) => ({ ...current, [key]: value })); setModelConnection("unknown"); setModelStatus(""); setError(""); };
+  const changeLanguage = (next: Locale) => { setLanguage(next); localStorage.setItem(LANGUAGE_STORAGE_KEY, next); persistData(servers, aiConfig, next, modelConnection); };
   const openWizard = () => {
-    const savedForm = server?.status === "saved" ? { ...initialForm, name: server.name, host: server.host, port: String(server.port), username: server.username } : initialForm;
+    const savedForm = server?.status === "saved" ? { ...initialForm, name: server.name, host: server.host, port: String(server.port), username: server.username, note: server.note ?? "" } : initialForm;
     setForm(savedForm); setError(""); setWizardOpen(true);
+  };
+  const editServer = (selected: Server) => {
+    setContextMenu(null); setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username, note: selected.note ?? "" }); setView("hosts"); setError(""); setWizardOpen(true);
   };
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
@@ -139,8 +184,37 @@ function App() {
     setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalLines([{ kind: "system", text: `${selected.username}@${selected.host}:${selected.port} · SSH` }]); setView("terminal"); setError("");
   };
 
-  const connectSavedServer = (selected: Server) => {
-    setContextMenu(null); setServer(selected); setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username }); setView("hosts"); setError(""); setWizardOpen(true);
+  const connectSavedServer = async (selected: Server) => {
+    setContextMenu(null);
+    const connectingServer = { ...selected, latency: undefined, status: "connecting" as ServerStatus };
+    setServer(connectingServer);
+    setServers((current) => current.map((item) => item.id === selected.id ? connectingServer : item));
+    let request: SshRequest | null = activeCredentials.current[selected.id] ?? null;
+    if (!request) {
+      try {
+        request = await invoke<SshRequest | null>("load_server_credential", { serverId: selected.id });
+        if (request) activeCredentials.current[selected.id] = request;
+      } catch {
+        request = null;
+      }
+    }
+    if (!request) {
+      const failedServer = { ...selected, latency: undefined, status: "failed" as ServerStatus };
+      setServer(failedServer);
+      setServers((current) => current.map((item) => item.id === selected.id ? failedServer : item));
+      return;
+    }
+    try {
+      const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
+      const connectedServer = { ...selected, system: result.system, latency: result.latencyMs, status: "connected" as ServerStatus };
+      setServer(connectedServer);
+      setServers((current) => current.map((item) => item.id === selected.id ? connectedServer : item));
+      persistData(servers.map((item) => item.id === selected.id ? connectedServer : item));
+    } catch {
+      const failedServer = { ...selected, status: "failed" as ServerStatus };
+      setServer(failedServer);
+      setServers((current) => current.map((item) => item.id === selected.id ? failedServer : item));
+    }
   };
 
   const openManager = () => {
@@ -150,9 +224,267 @@ function App() {
     setError("");
   };
 
+  const connectAllFromManager = async () => {
+    const updated = [...servers];
+    const results: string[] = [];
+    for (const target of servers) {
+      let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
+      if (!request) {
+        try {
+          request = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
+          if (request) activeCredentials.current[target.id] = request;
+        } catch {
+          request = null;
+        }
+      }
+      if (!request) {
+        results.push(`${target.name}: ${language === "zh-CN" ? "没有保存的登录凭据" : "no saved credentials"}`);
+        continue;
+      }
+      try {
+        const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
+        const index = updated.findIndex((item) => item.id === target.id);
+        if (index >= 0) updated[index] = { ...updated[index], system: result.system, latency: result.latencyMs, status: "connected" };
+        results.push(`${target.name}: ${language === "zh-CN" ? "已连接" : "connected"}`);
+      } catch (connectionError) {
+        const index = updated.findIndex((item) => item.id === target.id);
+        if (index >= 0) updated[index] = { ...updated[index], latency: undefined, status: "failed" };
+        results.push(`${target.name}: ${language === "zh-CN" ? "连接失败" : "connection failed"}${connectionError instanceof Error ? ` (${connectionError.message})` : ""}`);
+      }
+    }
+    setServers(updated);
+    setServer((current) => current ? updated.find((item) => item.id === current.id) ?? current : current);
+    persistData(updated);
+    return results.join("\n");
+  };
+
+  const executeAllFromManager = async (command: string) => {
+    const results: string[] = [];
+    for (const target of servers) {
+      let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
+      if (!request) {
+        try {
+          request = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
+          if (request) activeCredentials.current[target.id] = request;
+        } catch {
+          request = null;
+        }
+      }
+      if (!request) {
+        results.push(`${target.name}: ${language === "zh-CN" ? "没有保存的登录凭据" : "no saved credentials"}`);
+        continue;
+      }
+      try {
+        const output = await invoke<string>("execute_ssh_command", { request, command });
+        results.push(`${target.name}:\n${output || "(no output)"}`);
+      } catch (commandError) {
+        results.push(`${target.name}: ${commandError instanceof Error ? commandError.message : String(commandError)}`);
+      }
+    }
+    return results.join("\n\n");
+  };
+
+  const getCredential = async (target: Server) => {
+    const cached = activeCredentials.current[target.id];
+    if (cached) return cached;
+    try {
+      const stored = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
+      if (stored) activeCredentials.current[target.id] = stored;
+      return stored;
+    } catch {
+      return null;
+    }
+  };
+
+  const patchAgentRun = (patch: Partial<AgentRun>) => {
+    setAgentRun((current) => current ? { ...current, ...patch } : current);
+  };
+
+  const patchAgentStep = (id: AgentStepId, status: AgentStep["status"], detail?: string) => {
+    setAgentRun((current) => current ? { ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) } : current);
+  };
+
+  const startAgentRun = async (task: string) => {
+    const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
+    if (!modelConfigured) { setView("settings"); setError(text.configureAi); return; }
+    const targetServers = servers.filter((item) => item.status !== "failed");
+    if (!targetServers.length) { setError(text.managerNoServers); return; }
+    const steps: AgentStep[] = ["context", "memory", "search", "explore", "plan", "approval", "execute", "verify", "remember"].map((id) => ({ id: id as AgentStepId, label: id, status: "pending" }));
+    const run: AgentRun = { id: crypto.randomUUID(), task, targetIds: targetServers.map((item) => item.id), steps, phase: "running" };
+    setAgentRun(run);
+    setManagerInput("");
+    setManagerMessages((messages) => [...messages, { role: "user", text: task }]);
+    appendLog({ type: "manager", role: "user", title: "Server manager request", content: task, status: "info" });
+    setManagerThinking(true);
+    try {
+      patchAgentStep("context", "running", `Locked ${targetServers.length} server target${targetServers.length === 1 ? "" : "s"}.`);
+      const context = targetServers.map((item) => {
+        const profile = item.profile ? `OS=${item.profile.osName}; hostname=${item.profile.hostname}; CPU=${item.profile.cpuCores}; memory=${item.profile.memory}; disk=${item.profile.disk}; Docker=${item.profile.dockerInstalled ? `${item.profile.dockerContainers} running` : "not installed"}` : `OS=${item.system}; profile not scanned`;
+        return `${item.name} (${item.username}@${item.host}:${item.port}) [${item.status}] ${profile}`;
+      }).join("\n");
+      patchAgentStep("context", "completed", `${targetServers.length} targets locked.`);
+
+      patchAgentStep("memory", "running", "Reading saved server notes.");
+      const memory = targetServers.flatMap((item) => (item.memory ?? []).slice(-5).map((note) => `${item.name}: ${note.summary}`)).join("\n") || "No saved memory yet.";
+      patchAgentStep("memory", "completed", memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded.");
+
+      const needsSearch = /联网|搜索|最新|官方|文档|版本|发布|release|latest|documentation|search/i.test(task);
+      let webResults: WebSearchResult[] = [];
+      patchAgentStep("search", "running", needsSearch ? "Searching reference material." : "Not needed for this request.");
+      if (needsSearch) webResults = await invoke<WebSearchResult[]>("search_web", { request: { query: task } });
+      patchAgentStep("search", "completed", needsSearch ? `${webResults.length} reference result${webResults.length === 1 ? "" : "s"} found.` : "Skipped.");
+
+      patchAgentStep("explore", "running", "Reading current environment before planning.");
+      const explored = [...servers];
+      for (const target of targetServers) {
+        const request = await getCredential(target);
+        if (!request) continue;
+        try {
+          const profile = await invoke<ServerProfile>("inspect_server", { request });
+          const index = explored.findIndex((item) => item.id === target.id);
+          if (index >= 0) explored[index] = { ...explored[index], profile, system: profile.osName, status: "connected" };
+        } catch {
+          // Planning can still continue with the saved profile when a target is temporarily unavailable.
+        }
+      }
+      persistServers(explored);
+      patchAgentStep("explore", "completed", "Environment read without changing files or services.");
+
+      patchAgentStep("plan", "running", "Asking the model for a structured execution plan.");
+      const refreshedContext = explored.filter((item) => targetServers.some((target) => target.id === item.id)).map((item) => {
+        const profile = item.profile ? `OS=${item.profile.osName}; hostname=${item.profile.hostname}; CPU=${item.profile.cpuCores}; memory=${item.profile.memory}; disk=${item.profile.disk}; Docker=${item.profile.dockerInstalled ? `${item.profile.dockerContainers} running` : "not installed"}` : `OS=${item.system}; profile not scanned`;
+        return `${item.name} (${item.username}@${item.host}:${item.port}) ${profile}`;
+      }).join("\n");
+      const searchContext = webResults.length ? webResults.map((item) => `${item.title}: ${item.url}\n${item.snippet}`).join("\n") : "No web references.";
+      const plan = await askAgentPlan(aiConfig, task, language, refreshedContext, memory, searchContext);
+      patchAgentRun({ plan, phase: "waiting_approval" });
+      patchAgentStep("plan", "completed", plan.explanation);
+      patchAgentStep("approval", "running", "Waiting for user approval before any write operation.");
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: `${plan.explanation}\n\n$ ${plan.command}\n\nVerify: ${plan.verifyCommand || "not specified"}\nRisk: ${plan.risk ?? "medium"}` }]);
+      appendLog({ type: "agent", title: "AgentRun plan", content: `${task}\n\n${plan.explanation}\n\n$ ${plan.command}\n\nVerify: ${plan.verifyCommand || "not specified"}\nRisk: ${plan.risk ?? "medium"}`, status: "info" });
+    } catch (agentError) {
+      const message = agentError instanceof Error ? agentError.message : String(agentError);
+      patchAgentRun({ phase: "failed", error: message });
+      patchAgentStep("plan", "failed", message);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: `${text.aiFailed}\n${message}` }]);
+      appendLog({ type: "agent", title: "AgentRun failed", content: `${task}\n${message}`, status: "failed" });
+    } finally {
+      setManagerThinking(false);
+    }
+  };
+
+  const approveAgentRun = async () => {
+    const current = agentRun;
+    if (!current?.plan || current.phase !== "waiting_approval") return;
+    if (isHighRiskCommand(current.plan.command)) {
+      patchAgentRun({ phase: "blocked", error: "This command is blocked by the local safety policy." });
+      patchAgentStep("approval", "blocked", "High-risk command requires a dedicated safety flow.");
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: "已拦截高风险命令。请拆分任务并在明确的安全流程中执行。" }]);
+      appendLog({ type: "agent", title: "AgentRun blocked", content: current.plan.command, status: "failed" });
+      return;
+    }
+    patchAgentRun({ phase: "executing" });
+    patchAgentStep("approval", "completed", "Approved by user.");
+    patchAgentStep("execute", "running", "Executing the approved command through the local SSH gateway.");
+    setManagerThinking(true);
+    const outputs: string[] = [];
+    try {
+      for (const targetId of current.targetIds) {
+        const target = servers.find((item) => item.id === targetId);
+        if (!target) continue;
+        const request = await getCredential(target);
+        if (!request) { outputs.push(`${target.name}: no saved credentials`); continue; }
+        const output = await invoke<string>("execute_ssh_command", { request, command: current.plan.command });
+        outputs.push(`${target.name}:\n${output || "(no output)"}`);
+      }
+      patchAgentStep("execute", "completed", `${outputs.length} target result${outputs.length === 1 ? "" : "s"} returned.`);
+      patchAgentStep("verify", "running", "Checking the requested result.");
+      const verification: string[] = [];
+      if (current.plan.verifyCommand) {
+        for (const targetId of current.targetIds) {
+          const target = servers.find((item) => item.id === targetId);
+          const request = target ? await getCredential(target) : null;
+          if (!target || !request) continue;
+          const output = await invoke<string>("execute_ssh_command", { request, command: current.plan.verifyCommand });
+          verification.push(`${target.name}: ${output || "(no output)"}`);
+        }
+      }
+      patchAgentStep("verify", "completed", current.plan.verifyCommand ? "Verification command completed." : "No dedicated verification command was supplied.");
+      patchAgentStep("remember", "running", "Saving a concise result note for the next run.");
+      const completedAt = new Date().toISOString();
+      const nextServers = servers.map((item) => current.targetIds.includes(item.id) ? { ...item, memory: [...(item.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${current.task}: ${current.plan?.explanation ?? "task completed"}. Execution finished and verification was attempted.` }].slice(-20) } : item);
+      persistServers(nextServers);
+      patchAgentStep("remember", "completed", "Result summary saved locally.");
+      patchAgentRun({ phase: "completed", result: [...outputs, ...verification].join("\n\n") });
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: `任务已完成。\n\n${[...outputs, ...verification].join("\n\n")}` }]);
+      appendLog({ type: "agent", title: "AgentRun completed", content: `${current.task}\n\n${[...outputs, ...verification].join("\n\n")}`, status: "success" });
+    } catch (agentError) {
+      const message = agentError instanceof Error ? agentError.message : String(agentError);
+      patchAgentRun({ phase: "failed", error: message });
+      patchAgentStep("execute", "failed", message);
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: `${text.terminalCommandFailed}${message}` }]);
+      appendLog({ type: "agent", title: "AgentRun execution failed", content: `${current.task}\n${message}`, status: "failed" });
+    } finally {
+      setManagerThinking(false);
+    }
+  };
+
+  const rejectAgentRun = () => {
+    patchAgentRun({ phase: "blocked", error: "Cancelled by user." });
+    patchAgentStep("approval", "blocked", "User cancelled execution.");
+    setManagerMessages((messages) => [...messages, { role: "assistant", text: "已取消执行，未修改服务器。" }]);
+    appendLog({ type: "agent", title: "AgentRun cancelled", content: agentRun?.task ?? "", status: "cancelled" });
+  };
+
   const submitManagerInput = async () => {
     const input = managerInput.trim();
     if (!input) return;
+    const addServerRequest = /(添加|新增|新建).*(服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);
+    if (addServerRequest) {
+      const host = input.match(/(?:地址|IP|主机|host)[:：\s]+([a-z0-9.-]+\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})/i)?.[1] ?? "";
+      const port = input.match(/(?:端口|port)[:：\s]+(\d{1,5})/i)?.[1] ?? "22";
+      const username = input.match(/(?:用户|用户名|user|username)[:：\s]+([a-z_][\w.-]*)/i)?.[1] ?? "root";
+      setManagerInput("");
+      setManagerMessages((messages) => [...messages, { role: "user", text: input }, { role: "assistant", text: language === "zh-CN" ? "好的，已打开添加服务器窗口。请补充密码或 SSH 私钥，然后测试连接。" : "The add-server window is open. Enter the password or SSH private key, then test the connection." }]);
+      setForm({ ...initialForm, host, port, username });
+      setView("hosts");
+      setWizardOpen(true);
+      return;
+    }
+    const connectAllRequest = /连接.*所有|所有.*连接|connect\s+all/i.test(input);
+    if (connectAllRequest) {
+      setManagerInput("");
+      setManagerMessages((messages) => [...messages, { role: "user", text: input }]);
+      setManagerThinking(true);
+      try {
+        const result = await connectAllFromManager();
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: `${language === "zh-CN" ? "连接结果：" : "Connection results:"}\n${result}` }]);
+      } catch (managerError) {
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: managerError instanceof Error ? managerError.message : text.connectionFailed }]);
+      } finally {
+        setManagerThinking(false);
+      }
+      return;
+    }
+    const executeAllRequest = /所有.*(?:执行|运行|查看|检查|获取|显示)|(?:执行|运行|查看|检查).*(?:所有|每台)/i.test(input);
+    // All operational requests now go through AgentRun approval and verification.
+    if (false && executeAllRequest) {
+      if (!aiConfig.baseUrl.trim() || !aiConfig.model.trim() || (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim())) { setView("settings"); setError(text.configureAi); return; }
+      setManagerInput("");
+      setManagerMessages((messages) => [...messages, { role: "user", text: input }]);
+      setManagerThinking(true);
+      try {
+        const plan = await askShellCommand(aiConfig, `在所有已保存的 Linux 服务器上完成：${input}`, language);
+        const result = await executeAllFromManager(plan.command);
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: `${plan.explanation}\n\n$ ${plan.command}\n\n${result}` }]);
+      } catch (managerError) {
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: managerError instanceof Error ? managerError.message : text.aiFailed }]);
+      } finally {
+        setManagerThinking(false);
+      }
+      return;
+    }
+    return startAgentRun(input);
     if (!aiConfig.baseUrl.trim() || !aiConfig.model.trim() || (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim())) { setView("settings"); setError(text.configureAi); return; }
     const context = servers.length ? servers.map((item) => {
       const profile = item.profile ? `OS=${item.profile.osName}, hostname=${item.profile.hostname}, CPU=${item.profile.cpuCores}, memory=${item.profile.memory}, disk=${item.profile.disk}, Docker=${item.profile.dockerInstalled ? `${item.profile.dockerContainers} running` : "not installed"}` : `OS=${item.system}, profile not scanned`;
@@ -169,28 +501,65 @@ function App() {
     finally { setManagerThinking(false); }
   };
 
+  const stopCurrentCommand = async () => {
+    const commandId = activeCommandId.current;
+    if (!commandId) {
+      setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "当前没有正在执行的命令。" : "There is no running command." }]);
+      return;
+    }
+    try {
+      await invoke("stop_ssh_command", { commandId });
+      setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "正在停止当前命令…" : "Stopping the current command…" }]);
+    } catch (stopError) {
+      setTerminalLines((lines) => [...lines, { kind: "system", text: stopError instanceof Error ? stopError.message : String(stopError) }]);
+    }
+  };
+
   const submitTerminalInput = async () => {
     const input = terminalInput.trim();
-    if (!input || !server) return;
+    if (!server) return;
+    if (/^\/?stop$/i.test(input)) {
+      setTerminalInput("");
+      await stopCurrentCommand();
+      return;
+    }
+    if (!input || isExecuting) return;
     const request = activeCredentials.current[server.id];
     if (!request) { setError(text.noCredentials); return; }
+    const commandId = crypto.randomUUID();
+    activeCommandId.current = commandId;
+    const commandRequest = { ...request, commandId };
+    appendLog({ type: "terminal", title: "SSH command", serverId: server.id, serverName: server.name, content: input, status: "info" });
     setTerminalInput("");
-    setTerminalLines((lines) => [...lines, { kind: "command", text: terminalMode === "shell" ? input : `自然语言 › ${input}` }]);
+    const detectedAsCommand = isLikelyShellCommand(input);
+    const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
+    setTerminalLines((lines) => [...lines, { kind: detectedAsCommand ? "command" : "ai", text: input }]);
     setExecuting(true); setError("");
     try {
-      if (terminalMode === "ai") {
-        if (!aiConfig.baseUrl.trim() || !aiConfig.model.trim() || (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim())) { setTerminalLines((lines) => [...lines, { kind: "system", text: text.terminalAiNeedModel }]); setView("settings"); return; }
+      if (aiConfig.interventionMode !== "none" && modelConfigured && (aiConfig.interventionMode === "always" || !detectedAsCommand)) {
         const profileContext = server.profile ? `OS: ${server.profile.osName}; hostname: ${server.profile.hostname}; CPU: ${server.profile.cpuCores}; memory: ${server.profile.memory}; disk: ${server.profile.disk}; Docker: ${server.profile.dockerInstalled ? "installed" : "not installed"}.` : `OS: ${server.system}.`;
         const prompt = language === "zh-CN" ? `用户想在服务器 ${server.name} 上完成这个任务：${input}\n服务器只读信息：${profileContext}\n请说明你理解的目标、建议的 Shell 命令和风险。不要执行命令，不要声称已经完成。` : `The user wants to do this on server ${server.name}: ${input}\nRead-only server context: ${profileContext}\nExplain your understanding, suggest the shell command and describe the risk. Do not execute the command or claim it has been completed.`;
-        const response = await askModel(aiConfig, prompt, language);
-        setTerminalLines((lines) => [...lines, { kind: "ai", text: response }]);
+        try {
+          const plan = await askShellCommand(aiConfig, prompt, language);
+          const executablePlan = detectedAsCommand ? { ...plan, command: input } : plan;
+          setTerminalLines((lines) => [...lines, { kind: "ai", text: executablePlan.explanation }, { kind: "command", text: executablePlan.command }]);
+          const output = await invoke<string>("execute_ssh_command", { request: commandRequest, command: executablePlan.command });
+          setTerminalLines((lines) => [...lines, { kind: "output", text: output || "(no output)" }]);
+          appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: output || "(no output)", status: "success" });
+        } catch {
+          const output = await invoke<string>("execute_ssh_command", { request: commandRequest, command: input });
+          appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: output || "(no output)", status: "success" });
+          setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "AI 未连通，已降级为普通 SSH 命令模式。" : "AI is unavailable. Fell back to standard SSH command mode." }, { kind: "output", text: output || "(no output)" }]);
+        }
       } else {
-        const output = await invoke<string>("execute_ssh_command", { request, command: input });
+        const output = await invoke<string>("execute_ssh_command", { request: commandRequest, command: input });
+        appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: output || "(no output)", status: "success" });
         setTerminalLines((lines) => [...lines, { kind: "output", text: output || "(no output)" }]);
       }
     } catch (commandError) {
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` }]);
-    } finally { setExecuting(false); }
+      appendLog({ type: "terminal", title: "SSH command failed", serverId: server.id, serverName: server.name, content: commandError instanceof Error ? commandError.message : String(commandError), status: "failed" });
+    } finally { activeCommandId.current = null; setExecuting(false); }
   };
 
   const connect = async () => {
@@ -202,10 +571,16 @@ function App() {
     setConnecting(true); setError("");
     try {
       const request = requestForForm();
-      const result = await invoke<{ system: string }>("test_ssh_connection", { request });
-      const nextServer: Server = { id: `${form.host.trim()}:${Number(form.port)}`, name: form.name.trim() || form.host.trim(), host: form.host.trim(), port: Number(form.port), username: form.username.trim(), system: result.system, status: "connected" };
+      const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
+      const nextServer: Server = { id: `${form.host.trim()}:${Number(form.port)}`, name: form.name.trim() || form.host.trim(), host: form.host.trim(), port: Number(form.port), username: form.username.trim(), system: result.system, latency: result.latencyMs, status: "connected" };
       activeCredentials.current[nextServer.id] = request;
-      const next = [nextServer, ...servers.filter((item) => item.id !== nextServer.id)];
+      try {
+        if (form.rememberCredentials) await invoke("save_server_credential", { serverId: nextServer.id, credential: request });
+        else await invoke("delete_server_credential", { serverId: nextServer.id });
+      } catch {
+        setError(language === "zh-CN" ? "连接成功，但 Windows 安全凭据保存失败。" : "Connected, but Windows could not save the credential.");
+      }
+      const next = [{ ...nextServer, note: form.note.trim() || undefined }, ...servers.filter((item) => item.id !== nextServer.id)];
       persistServers(next); setServer(nextServer); setWizardOpen(false); setView("hosts");
     } catch (connectionError) { setError(connectionError instanceof Error ? connectionError.message : typeof connectionError === "string" ? connectionError : text.connectionFailed); }
     finally { setConnecting(false); }
@@ -243,56 +618,153 @@ function App() {
     if (!aiConfig.model.trim()) return setError(text.modelMissing);
     if (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim()) return setError(text.keyMissing);
     const next = { ...aiConfig, baseUrl: normalizeBaseUrl(aiConfig.baseUrl), model: aiConfig.model.trim() };
-    setAiConfig(next); persistData(servers, next); setModelStatus(text.savedLocal); setError("");
+    setAiConfig(next); setModelConnection("unknown"); persistData(servers, next, language, "unknown"); setModelStatus(text.savedLocal); setError("");
   };
 
   const testAiConfig = async () => {
     if (!aiConfig.baseUrl.trim()) return setError(text.apiMissing);
+    if (!aiConfig.model.trim()) return setError(text.modelMissing);
     if (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim()) return setError(text.keyMissing);
-    setTestingModel(true); setModelStatus(""); setError("");
+    setTestingModel(true); setModelConnection("unknown"); setModelStatus(""); setError("");
     try {
-      const models = await listModels(aiConfig);
-      if (models.length > 0 && !aiConfig.model.trim()) setAiConfig((current) => ({ ...current, model: models[0] }));
-      setModelStatus(models.length > 0 ? text.connectionFound(models.length) : text.connectionNoList);
-    } catch (modelError) { setError(modelError instanceof Error ? `${text.modelFailed} ${modelError.message}` : text.modelFailed); }
+      const next = { ...aiConfig, baseUrl: normalizeBaseUrl(aiConfig.baseUrl), model: aiConfig.model.trim() };
+      await askModel(next, language === "zh-CN" ? "请只回复：连接成功。" : "Reply with exactly: connection successful.", language);
+      setAiConfig(next);
+      setModelConnection("connected");
+      persistData(servers, next, language, "connected");
+      setModelStatus(language === "zh-CN" ? "连接成功，模型已保存" : "Connected. Model saved");
+    } catch (modelError) { setModelConnection("failed"); setError(modelError instanceof Error ? `${text.modelFailed} ${modelError.message}` : text.modelFailed); }
     finally { setTestingModel(false); }
   };
 
-  const selectProvider = (provider: AiProvider) => { const preset = providerPresets[provider]; setAiConfig((current) => ({ ...current, provider, baseUrl: preset.baseUrl, model: preset.model })); setModelStatus(""); setError(""); };
+  const selectProvider = (provider: AiProvider) => { const preset = providerPresets[provider]; setAiConfig((current) => ({ ...current, provider, baseUrl: preset.baseUrl, model: preset.model })); setModelConnection("unknown"); setModelStatus(""); setError(""); };
   const lastServerClick = useRef<{ id: string; time: number }>({ id: "", time: 0 });
   const selectServer = (selected: Server) => { const now = Date.now(); const isDoubleClick = lastServerClick.current.id === selected.id && now - lastServerClick.current.time < 450; lastServerClick.current = { id: selected.id, time: now }; if (isDoubleClick) { openTerminal(selected); return; } setServer(selected); setView("hosts"); setError(""); };
+  const modelConfiguredForStatus = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
+  const modelStatusClass = !modelConfiguredForStatus ? "ai-status-unconfigured" : modelConnection === "connected" ? "ai-status-connected" : modelConnection === "failed" ? "ai-status-failed" : "ai-status-unknown";
+  const modelStatusLabel = !modelConfiguredForStatus ? text.aiStatusNotConfigured : modelConnection === "connected" ? text.aiStatusConnected : modelConnection === "failed" ? text.aiStatusFailed : text.aiStatusNotTested;
 
-  return <main className="shell">
+  return <main className={view === "terminal" ? "shell terminal-shell" : view === "hosts" ? "shell hosts-dashboard-mode" : "shell"}>
     <aside className="sidebar">
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
-      <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
-      {servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : ""}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host}</small></span></button>)}</div>}
+      <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
-      <div className="sidebar-note">{text.localFirst}<br />{text.credentialsLocal}</div>
+       <div className="sidebar-note">v0.1.0-alpha.2</div>
     </aside>
-    <section className="content">
-      {view === "terminal" && server && <TerminalPanel server={server} text={text} mode={terminalMode} input={terminalInput} lines={terminalLines} executing={isExecuting} onModeChange={setTerminalMode} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onExit={() => setView("hosts")} />}
-      {view === "manager" && <ManagerPanel text={text} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
-      {contextMenu && <ServerContextMenu text={text} state={contextMenu} onConnect={() => connectSavedServer(contextMenu.server)} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onView={() => { setContextMenu(null); selectServer(contextMenu.server); }} />}
-      {view === "settings" ? <section className="settings-view"><header className="topbar"><div><p className="eyebrow">{text.localConfig}</p><h1>{text.settings}</h1></div><span className="status-pill">{text.localOnly}</span></header><div className="settings-card"><div className="settings-heading"><div><h2>{text.addAiModel}</h2><p>{text.aiModelIntro}</p></div><span className="read-only-pill">{text.apiDirect}</span></div><label className="field-label">{text.language}<select value={language} onChange={(event) => changeLanguage(event.target.value as Locale)}><option value="zh-CN">{text.simplifiedChinese}</option><option value="en-US">{text.english}</option></select></label><p className="settings-note language-note">{text.languageNote}</p><label className="field-label">{text.modelService}<select value={aiConfig.provider} onChange={(event) => selectProvider(event.target.value as AiProvider)}>{Object.entries(providerPresets).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</select></label><label className="field-label">{text.apiAddress}<input value={aiConfig.baseUrl} onChange={(event) => updateAi("baseUrl", event.target.value)} placeholder={text.apiPlaceholder} /></label><label className="field-label">{text.apiKey}{!providerPresets[aiConfig.provider].keyRequired && <span> {text.optional}</span>}<input type="password" value={aiConfig.apiKey} onChange={(event) => updateAi("apiKey", event.target.value)} placeholder={aiConfig.provider === "ollama" ? text.ollamaKey : text.keyPlaceholder} /></label><label className="field-label">{text.modelName}<input value={aiConfig.model} onChange={(event) => updateAi("model", event.target.value)} placeholder={text.modelPlaceholder} /></label><div className="settings-actions"><button className="secondary" onClick={testAiConfig} disabled={isTestingModel}>{isTestingModel ? text.testing : text.testConnection}</button><button className="primary" onClick={saveAiConfig}>{text.saveModel}</button></div>{modelStatus && <p className="success-text">✓ {modelStatus}</p>}<p className="settings-note">{text.keyLocalNote}</p></div></section> : <><header className="topbar"><div><p className="eyebrow">{text.welcome}</p><h1>{text.hosts}</h1></div><span className="status-pill">{text.localMode}</span></header>{server ? <section className="server-view" id="hosts"><div className="server-card"><div className="server-card-top"><div className="server-orb">⌁</div><span className={`connected-badge ${server.status === "saved" ? "saved-badge" : ""}`}>● {server.status === "connected" ? text.connected : text.saved}</span></div><h2>{server.name}</h2><p className="server-address">{server.username}@{server.host}:{server.port}</p><div className="server-meta"><div><span>{text.system}</span><strong>{server.profile?.osName ?? server.system}</strong></div><div><span>{text.connectionMethod}</span><strong>{text.ssh}</strong></div></div><button className="primary" onClick={openWizard}>{text.addAnother}</button></div>{server.profile ? <div className="profile-panel"><div className="profile-heading"><div><p className="eyebrow">{text.serverProfile}</p><h2>{text.understood}</h2></div><span className="read-only-pill">{text.readOnly}</span></div><p className="profile-summary">{text.profileIntro}</p><div className="profile-grid"><div><span>{text.hostname}</span><strong>{server.profile.hostname}</strong></div><div><span>{text.cpu}</span><strong>{server.profile.cpuCores} {language === "zh-CN" ? "核" : "cores"}</strong></div><div><span>{text.memory}</span><strong>{server.profile.memory}</strong></div><div><span>{text.disk}</span><strong>{server.profile.disk}</strong></div><div><span>{text.docker}</span><strong>{server.profile.dockerInstalled ? text.installedRunning(server.profile.dockerContainers) : text.notInstalled}</strong></div></div><div className="profile-actions"><button className="text-button" onClick={scanServer}>{text.rescan}</button><button className="primary small-button" onClick={analyzeServer} disabled={isAnalyzing}>{isAnalyzing ? text.analyzing : text.analyzeServer}</button></div>{server.aiSummary && <div className="ai-summary"><p className="eyebrow">{text.aiInterpretation}</p><div>{server.aiSummary}</div></div>}</div> : <button className="next-step clickable" onClick={scanServer} disabled={isScanning}><span className="step-icon">✦</span><div><strong>{isScanning ? text.understanding : text.nextStep}</strong><p>{isScanning ? text.scanWait : text.scanIntro}</p></div><span className="arrow">→</span></button>}</section> : <section className="empty-state" id="hosts"><div className="hero-icon">⌁</div><h2>{text.connectFirst}</h2><p>{text.connectIntro}</p><button className="primary" onClick={openWizard}>{text.startConnect}</button><button className="secondary">{text.demo}</button></section>}{error && <div className="global-error">{error}</div>}<section className="principles" id="tasks"><div><strong>{text.principles[0]}</strong><span>{text.principles[1]}</span></div><div><strong>{text.principles[2]}</strong><span>{text.principles[3]}</span></div><div><strong>{text.principles[4]}</strong><span>{text.principles[5]}</span></div></section></>}
-    </section>
-    {isWizardOpen && <div className="modal-backdrop" role="presentation"><section className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title"><div className="wizard-header"><div><p className="eyebrow">{text.firstStep}</p><h2 id="wizard-title">{text.addWizardTitle}</h2></div><button className="close-button" onClick={() => setWizardOpen(false)} aria-label={text.close}>×</button></div><p className="wizard-intro">{text.wizardIntro}</p><label>{text.serverName}<span>{text.optional}</span><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder={text.serverNamePlaceholder} /></label><div className="field-row"><label>{text.serverAddress}<input value={form.host} onChange={(event) => update("host", event.target.value)} placeholder={text.serverAddressPlaceholder} autoFocus /></label><label className="port-field">{text.port}<input value={form.port} onChange={(event) => update("port", event.target.value)} inputMode="numeric" /></label></div><label>{text.username}<input value={form.username} onChange={(event) => update("username", event.target.value)} placeholder={text.usernamePlaceholder} /></label><div className="auth-tabs"><button className={form.authMethod === "password" ? "selected" : ""} onClick={() => update("authMethod", "password")}>{text.passwordLogin}</button><button className={form.authMethod === "privateKey" ? "selected" : ""} onClick={() => update("authMethod", "privateKey")}>{text.privateKey}</button></div>{form.authMethod === "password" ? <label>{text.password}<input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder={text.passwordPlaceholder} /></label> : <><label>{text.keyPath}<input value={form.privateKeyPath} onChange={(event) => update("privateKeyPath", event.target.value)} placeholder={text.keyPathPlaceholder} /></label><label>{text.passphrase}<span>{text.optional}</span><input type="password" value={form.passphrase} onChange={(event) => update("passphrase", event.target.value)} /></label></>}{error && <div className="error-box">{error}</div>}<div className="wizard-footer"><button className="secondary" onClick={() => setWizardOpen(false)}>{text.cancel}</button><button className="primary" onClick={connect} disabled={isConnecting}>{isConnecting ? text.connecting : text.connect}</button></div></section></div>}
+     <section className="content">
+       {view === "tasks" && <TaskHistoryPanel logs={logs} language={language} onClear={clearLogs} onExit={() => setView("hosts")} />}
+      {view === "terminal" && server && <TerminalPanel server={server} text={text} input={terminalInput} lines={terminalLines} executing={isExecuting} autoLabel={language === "zh-CN" ? "自动识别" : "Auto detect"} autoPlaceholder={language === "zh-CN" ? "输入命令，或输入 stop 停止当前命令…" : "Enter a command, or type stop to stop…"} actionLabel={language === "zh-CN" ? "发送" : "Send"} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={() => setView("hosts")} />}
+      {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
+      {contextMenu && <ServerContextMenu text={text} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
+      {view === "hosts" && <ServerDashboard servers={servers} text={text} language={language} modelStatusClass={modelStatusClass} modelStatusLabel={modelStatusLabel} onAdd={openWizard} onOpen={openTerminal} onConnect={(item) => { void connectSavedServer(item); }} onEdit={editServer} />}
+      {view === "settings" ? <section className="settings-view"><header className="topbar"><div><p className="eyebrow">{text.localConfig}</p><h1>{text.settings}</h1></div><span className="status-pill">{text.localOnly}</span></header><div className="settings-card"><div className="settings-heading"><div><h2>{text.addAiModel}</h2><p>{text.aiModelIntro}</p></div><span className="read-only-pill">{text.apiDirect}</span></div><label className="field-label">{text.language}<select value={language} onChange={(event) => changeLanguage(event.target.value as Locale)}><option value="zh-CN">{text.simplifiedChinese}</option><option value="en-US">{text.english}</option></select></label><p className="settings-note language-note">{text.languageNote}</p><label className="field-label">{text.modelService}<select value={aiConfig.provider} onChange={(event) => selectProvider(event.target.value as AiProvider)}>{Object.entries(providerPresets).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</select></label><label className="field-label">{text.apiAddress}<input value={aiConfig.baseUrl} onChange={(event) => updateAi("baseUrl", event.target.value)} placeholder={text.apiPlaceholder} /></label><label className="field-label">{text.apiKey}{!providerPresets[aiConfig.provider].keyRequired && <span> {text.optional}</span>}<input type="password" value={aiConfig.apiKey} onChange={(event) => updateAi("apiKey", event.target.value)} placeholder={aiConfig.provider === "ollama" ? text.ollamaKey : text.keyPlaceholder} /></label><label className="field-label">{text.modelName}<input value={aiConfig.model} onChange={(event) => updateAi("model", event.target.value)} placeholder={text.modelPlaceholder} /></label><div className="settings-actions"><button className="secondary" onClick={testAiConfig} disabled={isTestingModel}>{isTestingModel ? text.testing : text.testConnection}</button><button className="primary" onClick={saveAiConfig}>{text.saveModel}</button></div>{modelStatus && <p className="success-text">✓ {modelStatus}</p>}<p className="settings-note">{text.keyLocalNote}</p></div></section> : <><header className="topbar"><div><p className="eyebrow">{text.welcome}</p><h1>{text.hosts}</h1></div><span className={`status-pill ${modelStatusClass}`}>{modelStatusLabel}</span></header>{server ? <section className="server-view" id="hosts"><div className="server-card"><div className="server-card-top"><div className="server-orb">⌁</div><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></div><h2>{server.name}</h2><p className="server-address">{server.username}@{server.host}:{server.port} · {formatLatency(server.latency, language)}</p><div className="server-meta"><div><span>{text.system}</span><strong>{server.profile?.osName ?? server.system}</strong></div><div><span>{text.connectionMethod}</span><strong>{text.ssh}</strong></div></div><button className="primary" onClick={openWizard}>{text.addAnother}</button></div>{server.profile ? <div className="profile-panel"><div className="profile-heading"><div><p className="eyebrow">{text.serverProfile}</p><h2>{text.understood}</h2></div><span className="read-only-pill">{text.readOnly}</span></div><p className="profile-summary">{text.profileIntro}</p><div className="profile-grid"><div><span>{text.hostname}</span><strong>{server.profile.hostname}</strong></div><div><span>{text.cpu}</span><strong>{server.profile.cpuCores} {language === "zh-CN" ? "核" : "cores"}</strong></div><div><span>{text.memory}</span><strong>{server.profile.memory}</strong></div><div><span>{text.disk}</span><strong>{server.profile.disk}</strong></div><div><span>{text.docker}</span><strong>{server.profile.dockerInstalled ? text.installedRunning(server.profile.dockerContainers) : text.notInstalled}</strong></div></div><div className="profile-actions"><button className="text-button" onClick={scanServer}>{text.rescan}</button><button className="primary small-button" onClick={analyzeServer} disabled={isAnalyzing}>{isAnalyzing ? text.analyzing : text.analyzeServer}</button></div>{server.aiSummary && <div className="ai-summary"><p className="eyebrow">{text.aiInterpretation}</p><div>{server.aiSummary}</div></div>}</div> : <button className="next-step clickable" onClick={scanServer} disabled={isScanning}><span className="step-icon">✦</span><div><strong>{isScanning ? text.understanding : text.nextStep}</strong><p>{isScanning ? text.scanWait : text.scanIntro}</p></div><span className="arrow">→</span></button>}</section> : <section className="empty-state" id="hosts"><div className="hero-icon">⌁</div><h2>{text.connectFirst}</h2><p>{text.connectIntro}</p><button className="primary" onClick={openWizard}>{text.startConnect}</button><button className="secondary">{text.demo}</button></section>}{error && <div className="global-error">{error}</div>}<section className="principles" id="tasks"><div><strong>{text.principles[0]}</strong><span>{text.principles[1]}</span></div><div><strong>{text.principles[2]}</strong><span>{text.principles[3]}</span></div><div><strong>{text.principles[4]}</strong><span>{text.principles[5]}</span></div></section></>}
+     {view === "settings" && <section className="settings-card intervention-settings"><div className="settings-heading"><div><h2>{language === "zh-CN" ? "AI 介入模式" : "AI intervention"}</h2><p>{language === "zh-CN" ? "选择 AI 参与服务器会话的程度。" : "Choose how deeply AI participates in server sessions."}</p></div><span className="read-only-pill">{aiConfig.interventionMode === "always" ? (language === "zh-CN" ? "全程" : "Always") : aiConfig.interventionMode === "none" ? (language === "zh-CN" ? "关闭" : "Off") : (language === "zh-CN" ? "智能" : "Smart")}</span></div><label className="field-label">{language === "zh-CN" ? "会话模式" : "Session mode"}<select value={aiConfig.interventionMode} onChange={(event) => updateAi("interventionMode", event.target.value as AiInterventionMode)}><option value="smart">{language === "zh-CN" ? "AI 智能介入（推荐）" : "Smart AI intervention (recommended)"}</option><option value="always">{language === "zh-CN" ? "AI 全程介入（推荐本地模型）" : "AI always involved (recommended for local models)"}</option><option value="none">{language === "zh-CN" ? "AI 全程不介入（传统 SSH）" : "AI not involved (classic SSH)"}</option></select></label><p className="settings-note">{aiConfig.interventionMode === "always" ? (language === "zh-CN" ? "命令和自然语言都会先交给 AI 理解。" : "Commands and natural language are both interpreted by AI first.") : aiConfig.interventionMode === "none" ? (language === "zh-CN" ? "所有输入直接作为 Shell 命令执行。" : "All input is sent directly as a Shell command.") : (language === "zh-CN" ? "识别为命令时直接执行，自然语言才调用 AI；模型不可用时自动降级。" : "Commands execute directly, natural language uses AI; unavailable AI falls back automatically.")}</p></section>}
+     {view === "settings" && error && <div className="global-error settings-error">{error}</div>}
+     </section>
+    {isWizardOpen && <div className="modal-backdrop" role="presentation"><section className="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title"><div className="wizard-header"><div><p className="eyebrow">{text.firstStep}</p><h2 id="wizard-title">{text.addWizardTitle}</h2></div><button className="close-button" onClick={() => setWizardOpen(false)} aria-label={text.close}>×</button></div><p className="wizard-intro">{text.wizardIntro}</p><label>{text.serverName}<span>{text.optional}</span><input value={form.name} onChange={(event) => update("name", event.target.value)} placeholder={text.serverNamePlaceholder} /></label><label>{language === "zh-CN" ? "备注" : "Note"}<span>{language === "zh-CN" ? "可选" : "Optional"}</span><textarea value={form.note} onChange={(event) => update("note", event.target.value)} placeholder={language === "zh-CN" ? "例如：负责商城 API 的 Docker 主机" : "For example: Docker host for the shop API"} rows={2} /></label><div className="field-row"><label>{text.serverAddress}<input value={form.host} onChange={(event) => update("host", event.target.value)} placeholder={text.serverAddressPlaceholder} autoFocus /></label><label className="port-field">{text.port}<input value={form.port} onChange={(event) => update("port", event.target.value)} inputMode="numeric" /></label></div><label>{text.username}<input value={form.username} onChange={(event) => update("username", event.target.value)} placeholder={text.usernamePlaceholder} /></label><div className="auth-tabs"><button className={form.authMethod === "password" ? "selected" : ""} onClick={() => update("authMethod", "password")}>{text.passwordLogin}</button><button className={form.authMethod === "privateKey" ? "selected" : ""} onClick={() => update("authMethod", "privateKey")}>{text.privateKey}</button></div>{form.authMethod === "password" ? <label>{text.password}<input type="password" value={form.password} onChange={(event) => update("password", event.target.value)} placeholder={text.passwordPlaceholder} /></label> : <><label>{text.keyPath}<input value={form.privateKeyPath} onChange={(event) => update("privateKeyPath", event.target.value)} placeholder={text.keyPathPlaceholder} /></label><label>{text.passphrase}<span>{text.optional}</span><input type="password" value={form.passphrase} onChange={(event) => update("passphrase", event.target.value)} /></label></>}{error && <div className="error-box">{error}</div>}<div className="wizard-footer"><button className="secondary" onClick={() => setWizardOpen(false)}>{text.cancel}</button><button className="primary" onClick={connect} disabled={isConnecting}>{isConnecting ? text.connecting : text.connect}</button></div></section></div>}
   </main>;
 }
 
-function ServerContextMenu({ text, state, onConnect, onTerminal, onView }: { text: typeof zh; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onView: () => void }) {
-  return <div className="server-context-menu" style={{ left: state.x, top: state.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}><strong>{state.server.name}</strong><button onClick={onConnect}>↻ {text.contextConnect}</button><button onClick={onTerminal}>〉 {text.contextTerminal}</button><button onClick={onView}>▣ {text.contextView}</button></div>;
+function getServerStatusLabel(status: ServerStatus, language: Locale, text: typeof zh) {
+  if (status === "connecting") return language === "zh-CN" ? "连接中" : "Connecting";
+  if (status === "failed") return language === "zh-CN" ? "连接失败" : "Connection failed";
+  return status === "connected" ? text.connected : text.notConnected;
 }
 
-function ManagerPanel({ text, servers, messages, input, thinking, onInputChange, onSubmit, onExit }: { text: typeof zh; servers: Server[]; messages: ManagerMessage[]; input: string; thinking: boolean; onInputChange: (value: string) => void; onSubmit: () => void; onExit: () => void }) {
-  return <section className="manager-view"><div className="manager-header"><div><p className="eyebrow">OpsNest</p><h1>{text.managerTitle}</h1><span>{text.managerSubtitle}</span></div><button className="secondary" onClick={onExit}>{text.managerExit}</button></div><div className="manager-layout"><aside className="manager-inventory"><h3>{text.servers}</h3>{servers.length ? servers.map((item) => <div className="manager-server" key={item.id}><span className={`host-dot ${item.status === "connected" ? "online" : ""}`}></span><div><strong>{item.name}</strong><small>{item.host}</small><em>{item.profile ? item.profile.osName : item.system}</em></div></div>) : <p className="manager-empty">{text.managerNoServers}</p>}</aside><div className="manager-chat"><div className="manager-messages"><div className="manager-intro">{text.managerIntro}</div>{messages.map((message, index) => <div className={`manager-message ${message.role}`} key={`${index}-${message.role}`}><span>{message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "•"}</span><pre>{message.text}</pre></div>)}{thinking && <div className="manager-message assistant"><span>AI</span><pre>{text.managerThinking}</pre></div>}</div><form className="manager-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><textarea value={input} onChange={(event) => onInputChange(event.target.value)} placeholder={text.managerPlaceholder} disabled={thinking} rows={2} autoFocus /><button className="primary" type="submit" disabled={thinking || !input.trim()}>{text.managerSend}</button></form></div></div></section>;
+function formatLatency(latency: number | undefined, language: Locale) {
+  if (latency === undefined) return "—";
+  return `${latency}ms`;
 }
 
-function TerminalPanel({ server, text, mode, input, lines, executing, onModeChange, onInputChange, onSubmit, onExit }: { server: Server; text: typeof zh; mode: TerminalMode; input: string; lines: TerminalLine[]; executing: boolean; onModeChange: (mode: TerminalMode) => void; onInputChange: (value: string) => void; onSubmit: () => void; onExit: () => void }) {
-  return <section className="terminal-view"><div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><button className="secondary terminal-exit" onClick={onExit}>{text.terminalExit}</button></div><div className="terminal-toolbar"><button className={mode === "shell" ? "terminal-mode active" : "terminal-mode"} onClick={() => onModeChange("shell")}>〉 {text.terminalShell}</button><button className={mode === "ai" ? "terminal-mode active" : "terminal-mode"} onClick={() => onModeChange("ai")}>✦ {text.terminalAi}</button><span className="terminal-status">● {executing ? text.terminalConnecting : text.connected}</span></div><div className="terminal-screen"><div className="terminal-welcome">{text.terminalEmpty}</div>{lines.map((line, index) => <div className={`terminal-line ${line.kind}`} key={`${index}-${line.kind}`}><span className="terminal-prefix">{line.kind === "command" ? "$" : line.kind === "ai" ? "✦" : line.kind === "system" ? "•" : ""}</span><pre>{line.text}</pre></div>)}</div><form className="terminal-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><span className="terminal-prompt">{mode === "shell" ? "$" : "✦"}</span><input value={input} onChange={(event) => onInputChange(event.target.value)} placeholder={mode === "shell" ? text.terminalPlaceholder : text.terminalAiPlaceholder} disabled={executing} autoFocus /><button className="primary" type="submit" disabled={executing || !input.trim()}>{mode === "shell" ? text.terminalShell : text.terminalAi}</button></form></section>;
+function getLatencyClass(latency: number | undefined) {
+  if (latency === undefined) return "empty";
+  if (latency <= 100) return "good";
+  if (latency <= 200) return "warn";
+  return "bad";
+}
+
+function ServerContextMenu({ text, editLabel, state, onConnect, onTerminal, onEdit }: { text: typeof zh; editLabel: string; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onEdit: () => void }) {
+  return <div className="server-context-menu" style={{ left: state.x, top: state.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}><strong>{state.server.name}</strong><button onClick={onConnect}>↻ {text.contextConnect}</button><button onClick={onTerminal}>〉 {text.contextTerminal}</button><button onClick={onEdit}>✎ {editLabel}</button></div>;
+}
+
+function ServerDashboard({ servers, text, language, modelStatusClass, modelStatusLabel, onAdd, onOpen, onConnect, onEdit }: { servers: Server[]; text: typeof zh; language: Locale; modelStatusClass: string; modelStatusLabel: string; onAdd: () => void; onOpen: (server: Server) => void; onConnect: (server: Server) => void; onEdit: (server: Server) => void }) {
+  return <section className="dashboard-view">
+    <header className="dashboard-header"><div><p className="eyebrow">OpsNest</p><h1>{text.hosts}</h1><span>{servers.length ? (language === "zh-CN" ? `${servers.length} 台服务器` : `${servers.length} server${servers.length === 1 ? "" : "s"}`) : (language === "zh-CN" ? "还没有服务器" : "No servers yet")}</span></div><div className="dashboard-header-actions"><span className={`status-pill ${modelStatusClass}`}>{modelStatusLabel}</span><button className="primary" onClick={onAdd}>＋ {text.addServer}</button></div></header>
+    {servers.length ? <div className="dashboard-grid">{servers.map((item) => {
+      const profile = item.profile;
+      const primaryLabel = item.status === "connected" ? (language === "zh-CN" ? "打开 SSH" : "Open SSH") : item.status === "connecting" ? (language === "zh-CN" ? "连接中…" : "Connecting…") : (language === "zh-CN" ? "连接服务器" : "Connect");
+      return <article className="dashboard-card" key={item.id} onDoubleClick={() => onOpen(item)}>
+        <div className="dashboard-card-header"><div className="dashboard-card-title"><div className="server-orb">⌁</div><div><h2>{item.name}</h2><p>{item.username}@{item.host}:{item.port}</p></div></div><span className={`connected-badge ${item.status}-badge`}>● {getServerStatusLabel(item.status, language, text)}</span></div>
+        <div className="dashboard-meta"><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span><span>{profile?.osName ?? item.system}</span></div>
+        {profile ? <div className="dashboard-metrics"><div><span>{text.cpu}</span><strong>{profile.cpuCores} {language === "zh-CN" ? "核" : "cores"}</strong></div><div><span>{text.memory}</span><strong>{profile.memory}</strong></div><div><span>{text.disk}</span><strong>{profile.disk}</strong></div><div><span>{text.docker}</span><strong>{profile.dockerInstalled ? text.installedRunning(profile.dockerContainers) : text.notInstalled}</strong></div></div> : <div className="dashboard-unscanned">{language === "zh-CN" ? "连接后可读取服务器资源信息" : "Connect to read server resources"}</div>}
+        <div className="dashboard-actions"><button className="primary small-button" onClick={(event) => { event.stopPropagation(); item.status === "connected" ? onOpen(item) : onConnect(item); }} disabled={item.status === "connecting"}>{primaryLabel}</button><button className="text-button" onClick={(event) => { event.stopPropagation(); onEdit(item); }}>{language === "zh-CN" ? "编辑" : "Edit"}</button></div>
+      </article>;
+    })}</div> : <div className="dashboard-empty"><div className="dashboard-empty-icon">⌁</div><h2>{text.connectFirst}</h2><p>{language === "zh-CN" ? "添加服务器后，这里会显示它的运行状态和资源概览。" : "Add a server to see its status and resource overview here."}</p><button className="primary" onClick={onAdd}>{text.startConnect}</button></div>}
+  </section>;
+}
+
+function TaskHistoryPanel({ logs, language, onClear, onExit }: { logs: ActivityLog[]; language: Locale; onClear: () => void; onExit: () => void }) {
+  const label = language === "zh-CN" ? { title: "任务记录", subtitle: "查看本机保存的对话、命令和 AgentRun 操作", empty: "还没有日志记录", clear: "清空记录", exit: "返回服务器", manager: "服务器总管", terminal: "SSH 终端", agent: "AgentRun", system: "系统" } : { title: "Activity history", subtitle: "Chats, commands and AgentRun activity saved on this computer", empty: "No activity recorded yet", clear: "Clear history", exit: "Back to servers", manager: "Server manager", terminal: "SSH terminal", agent: "AgentRun", system: "System" };
+  const typeLabel = (type: ActivityLog["type"]) => label[type];
+  return <section className="task-history-view"><header className="task-history-header"><div><p className="eyebrow">OpsNest</p><h1>{label.title}</h1><span>{label.subtitle}</span></div><div className="task-history-actions"><button className="secondary" onClick={onClear}>{label.clear}</button><button className="primary" onClick={onExit}>{label.exit}</button></div></header>{logs.length ? <div className="task-history-list">{[...logs].reverse().map((log) => <article className={`task-log-card ${log.status ?? "info"}`} key={log.id}><div className="task-log-top"><strong>{typeLabel(log.type)} · {log.title}</strong><time>{new Date(log.timestamp).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US")}</time></div>{log.serverName && <small>{log.serverName}</small>}<pre>{log.content}</pre></article>)}</div> : <div className="task-history-empty"><div>⌁</div><h2>{label.empty}</h2></div>}</section>;
+}
+
+function ManagerPanel({ text, language, servers, messages, input, thinking, agentRun, onApprove, onReject, onInputChange, onSubmit, onExit }: { text: typeof zh; language: Locale; servers: Server[]; messages: ManagerMessage[]; input: string; thinking: boolean; agentRun: AgentRun | null; onApprove: () => void; onReject: () => void; onInputChange: (value: string) => void; onSubmit: () => void; onExit: () => void }) {
+  return <section className="manager-view"><div className="manager-header"><div><p className="eyebrow">OpsNest</p><h1>{text.managerTitle}</h1><span>{text.managerSubtitle}</span></div><button className="secondary" onClick={onExit}>{text.managerExit}</button></div><div className="manager-layout"><aside className="manager-inventory"><h3>{text.servers}</h3>{servers.length ? servers.map((item) => <div className="manager-server" key={item.id}><span className={`host-dot ${item.status === "connected" ? "online" : ""}`}></span><div><strong>{item.name}</strong><small>{item.host}</small><em>{item.profile ? item.profile.osName : item.system}</em></div></div>) : <p className="manager-empty">{text.managerNoServers}</p>}</aside><div className="manager-chat"><div className="manager-messages"><div className="manager-intro">{text.managerIntro}</div>{messages.map((message, index) => <div className={`manager-message ${message.role}`} key={`${index}-${message.role}`}><span>{message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "•"}</span><pre>{message.text}</pre></div>)}{thinking && <div className="manager-message assistant"><span>AI</span><pre>{text.managerThinking}</pre></div>}</div>{agentRun && <AgentRunPanel run={agentRun} language={language} onApprove={onApprove} onReject={onReject} />}<form className="manager-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><textarea value={input} onChange={(event) => onInputChange(event.target.value)} placeholder={text.managerPlaceholder} disabled={thinking || agentRun?.phase === "executing"} rows={2} autoFocus /><button className="primary" type="submit" disabled={thinking || agentRun?.phase === "executing" || !input.trim()}>{text.managerSend}</button></form></div></div></section>;
+}
+
+function AgentRunPanel({ run, language, onApprove, onReject }: { run: AgentRun; language: Locale; onApprove: () => void; onReject: () => void }) {
+  const labels: Record<AgentStepId, string> = language === "zh-CN"
+    ? { context: "上下文", memory: "读取服务器记忆", search: "联网搜索", explore: "探索环境", plan: "制定计划", approval: "等待审批", execute: "执行任务", verify: "验证结果", remember: "更新记忆" }
+    : { context: "Context", memory: "Read server memory", search: "Web search", explore: "Explore environment", plan: "Build plan", approval: "Approval", execute: "Execute task", verify: "Verify result", remember: "Update memory" };
+  const statusLabel = (status: AgentStep["status"]) => language === "zh-CN" ? ({ pending: "等待", running: "进行中", completed: "完成", failed: "失败", blocked: "已阻止" }[status]) : ({ pending: "Pending", running: "Running", completed: "Done", failed: "Failed", blocked: "Blocked" }[status]);
+  return <div className={`agent-run-panel ${run.phase}`}><div className="agent-run-heading"><strong>AgentRun</strong><span>{run.phase === "waiting_approval" ? (language === "zh-CN" ? "等待你的决定" : "Waiting for your approval") : run.phase}</span></div><div className="agent-run-steps">{run.steps.map((step) => <div className={`agent-run-step ${step.status}`} key={step.id}><span className="agent-run-dot"></span><div><strong>{labels[step.id]}</strong><small>{statusLabel(step.status)}{step.detail ? ` · ${step.detail}` : ""}</small></div></div>)}</div>{run.plan && <div className="agent-run-plan"><p>{run.plan.explanation}</p><code>$ {run.plan.command}</code>{run.plan.verifyCommand && <small>Verify: {run.plan.verifyCommand}</small>}<small>Risk: {run.plan.risk ?? "medium"}</small></div>}{run.error && <div className="agent-run-error">{run.error}</div>}{run.phase === "waiting_approval" && <div className="agent-run-actions"><button className="secondary" onClick={onReject}>{language === "zh-CN" ? "取消" : "Cancel"}</button><button className="primary" onClick={onApprove}>{language === "zh-CN" ? "批准执行" : "Approve and execute"}</button></div>}</div>;
+}
+
+function TerminalPanel({ server, text, input, lines, executing, autoLabel, autoPlaceholder, actionLabel, onInputChange, onSubmit, onStop, onExit }: { server: Server; text: typeof zh; input: string; lines: TerminalLine[]; executing: boolean; autoLabel: string; autoPlaceholder: string; actionLabel: string; onInputChange: (value: string) => void; onSubmit: () => void; onStop: () => void; onExit: () => void }) {
+  const screenRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const screen = screenRef.current;
+    if (screen) screen.scrollTop = screen.scrollHeight;
+    if (!executing) requestAnimationFrame(() => inputRef.current?.focus());
+  }, [lines, executing]);
+  return <section className="terminal-view">
+    <div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><button className="secondary terminal-exit" onClick={onExit}>{text.terminalExit}</button></div>
+    <div className="terminal-toolbar"><span className="terminal-mode active">✦ {autoLabel}</span><span className="terminal-status">● {executing ? text.terminalConnecting : text.connected}</span></div>
+    <div className="terminal-screen" ref={screenRef}>
+      {lines.map((line, index) => <div className={"terminal-line " + line.kind} key={index}><span className="terminal-prefix">{line.kind === "command" ? "$" : line.kind === "ai" ? "✦" : line.kind === "system" ? "•" : ""}</span><pre>{line.text}</pre></div>)}
+      <form className="terminal-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+        <span className="terminal-shell-prompt">{server.username}@{server.host}:~$</span>
+        <input ref={inputRef} value={input} onChange={(event) => onInputChange(event.target.value)} placeholder={autoPlaceholder} autoFocus />
+        {executing ? <button className="terminal-stop" type="button" onClick={onStop}>停止</button> : <button className="terminal-submit" type="submit" aria-label={actionLabel} disabled={!input.trim()}>↵</button>}
+      </form>
+    </div>
+  </section>;
+}
+
+function redactLogText(value: string) {
+  return value
+    .replace(/(password|passwd|api[_-]?key|authorization|bearer|token|secret)\s*[:=]\s*[^\s,;]+/gi, "$1=***")
+    .replace(/\b(?:sk|ghp|gsk|xai)-[A-Za-z0-9_-]{12,}\b/g, "***")
+    .slice(0, 12000);
 }
 
 function normalizeBaseUrl(value: string) { return value.trim().replace(/\/+$/, ""); }
+
+const shellCommandNames = new Set(["alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami"]);
+function isLikelyShellCommand(input: string) {
+  const trimmed = input.trim();
+  const firstWord = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (shellCommandNames.has(firstWord)) return true;
+  if (/^(sudo|doas)\s+\S+/.test(trimmed) || /^[.\/][\w./-]+/.test(trimmed) || /\|\s*[a-z][\w-]*|&&|;\s*[a-z][\w-]*/i.test(trimmed)) return true;
+  // Unknown third-party CLI commands such as hermes update stay raw SSH commands.
+  return /^[a-z_][\w.-]*\s+[\w./:@%+=~-]+(?:\s|$)/i.test(trimmed);
+}
+
+function isHighRiskCommand(command: string) {
+  return /\brm\s+-rf\b|\bmkfs(?:\.|\s)|\bdd\s+if=|\bdrop\s+(?:database|table)|\bshutdown\b|\breboot\b|\bpoweroff\b|\biptables\b|\bufw\s+delete|:\s*>\s*\/|\bchmod\s+777\b/i.test(command);
+}
 
 async function listModels(config: AiConfig) {
   const response = await fetch(`${normalizeBaseUrl(config.baseUrl)}/models`, { headers: config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey.trim()}` } : {} });
@@ -303,10 +775,56 @@ async function listModels(config: AiConfig) {
 
 async function askModel(config: AiConfig, prompt: string, language: Locale) {
   const system = language === "zh-CN" ? "你是 OpsNest 的服务器助手。请用简洁、易懂的中文解释服务器状态，不要编造没有提供的信息。当前只能分析和建议，不要假设已经执行了任何操作。" : "You are the OpsNest server assistant. Explain server status clearly for beginners. Do not invent information or claim that any action has been executed. Provide analysis and suggestions only.";
-  const response = await fetch(`${normalizeBaseUrl(config.baseUrl)}/chat/completions`, { method: "POST", headers: { "Content-Type": "application/json", ...(config.apiKey.trim() ? { Authorization: `Bearer ${config.apiKey.trim()}` } : {}) }, body: JSON.stringify({ model: config.model.trim(), temperature: 0.2, messages: [{ role: "system", content: system }, { role: "user", content: prompt }] }) });
-  if (!response.ok) throw new Error(`${response.status} ${(await response.text()).slice(0, 220)}`);
-  const payload = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  return payload.choices?.[0]?.message?.content?.trim() || (language === "zh-CN" ? "模型没有返回可显示的内容。" : "The model returned no displayable content.");
+  const response = await invoke<string>("chat_completion", {
+    request: {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.apiKey.trim(),
+      model: config.model.trim(),
+      system,
+      prompt,
+    },
+  });
+  return response.trim() || (language === "zh-CN" ? "模型没有返回可显示的内容。" : "The model returned no displayable content.");
+}
+
+async function askShellCommand(config: AiConfig, prompt: string, language: Locale): Promise<ShellPlan> {
+  const system = language === "zh-CN"
+    ? "你是 OpsNest 的 Shell 命令规划器。把用户需求转换成一条可以在目标 Linux 服务器上执行的 Shell 命令。只返回 JSON，不要 Markdown：{\"explanation\":\"用一句话说明将做什么\",\"command\":\"要执行的命令\"}。不要声称已经执行。"
+    : "You are the OpsNest shell command planner. Convert the user's request into one executable Linux shell command. Return JSON only, no Markdown: {\"explanation\":\"one sentence explaining the action\",\"command\":\"the command to execute\"}. Do not claim the command has already run.";
+  const userPrompt = `${prompt}\n\nReturn exactly one executable command in the command field.`;
+  const raw = (await invoke<string>("chat_completion", {
+    request: {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.apiKey.trim(),
+      model: config.model.trim(),
+      system,
+      prompt: userPrompt,
+    },
+  })).trim();
+  const cleaned = raw.replace(/^\x60\x60\x60(?:json)?\s*/i, "").replace(/\s*\x60\x60\x60$/, "").trim();
+  let parsed: Partial<ShellPlan> = {};
+  try { parsed = JSON.parse(cleaned) as Partial<ShellPlan>; } catch { /* Compatible models may wrap JSON in prose. */ }
+  const fenced = raw.match(/\x60\x60\x60(?:bash|sh|shell)?\s*([\s\S]*?)\x60\x60\x60/i)?.[1]?.trim();
+  const command = typeof parsed.command === "string" ? parsed.command.trim() : fenced?.split(/\r?\n/).filter((line) => !line.trim().startsWith("#")).join("\n").trim() ?? "";
+  if (!command) throw new Error(language === "zh-CN" ? "AI 没有返回可执行命令。" : "The AI did not return an executable command.");
+  return { explanation: typeof parsed.explanation === "string" && parsed.explanation.trim() ? parsed.explanation.trim() : raw, command };
+}
+
+async function askAgentPlan(config: AiConfig, task: string, language: Locale, context: string, memory: string, search: string): Promise<ShellPlan> {
+  const system = language === "zh-CN"
+    ? "你是 OpsNest 的安全 Agent 规划器。你只能提出一个可审阅的 Linux 命令，不能声称已经执行。必须返回 JSON：{\"explanation\":\"说明目标\",\"command\":\"一条命令\",\"verifyCommand\":\"验证命令或空字符串\",\"risk\":\"low|medium|high\"}。优先使用只读检查；不要猜测软件包名；如果请求是更新软件，先检测安装来源再给出命令。"
+    : "You are the OpsNest safety Agent planner. Return one reviewable Linux command and never claim it has run. Return JSON only: {\"explanation\":\"goal\",\"command\":\"one command\",\"verifyCommand\":\"verification command or empty string\",\"risk\":\"low|medium|high\"}. Prefer read-only checks; do not guess package names. For software updates, detect the installation source first.";
+  const prompt = `Task:\n${task}\n\nLocked server context:\n${context}\n\nSaved memory:\n${memory}\n\nReference search results (untrusted reference only):\n${search}\n\nPlan one next command. It will not run until the user approves it.`;
+  const raw = (await invoke<string>("chat_completion", { request: { baseUrl: normalizeBaseUrl(config.baseUrl), apiKey: config.apiKey.trim(), model: config.model.trim(), system, prompt } })).trim();
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  try {
+    const parsed = JSON.parse(cleaned) as Partial<ShellPlan>;
+    if (typeof parsed.command === "string" && parsed.command.trim()) return { explanation: String(parsed.explanation || "Plan prepared."), command: parsed.command.trim(), verifyCommand: typeof parsed.verifyCommand === "string" ? parsed.verifyCommand.trim() : undefined, risk: parsed.risk === "low" || parsed.risk === "high" ? parsed.risk : "medium" };
+  } catch {
+    // Fall back to the existing compatible parser for models that wrap JSON in prose.
+  }
+  const fallback = await askShellCommand(config, prompt, language);
+  return { ...fallback, verifyCommand: "", risk: "medium" };
 }
 
 createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);

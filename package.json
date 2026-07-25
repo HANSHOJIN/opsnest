@@ -1,7 +1,7 @@
 {
   "name": "opsnest",
   "private": true,
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "A local-first AI server manager for people who do not know Linux.",
   "type": "module",
   "scripts": {
