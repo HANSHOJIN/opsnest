@@ -19,7 +19,7 @@ import "./manager.css";
 
 type AuthMethod = "password" | "privateKey";
 type ServerStatus = "connected" | "saved" | "connecting" | "failed";
-type View = "hosts" | "manager" | "settings" | "terminal" | "tasks";
+type View = "hosts" | "manager" | "settings" | "terminal" | "tasks" | "cron";
 type TerminalMode = "shell" | "ai";
 type TerminalLine = { kind: "system" | "command" | "output" | "ai"; text: string };
 type ManagerMessage = { role: "user" | "assistant" | "system"; text: string };
@@ -27,6 +27,8 @@ type ConversationLog = { id: string; timestamp: string; sessionId: string; sessi
 type RuntimeLog = { id: string; timestamp: string; level: "info" | "warn" | "error"; event: string; message: string; details?: string };
 type ShellPlan = { explanation: string; command: string; verifyCommand?: string; risk?: "low" | "medium" | "high" };
 type DiagnosisResult = { label: string; command: string; output: string; success: boolean };
+type CronTask = { id: string; name: string; source: string; user: string; schedule: string; command: string; enabled: boolean; editable: boolean; detail: string };
+type CronForm = { id: string; name: string; schedule: string; command: string; enabled: boolean };
 type AgentStepId = "context" | "memory" | "search" | "explore" | "diagnose" | "plan" | "approval" | "execute" | "verify" | "remember";
 type AgentStep = { id: AgentStepId; label: string; status: "pending" | "running" | "completed" | "failed" | "blocked"; detail?: string };
 type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; result?: string; error?: string; attempt?: number };
@@ -62,14 +64,14 @@ const providerPresets: Record<AiProvider, { label: string; baseUrl: string; mode
 };
 
 const zh = {
-  welcome: "欢迎回来", hosts: "我的服务器", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
+  welcome: "欢迎回来", hosts: "我的服务器", cron: "定时任务", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
   addAiModel: "添加一个 AI 模型", aiModelIntro: "模型只负责理解你的描述和服务器状态，所有 SSH 操作仍由本地安全流程控制。", modelService: "模型服务", apiAddress: "API 地址", apiKey: "API Key", optional: "可选", modelName: "模型名称", modelPlaceholder: "例如：deepseek-chat", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "输入你的 API Key", ollamaKey: "本地 Ollama 不需要 Key", testConnection: "测试连接", testing: "正在测试…", saveModel: "保存模型", savedLocal: "已保存到本机", connectionFound: (count: number) => `连接成功，发现 ${count} 个模型`, connectionNoList: "连接成功，可以手动填写模型名称", keyLocalNote: "API Key 目前仅保存在当前电脑的本地配置中，不会上传到 OpsNest。建议使用权限受限、额度可控的 Key。", language: "语言", simplifiedChinese: "简体中文", english: "English", languageNote: "更改语言后，界面会立即更新。",
   connectFirst: "连接你的第一台服务器", connectIntro: "输入 IP 地址、用户名和密码，然后用人话描述你想做什么。", startConnect: "开始连接", demo: "查看演示", connected: "已连接", saved: "已保存", notConnected: "未连接", system: "系统", connectionMethod: "连接方式", ssh: "SSH", addAnother: "添加另一台服务器", serverProfile: "AI 服务器档案", understood: "我已经了解这台服务器", readOnly: "只读扫描", profileIntro: "已读取基础环境信息。没有修改文件、安装软件或启动服务。", hostname: "主机名", cpu: "CPU", memory: "内存", disk: "磁盘", docker: "Docker", installedRunning: (count: string) => `已安装 · ${count} 个运行中`, notInstalled: "未安装", rescan: "重新扫描", analyzeServer: "让 AI 解读这台服务器", analyzing: "AI 正在分析…", aiInterpretation: "AI 解读", nextStep: "下一步：让 AI 了解这台服务器", understanding: "正在了解这台服务器…", scanIntro: "读取系统、资源和 Docker 状态，不会自动修改任何内容。", scanWait: "只读取基础环境信息，请稍候。", principles: ["先检查，再行动", "AI 会先解释计划和风险", "每一步都可追踪", "查看完整操作时间线", "危险操作需批准", "你始终掌握最终决定权"],
   addWizardTitle: "添加你的服务器", firstStep: "第一步 · 连接服务器", wizardIntro: "只需要填写你已有的信息。OpsNest 会先测试连接，不会修改服务器。", serverName: "服务器名称", serverNamePlaceholder: "例如：我的网站", serverAddress: "服务器地址", serverAddressPlaceholder: "例如：203.0.113.10", port: "SSH 端口", username: "用户名", usernamePlaceholder: "例如：root 或 ubuntu", passwordLogin: "密码登录", privateKey: "SSH 私钥", password: "密码", passwordPlaceholder: "只在本次连接中使用", keyPath: "私钥文件路径", keyPathPlaceholder: "例如：C:\\Users\\你\\.ssh\\id_ed25519", passphrase: "私钥密码", cancel: "取消", connecting: "正在测试连接…", connect: "测试并连接", close: "关闭", missingHost: "请输入服务器地址。", missingUser: "请输入用户名。", invalidPort: "端口号需要是 1 到 65535 之间的数字。", missingPassword: "请输入密码。", missingKey: "请输入私钥文件路径。", reconnect: "请重新连接服务器后再进行扫描。", noCredentials: "当前会话没有保存登录凭据，请重新连接服务器。", connectionFailed: "连接失败，请检查地址、端口和登录方式。", scanFailed: "扫描失败，请重新连接服务器后再试。", configureAi: "请先在设置中完成 AI 模型配置。", aiFailed: "AI 调用失败，请检查模型设置。", apiMissing: "请输入 API 地址。", modelMissing: "请输入模型名称。", keyMissing: "请输入 API Key。", modelFailed: "模型连接失败，请检查地址和 Key。", taskComing: "任务记录将在下一阶段加入。", terminalShell: "Shell", terminalAi: "AI 助手", terminalPlaceholder: "输入命令，或切换到 AI 模式用自然语言描述…", terminalAiPlaceholder: "例如：查看磁盘还有多少空间", terminalEmpty: "双击左侧服务器名称即可进入 SSH。", terminalConnecting: "正在连接…", terminalExit: "退出终端", terminalCommandFailed: "命令执行失败：", terminalAiNeedModel: "请先在设置中配置 AI 模型。", managerTitle: "服务器总管", managerSubtitle: "管理所有已保存的服务器", managerIntro: "你好，我可以同时了解你的服务器，并帮你规划检查、排障和维护任务。", managerPlaceholder: "例如：检查所有服务器的磁盘空间", managerSend: "发送", managerExit: "退出总管", managerNoServers: "还没有保存的服务器。", managerThinking: "总管正在分析…", managerSystem: "服务器总管已就绪。", contextConnect: "连接服务器", contextTerminal: "打开 SSH 会话", contextView: "查看服务器",
 };
 
 const en = {
-  welcome: "Welcome back", hosts: "My servers", tasks: "Task history", settings: "Settings", servers: "Servers", addServer: "Add server", localFirst: "Local-first", credentialsLocal: "Credentials are used only while connecting", localMode: "● Local mode", aiStatusNotConfigured: "● AI not configured", aiStatusConnected: "● AI connected", aiStatusFailed: "● AI connection failed", aiStatusNotTested: "● AI not tested", localConfig: "Local configuration", aiModel: "AI model", localOnly: "● Local only", apiDirect: "Direct API",
+  welcome: "Welcome back", hosts: "My servers", cron: "Scheduled tasks", tasks: "Task history", settings: "Settings", servers: "Servers", addServer: "Add server", localFirst: "Local-first", credentialsLocal: "Credentials are used only while connecting", localMode: "● Local mode", aiStatusNotConfigured: "● AI not configured", aiStatusConnected: "● AI connected", aiStatusFailed: "● AI connection failed", aiStatusNotTested: "● AI not tested", localConfig: "Local configuration", aiModel: "AI model", localOnly: "● Local only", apiDirect: "Direct API",
   addAiModel: "Add an AI model", aiModelIntro: "The model only interprets your request and server status. SSH actions remain controlled by the local safety flow.", modelService: "Model provider", apiAddress: "API URL", apiKey: "API key", optional: "Optional", modelName: "Model name", modelPlaceholder: "For example: gpt-4o-mini", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "Enter your API key", ollamaKey: "Ollama runs locally and does not need a key", testConnection: "Test connection", testing: "Testing…", saveModel: "Save model", savedLocal: "Saved on this computer", connectionFound: (count: number) => `Connected, found ${count} model${count === 1 ? "" : "s"}`, connectionNoList: "Connected. You can enter a model name manually.", keyLocalNote: "The API key is stored only on this computer and is not sent to OpsNest. Use a key with limited permissions and spending.", language: "Language", simplifiedChinese: "简体中文", english: "English", languageNote: "The interface updates immediately after changing the language.",
   connectFirst: "Connect your first server", connectIntro: "Enter the IP address, username and password, then describe what you want to do in plain language.", startConnect: "Start connecting", demo: "View demo", connected: "Connected", saved: "Saved", notConnected: "Not connected", system: "System", connectionMethod: "Connection", ssh: "SSH", addAnother: "Add another server", serverProfile: "AI server profile", understood: "I understand this server", readOnly: "Read-only scan", profileIntro: "Basic environment information was read. No files were changed, software installed or services started.", hostname: "Hostname", cpu: "CPU", memory: "Memory", disk: "Disk", docker: "Docker", installedRunning: (count: string) => `Installed · ${count} running`, notInstalled: "Not installed", rescan: "Scan again", analyzeServer: "Ask AI to explain this server", analyzing: "AI is analyzing…", aiInterpretation: "AI interpretation", nextStep: "Next: let AI understand this server", understanding: "Learning about this server…", scanIntro: "Read system, resource and Docker status. Nothing will be changed automatically.", scanWait: "Reading basic environment information…", principles: ["Check first, then act", "AI explains the plan and risk first", "Every step is traceable", "View the complete operation timeline", "Risky actions require approval", "You always make the final decision"],
   addWizardTitle: "Add your server", firstStep: "Step 1 · Connect a server", wizardIntro: "Enter the information you already have. OpsNest tests the connection before doing anything else.", serverName: "Server name", serverNamePlaceholder: "For example: My website", serverAddress: "Server address", serverAddressPlaceholder: "For example: 203.0.113.10", port: "SSH port", username: "Username", usernamePlaceholder: "For example: root or ubuntu", passwordLogin: "Password", privateKey: "SSH private key", password: "Password", passwordPlaceholder: "Used only for this connection", keyPath: "Private key path", keyPathPlaceholder: "For example: C:\\Users\\you\\.ssh\\id_ed25519", passphrase: "Key passphrase", cancel: "Cancel", connecting: "Testing connection…", connect: "Test and connect", close: "Close", missingHost: "Enter the server address.", missingUser: "Enter a username.", invalidPort: "The port must be a number between 1 and 65535.", missingPassword: "Enter the password.", missingKey: "Enter the private key path.", reconnect: "Reconnect to the server before scanning it.", noCredentials: "This session has no login credentials. Reconnect to the server first.", connectionFailed: "Connection failed. Check the address, port and login method.", scanFailed: "Scan failed. Reconnect to the server and try again.", configureAi: "Complete the AI model settings first.", aiFailed: "The AI request failed. Check the model settings.", apiMissing: "Enter the API URL.", modelMissing: "Enter a model name.", keyMissing: "Enter an API key.", modelFailed: "The model connection failed. Check the URL and key.", taskComing: "Task history will be added in the next stage.", terminalShell: "Shell", terminalAi: "AI assistant", terminalPlaceholder: "Enter a command, or switch to AI mode and describe what you need…", terminalAiPlaceholder: "For example: How much disk space is left?", terminalEmpty: "Double-click a server on the left to open SSH.", terminalConnecting: "Connecting…", terminalExit: "Exit terminal", terminalCommandFailed: "Command failed: ", terminalAiNeedModel: "Configure an AI model in Settings first.", managerTitle: "Server manager", managerSubtitle: "Manage all saved servers", managerIntro: "Hello. I can understand your servers together and help plan checks, troubleshooting and maintenance tasks.", managerPlaceholder: "For example: Check disk space on all servers", managerSend: "Send", managerExit: "Exit manager", managerNoServers: "No saved servers yet.", managerThinking: "The manager is analyzing…", managerSystem: "Server manager is ready.", contextConnect: "Connect server", contextTerminal: "Open SSH session", contextView: "View server",
@@ -107,6 +109,11 @@ function App() {
   const [modelStatus, setModelStatus] = useState("");
   const [modelConnection, setModelConnection] = useState<ModelConnectionStatus>("unknown");
   const [error, setError] = useState("");
+  const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
+  const [cronServerId, setCronServerId] = useState("");
+  const [isCronLoading, setCronLoading] = useState(false);
+  const [isCronEditorOpen, setCronEditorOpen] = useState(false);
+  const [cronForm, setCronForm] = useState<CronForm>({ id: "", name: "", schedule: "0 * * * *", command: "", enabled: true });
   const activeCredentials = useRef<Record<string, SshRequest>>({});
   const activeCommandId = useRef<string | null>(null);
   const logsRef = useRef<ActivityLog[]>([]);
@@ -394,6 +401,79 @@ function App() {
     } catch {
       return null;
     }
+  };
+
+  const loadCronTasks = async (target: Server) => {
+    setCronLoading(true); setError("");
+    const request = await getCredential(target);
+    if (!request) { setCronTasks([]); setCronLoading(false); setError(text.noCredentials); return; }
+    try {
+      const tasks = await invoke<CronTask[]>("list_server_cron", { request });
+      setCronTasks(tasks);
+      appendRuntimeLog({ level: "info", event: "cron.list.success", message: "Server-side cron tasks loaded.", details: `${target.name} · ${tasks.length} tasks` });
+    } catch (cronError) {
+      setCronTasks([]);
+      const message = cronError instanceof Error ? cronError.message : String(cronError);
+      appendRuntimeLog({ level: "error", event: "cron.list.failed", message: "Could not load server-side cron tasks.", details: `${target.name} · ${message}` });
+      setError(message);
+    } finally { setCronLoading(false); }
+  };
+
+  const openCron = () => {
+    const target = servers.find((item) => item.id === cronServerId) ?? server ?? servers[0];
+    setView("cron");
+    if (!target) { setCronTasks([]); return; }
+    setCronServerId(target.id);
+    void loadCronTasks(target);
+  };
+
+  const selectCronServer = (id: string) => {
+    setCronServerId(id);
+    const target = servers.find((item) => item.id === id);
+    if (target) void loadCronTasks(target);
+  };
+
+  const openCronEditor = (task?: CronTask) => {
+    if (task && !task.editable) return;
+    setCronForm(task ? { id: task.id, name: task.name, schedule: task.schedule, command: task.command, enabled: task.enabled } : { id: crypto.randomUUID(), name: "", schedule: "0 * * * *", command: "", enabled: true });
+    setCronEditorOpen(true); setError("");
+  };
+
+  const saveCronTask = async () => {
+    const target = servers.find((item) => item.id === cronServerId);
+    if (!target || !cronForm.name.trim() || !cronForm.schedule.trim() || !cronForm.command.trim()) return setError(language === "zh-CN" ? "请填写任务名称、Cron 表达式和执行命令。" : "Enter a task name, cron expression and command.");
+    const request = await getCredential(target);
+    if (!request) return setError(text.noCredentials);
+    setCronLoading(true); setError("");
+    try {
+      await invoke("save_server_cron", { request, id: cronForm.id, name: cronForm.name.trim(), schedule: cronForm.schedule.trim(), command: cronForm.command.trim(), enabled: cronForm.enabled });
+      appendLog({ type: "system", title: "Cron task saved on server", serverId: target.id, serverName: target.name, content: `${cronForm.name.trim()}\n${cronForm.schedule.trim()} ${cronForm.command.trim()}`, status: "success" });
+      setCronEditorOpen(false);
+      await loadCronTasks(target);
+    } catch (cronError) { setError(cronError instanceof Error ? cronError.message : String(cronError)); }
+    finally { setCronLoading(false); }
+  };
+
+  const toggleCronTask = async (task: CronTask) => {
+    if (!task.editable) return;
+    const target = servers.find((item) => item.id === cronServerId);
+    const request = target ? await getCredential(target) : null;
+    if (!target || !request) return setError(text.noCredentials);
+    setCronLoading(true); setError("");
+    try { await invoke("save_server_cron", { request, id: task.id, name: task.name, schedule: task.schedule, command: task.command, enabled: !task.enabled }); await loadCronTasks(target); }
+    catch (cronError) { setError(cronError instanceof Error ? cronError.message : String(cronError)); }
+    finally { setCronLoading(false); }
+  };
+
+  const deleteCronTask = async (task: CronTask) => {
+    if (!task.editable) return;
+    const target = servers.find((item) => item.id === cronServerId);
+    const request = target ? await getCredential(target) : null;
+    if (!target || !request) return setError(text.noCredentials);
+    setCronLoading(true); setError("");
+    try { await invoke("delete_server_cron", { request, id: task.id }); appendLog({ type: "system", title: "Cron task deleted from server", serverId: target.id, serverName: target.name, content: `${task.name}\n${task.schedule} ${task.command}`, status: "success" }); await loadCronTasks(target); }
+    catch (cronError) { setError(cronError instanceof Error ? cronError.message : String(cronError)); }
+    finally { setCronLoading(false); }
   };
 
   const patchAgentRun = (patch: Partial<AgentRun>) => {
@@ -1103,12 +1183,13 @@ function App() {
   return <main className={view === "terminal" ? "shell terminal-shell" : view === "hosts" ? "shell hosts-dashboard-mode" : "shell"}>
     <aside className="sidebar">
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
-      <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
+      <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>▦ {text.cron}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
        <div className="sidebar-note">v0.1.0-alpha.6</div>
     </aside>
      <section className="content">
-       {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
+      {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
+      {view === "cron" && <CronPanel tasks={cronTasks} servers={servers} selectedServerId={cronServerId} loading={isCronLoading} editorOpen={isCronEditorOpen} form={cronForm} language={language} error={error} onServerChange={selectCronServer} onRefresh={() => { const target = servers.find((item) => item.id === cronServerId); if (target) void loadCronTasks(target); }} onNew={() => openCronEditor()} onEdit={openCronEditor} onToggle={toggleCronTask} onDelete={deleteCronTask} onFormChange={setCronForm} onSave={saveCronTask} onCloseEditor={() => setCronEditorOpen(false)} onExit={() => setView("hosts")} />}
       {view === "terminal" && server && <TerminalPanel server={server} text={text} language={language} input={terminalInput} lines={terminalLines} executing={isExecuting} agentStatus={terminalAgentStatus} autoLabel={language === "zh-CN" ? "自动识别" : "Auto detect"} autoPlaceholder={language === "zh-CN" ? "输入命令，或输入 stop 停止当前命令…" : "Enter a command, or type stop to stop…"} actionLabel={language === "zh-CN" ? "发送" : "Send"} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={() => setView("hosts")} />}
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
       {contextMenu && <ServerContextMenu text={text} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
@@ -1213,6 +1294,20 @@ function ServerDashboard({ servers, text, language, modelStatusClass, modelStatu
         <div className="dashboard-actions"><button className="primary small-button" onClick={(event) => { event.stopPropagation(); item.status === "connected" ? onOpen(item) : onConnect(item); }} disabled={item.status === "connecting"}>{primaryLabel}</button><button className="text-button" onClick={(event) => { event.stopPropagation(); onEdit(item); }}>{language === "zh-CN" ? "编辑" : "Edit"}</button></div>
       </article>;
     })}</div> : <div className="dashboard-empty"><div className="dashboard-empty-icon">⌁</div><h2>{text.connectFirst}</h2><p>{language === "zh-CN" ? "添加服务器后，这里会显示它的运行状态和资源概览。" : "Add a server to see its status and resource overview here."}</p><button className="primary" onClick={onAdd}>{text.startConnect}</button></div>}
+  </section>;
+}
+
+function CronPanel({ tasks, servers, selectedServerId, loading, editorOpen, form, language, error, onServerChange, onRefresh, onNew, onEdit, onToggle, onDelete, onFormChange, onSave, onCloseEditor, onExit }: { tasks: CronTask[]; servers: Server[]; selectedServerId: string; loading: boolean; editorOpen: boolean; form: CronForm; language: Locale; error: string; onServerChange: (id: string) => void; onRefresh: () => void; onNew: () => void; onEdit: (task: CronTask) => void; onToggle: (task: CronTask) => void; onDelete: (task: CronTask) => void; onFormChange: (form: CronForm) => void; onSave: () => void; onCloseEditor: () => void; onExit: () => void }) {
+  const zhMode = language === "zh-CN";
+  return <section className="cron-view">
+    <header className="cron-header"><div><p className="eyebrow">OpsNest</p><h1>{zhMode ? "定时任务" : "Scheduled tasks"}</h1><span>{zhMode ? "任务运行在服务器自身，OpsNest 只负责读取和管理。" : "Tasks run on each server. OpsNest only reads and manages them."}</span></div><button className="secondary" onClick={onExit}>{zhMode ? "返回服务器" : "Back to servers"}</button></header>
+    {!servers.length ? <div className="cron-empty"><h2>{zhMode ? "还没有服务器" : "No servers yet"}</h2><p>{zhMode ? "先添加一台服务器，再查看它的 Cron 和 systemd timer。" : "Add a server first to inspect its Cron jobs and systemd timers."}</p></div> : <>
+      <div className="cron-toolbar"><label>{zhMode ? "目标服务器" : "Target server"}<select value={selectedServerId} onChange={(event) => onServerChange(event.target.value)}>{servers.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.host}</option>)}</select></label><div><button className="secondary" onClick={onRefresh} disabled={loading}>{loading ? (zhMode ? "读取中…" : "Loading…") : (zhMode ? "刷新" : "Refresh")}</button><button className="primary" onClick={onNew}>{zhMode ? "＋ 添加服务器任务" : "＋ Add server task"}</button></div></div>
+      {error && <div className="global-error">{error}</div>}
+      <div className="cron-note"><span>◉</span><div><strong>{zhMode ? "服务器端执行" : "Runs on the server"}</strong><p>{zhMode ? "保存后会写入目标服务器当前用户的 crontab；OpsNest 关闭后，服务器仍会按原计划执行。" : "Saved jobs are written to the target user's crontab. They keep running after OpsNest closes."}</p></div></div>
+      <div className="cron-list">{loading && !tasks.length ? <div className="cron-empty"><p>{zhMode ? "正在读取服务器上的 Cron 和 systemd timer…" : "Reading Cron jobs and systemd timers from the server…"}</p></div> : tasks.length ? tasks.map((task) => <article className={`cron-card ${task.enabled ? "enabled" : "disabled"}`} key={task.id}><div className="cron-card-main"><div className="cron-card-title"><span className={`cron-status-dot ${task.enabled ? "on" : "off"}`}></span><div><h2>{task.name}</h2><small>{task.source} · {task.user}</small></div></div><code>{task.schedule} {task.command}</code><p>{task.detail}</p></div><div className="cron-card-actions">{task.editable ? <><button className="text-button" onClick={() => onToggle(task)}>{task.enabled ? (zhMode ? "停用" : "Disable") : (zhMode ? "启用" : "Enable")}</button><button className="text-button" onClick={() => onEdit(task)}>{zhMode ? "编辑" : "Edit"}</button><button className="text-button danger-text" onClick={() => { if (window.confirm(zhMode ? "删除这条服务器 Cron 任务？" : "Delete this server Cron task?")) onDelete(task); }}>{zhMode ? "删除" : "Delete"}</button></> : <span className="read-only-pill">{zhMode ? "只读" : "Read only"}</span>}</div></article>) : <div className="cron-empty"><div>⌁</div><h2>{zhMode ? "没有读取到定时任务" : "No scheduled tasks found"}</h2><p>{zhMode ? "可以添加第一条服务器任务。" : "Add the first server-side task."}</p></div>}</div>
+    </>}
+    {editorOpen && <div className="modal-backdrop" role="presentation"><section className="wizard cron-editor" role="dialog" aria-modal="true"><div className="wizard-header"><div><p className="eyebrow">{zhMode ? "服务器 Cron" : "Server Cron"}</p><h2>{zhMode ? "添加定时任务" : "Add scheduled task"}</h2></div><button className="close-button" onClick={onCloseEditor}>×</button></div><p className="wizard-intro">{zhMode ? "这条任务会写入目标服务器当前用户的 crontab。" : "This task will be written to the target server user's crontab."}</p><label>{zhMode ? "任务名称" : "Task name"}<input value={form.name} onChange={(event) => onFormChange({ ...form, name: event.target.value })} placeholder={zhMode ? "例如：每日备份" : "For example: Daily backup"} /></label><label>{zhMode ? "Cron 表达式" : "Cron expression"}<input value={form.schedule} onChange={(event) => onFormChange({ ...form, schedule: event.target.value })} placeholder="0 3 * * *" /></label><label>{zhMode ? "执行命令" : "Command"}<textarea rows={4} value={form.command} onChange={(event) => onFormChange({ ...form, command: event.target.value })} placeholder={zhMode ? "例如：/usr/local/bin/backup.sh" : "For example: /usr/local/bin/backup.sh"} /></label><label className="cron-enabled-field"><input type="checkbox" checked={form.enabled} onChange={(event) => onFormChange({ ...form, enabled: event.target.checked })} /> {zhMode ? "立即启用" : "Enable now"}</label><div className="wizard-footer"><button className="secondary" onClick={onCloseEditor}>{zhMode ? "取消" : "Cancel"}</button><button className="primary" onClick={onSave} disabled={loading}>{loading ? (zhMode ? "保存中…" : "Saving…") : (zhMode ? "保存到服务器" : "Save to server")}</button></div></section></div>}
   </section>;
 }
 

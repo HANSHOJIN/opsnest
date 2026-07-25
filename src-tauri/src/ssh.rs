@@ -53,6 +53,20 @@ pub struct DiagnosisResult {
     pub success: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronTask {
+    pub id: String,
+    pub name: String,
+    pub source: String,
+    pub user: String,
+    pub schedule: String,
+    pub command: String,
+    pub enabled: bool,
+    pub editable: bool,
+    pub detail: String,
+}
+
 struct OpsNestHandler;
 
 impl client::Handler for OpsNestHandler {
@@ -185,6 +199,85 @@ fn value_for(output: &str, key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn cron_line_parts(line: &str, system: bool) -> Option<(String, String, String)> {
+    let mut rest = line.trim();
+    if rest.is_empty() || rest.starts_with('#') || rest.starts_with('@') || rest.starts_with("SHELL=") || rest.starts_with("PATH=") || rest.starts_with("MAILTO=") {
+        return None;
+    }
+    let field_count = if system { 6 } else { 5 };
+    let mut fields = Vec::new();
+    for _ in 0..field_count {
+        let trimmed = rest.trim_start();
+        let end = trimmed.find(char::is_whitespace)?;
+        fields.push(trimmed[..end].to_string());
+        rest = &trimmed[end..];
+    }
+    let command = rest.trim().to_string();
+    if command.is_empty() {
+        return None;
+    }
+    let schedule = fields[..5].join(" ");
+    let user = if system { fields[5].clone() } else { String::new() };
+    Some((schedule, user, command))
+}
+
+fn cron_marker(line: &str) -> Option<(String, String, bool)> {
+    let rest = line.strip_prefix("# OPSNEST-ID:")?;
+    let (id, rest) = rest.split_once(" NAME:")?;
+    let (name, enabled) = rest.rsplit_once(" ENABLED:")?;
+    if id.trim().is_empty() || name.trim().is_empty() {
+        return None;
+    }
+    Some((id.trim().to_string(), name.trim().to_string(), enabled.trim() == "1"))
+}
+
+fn parse_cron_output(output: &str, username: &str) -> Vec<CronTask> {
+    let section = |begin: &str, end: &str| {
+        output.split_once(&format!("{begin}\n")).and_then(|(_, rest)| rest.split_once(&format!("\n{end}"))).map(|(value, _)| value).unwrap_or("")
+    };
+    let user_section = section("OPSNEST_USER_CRON_BEGIN", "OPSNEST_USER_CRON_END");
+    let system_section = section("OPSNEST_SYSTEM_CRON_BEGIN", "OPSNEST_SYSTEM_CRON_END");
+    let timer_section = section("OPSNEST_TIMERS_BEGIN", "OPSNEST_TIMERS_END");
+    let mut tasks = Vec::new();
+    let mut index = 0usize;
+    let mut lines = user_section.lines();
+    while let Some(line) = lines.next() {
+        if let Some((id, name, enabled)) = cron_marker(line.trim()) {
+            if let Some(entry) = lines.next() {
+                let normalized = entry.trim().trim_start_matches("# ").trim();
+                if let Some((schedule, _, command)) = cron_line_parts(normalized, false) {
+                    tasks.push(CronTask { id, name, source: "用户 Cron".into(), user: username.into(), schedule, command, enabled, editable: true, detail: "当前 SSH 用户的 crontab".into() });
+                }
+            }
+            continue;
+        }
+        if let Some((schedule, _, command)) = cron_line_parts(line, false) {
+            index += 1;
+            tasks.push(CronTask { id: format!("user:{index}"), name: command.split_whitespace().next().unwrap_or("Cron 任务").into(), source: "用户 Cron".into(), user: username.into(), schedule, command, enabled: true, editable: false, detail: "服务器上已有的用户 Cron".into() });
+        }
+    }
+    for line in system_section.lines() {
+        if line.starts_with("OPSNEST_FILE=") || line.starts_with("--") { continue; }
+        if let Some((schedule, user, command)) = cron_line_parts(line, true) {
+            index += 1;
+            tasks.push(CronTask { id: format!("system:{index}"), name: command.split_whitespace().next().unwrap_or("系统 Cron").into(), source: "系统 Cron".into(), user, schedule, command, enabled: true, editable: false, detail: "/etc/crontab 或 /etc/cron.d".into() });
+        }
+    }
+    for line in timer_section.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if line.starts_with("NEXT") || line.starts_with("n/a") || line.contains("LAST") { continue; }
+        index += 1;
+        let name = line.split_whitespace().last().unwrap_or("systemd timer").to_string();
+        tasks.push(CronTask { id: format!("timer:{index}"), name, source: "systemd timer".into(), user: "system".into(), schedule: "timer".into(), command: line.into(), enabled: true, editable: false, detail: "服务器 systemd timer 状态".into() });
+    }
+    tasks
+}
+
+const CRON_LIST_COMMAND: &str = r#"printf 'OPSNEST_USER_CRON_BEGIN\n'; crontab -l 2>/dev/null || true; printf '\nOPSNEST_USER_CRON_END\n'; printf 'OPSNEST_SYSTEM_CRON_BEGIN\n'; if [ -r /etc/crontab ]; then cat /etc/crontab; fi; for file in /etc/cron.d/*; do if [ -f "$file" ]; then printf 'OPSNEST_FILE=%s\n' "$file"; cat "$file"; fi; done; printf 'OPSNEST_SYSTEM_CRON_END\n'; printf 'OPSNEST_TIMERS_BEGIN\n'; systemctl list-timers --all --no-legend --no-pager 2>/dev/null || true; printf 'OPSNEST_TIMERS_END\n'"#;
+
 const SYSTEM_INFO_COMMAND: &str = r#"os_name=""
 if [ -r /etc/os-release ]; then
   os_name=$(awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release 2>/dev/null)
@@ -242,6 +335,68 @@ if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; 
         docker_installed,
         docker_containers: value_for(&output, "OPSNEST_CONTAINERS=", "0"),
     })
+}
+
+fn validate_cron_field(value: &str, label: &str, max_len: usize) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > max_len || value.contains('\n') || value.contains('\r') {
+        return Err(format!("{label}不能为空，且不能包含换行。"));
+    }
+    Ok(value.to_string())
+}
+
+fn cron_mutation_script(id: &str, name: &str, schedule: &str, command: &str, enabled: bool, delete: bool) -> String {
+    let raw_id = id.to_string();
+    let quoted_id = shell_quote(id);
+    let line = if delete { None } else {
+        let safe_name = name.replace(['\r', '\n', '#'], " ").replace(" ENABLED:", " ");
+        let marker = format!("# OPSNEST-ID:{raw_id} NAME:{} ENABLED:{}", safe_name.trim(), if enabled { "1" } else { "0" });
+        let entry = format!("{} {}{}", if enabled { "" } else { "# " }, schedule, if command.is_empty() { String::new() } else { format!(" {command}") });
+        Some((marker, entry))
+    };
+    let mut script = format!("tmp=$(mktemp) || exit 1; (crontab -l 2>/dev/null || true) | awk -v id={quoted_id} 'index($0, \"# OPSNEST-ID:\" id \" \" ) != 1 {{print}}' > \"$tmp\" || exit 1; ");
+    if let Some((marker, entry)) = line {
+        script.push_str(&format!("printf '%s\\n' {} {} >> \"$tmp\"; ", shell_quote(&marker), shell_quote(&entry)));
+    }
+    script.push_str("crontab \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status");
+    script
+}
+
+#[tauri::command]
+pub async fn list_server_cron(request: SshTestRequest) -> Result<Vec<CronTask>, String> {
+    let session = connect_session(&request).await?;
+    let output = run_command(&session, CRON_LIST_COMMAND, None).await?;
+    close_session(session).await;
+    Ok(parse_cron_output(&output, request.username.trim()))
+}
+
+#[tauri::command]
+pub async fn save_server_cron(request: SshTestRequest, id: String, name: String, schedule: String, command: String, enabled: bool) -> Result<(), String> {
+    let id = validate_cron_field(&id, "任务 ID", 100)?;
+    if !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+        return Err("任务 ID 格式不正确。".into());
+    }
+    let name = validate_cron_field(&name, "任务名称", 120)?;
+    let schedule = validate_cron_field(&schedule, "Cron 表达式", 100)?;
+    let command = validate_cron_field(&command, "执行命令", 4000)?;
+    let session = connect_session(&request).await?;
+    let script = cron_mutation_script(&id, &name, &schedule, &command, enabled, false);
+    let result = run_command(&session, &script, None).await;
+    close_session(session).await;
+    result.map(|_| ())
+}
+
+#[tauri::command]
+pub async fn delete_server_cron(request: SshTestRequest, id: String) -> Result<(), String> {
+    let id = validate_cron_field(&id, "任务 ID", 100)?;
+    if !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+        return Err("任务 ID 格式不正确。".into());
+    }
+    let session = connect_session(&request).await?;
+    let script = cron_mutation_script(&id, "", "", "", false, true);
+    let result = run_command(&session, &script, None).await;
+    close_session(session).await;
+    result.map(|_| ())
 }
 
 fn diagnosis_commands(focus: &str) -> Vec<(&'static str, &'static str)> {
@@ -335,5 +490,28 @@ pub fn stop_ssh_command(command_id: String) -> Result<(), String> {
     match sender {
         Some(sender) => sender.send(()).map_err(|_| "命令已经结束".to_string()),
         None => Err("没有正在执行的命令".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_server_and_system_cron_entries() {
+        let output = "OPSNEST_USER_CRON_BEGIN\n# OPSNEST-ID:job-1 NAME:每日备份 ENABLED:1\n0 3 * * * /opt/backup.sh\nOPSNEST_USER_CRON_END\nOPSNEST_SYSTEM_CRON_BEGIN\n17 * * * * root /usr/lib/command-not-found\nOPSNEST_SYSTEM_CRON_END\nOPSNEST_TIMERS_BEGIN\nOPSNEST_TIMERS_END\n";
+        let tasks = parse_cron_output(output, "root");
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].id, "job-1");
+        assert!(tasks[0].editable);
+        assert_eq!(tasks[1].source, "系统 Cron");
+        assert_eq!(tasks[1].user, "root");
+    }
+
+    #[test]
+    fn mutation_script_keeps_marker_id_unquoted() {
+        let script = cron_mutation_script("job-1", "Backup", "0 3 * * *", "/opt/backup.sh", true, false);
+        assert!(script.contains("# OPSNEST-ID:job-1 NAME:Backup ENABLED:1"));
+        assert!(script.contains("awk -v id='job-1'"));
     }
 }
