@@ -208,6 +208,7 @@ src-tauri/
     storage.rs      本地数据、日志和凭据存取
 docs/
   architecture.md  架构说明
+  roadmap.md        开发路线图
 public/
   opsnest-icon.png  应用图标
 ```
@@ -230,6 +231,8 @@ public/
 - 联网搜索目前用于辅助判断，尚未覆盖所有软件的官方版本渠道
 - 回滚、备份、批量变更和更细粒度的工具权限仍在完善
 - 暂无云端同步和团队协作功能
+
+详细开发计划见 [docs/roadmap.md](docs/roadmap.md)，下一阶段重点是服务器文件管理和服务器卡片快捷安装。
 
 欢迎通过 GitHub Issue 提交真实服务器环境、错误日志和改进建议。提交日志或截图前，请先删除密码、API Key、Token、Cookie 和私有地址。
 
