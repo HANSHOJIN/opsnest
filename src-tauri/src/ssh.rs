@@ -42,6 +42,15 @@ pub struct ServerProfile {
     pub docker_containers: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosisResult {
+    pub label: String,
+    pub command: String,
+    pub output: String,
+    pub success: bool,
+}
+
 struct OpsNestHandler;
 
 impl client::Handler for OpsNestHandler {
@@ -214,6 +223,50 @@ if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; 
         docker_installed,
         docker_containers: value_for(&output, "OPSNEST_CONTAINERS=", "0"),
     })
+}
+
+fn diagnosis_commands(focus: &str) -> Vec<(&'static str, &'static str)> {
+    let focus = focus.to_lowercase();
+    let mut commands = vec![
+        ("系统版本", "uname -a"),
+        ("运行时间与负载", "uptime"),
+        ("磁盘空间", "df -hP"),
+        ("内存状态", "free -h 2>/dev/null || true"),
+        ("失败服务", "systemctl --failed --no-legend --no-pager 2>/dev/null || true"),
+        ("Docker 容器", "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null || true"),
+    ];
+    if focus.contains("网站") || focus.contains("网页") || focus.contains("nginx") || focus.contains("502") || focus.contains("打不开") || focus.contains("website") || focus.contains("http") {
+        commands.extend([
+            ("Web 端口", "ss -lntp 2>/dev/null | grep -E ':(80|443)\\b' || true"),
+            ("Nginx 配置", "if command -v nginx >/dev/null 2>&1; then nginx -t 2>&1; else printf 'nginx not installed\\n'; fi"),
+            ("本机 HTTP", "curl -I -L --max-time 5 -sS http://127.0.0.1 2>&1 | head -n 12 || true"),
+        ]);
+    }
+    if focus.contains("docker") || focus.contains("容器") || focus.contains("compose") {
+        commands.push(("Docker 服务", "docker info --format 'Server={{.ServerVersion}} Containers={{.Containers}} Running={{.ContainersRunning}}' 2>&1 || true"));
+    }
+    if focus.contains("hermes") {
+        commands.push(("Hermes 安装位置", "command -v hermes || true"));
+        commands.push(("Hermes 版本", "hermes --version 2>&1 || true"));
+    }
+    if focus.contains("llama") {
+        commands.push(("llama.cpp 安装位置", "command -v llama-server || command -v llama-cli || true"));
+    }
+    commands
+}
+
+#[tauri::command]
+pub async fn diagnose_server(request: SshTestRequest, focus: String) -> Result<Vec<DiagnosisResult>, String> {
+    let session = connect_session(&request).await?;
+    let mut results = Vec::new();
+    for (label, command) in diagnosis_commands(&focus) {
+        match run_command(&session, command, None).await {
+            Ok(output) => results.push(DiagnosisResult { label: label.to_string(), command: command.to_string(), output: output.chars().take(4000).collect(), success: true }),
+            Err(error) => results.push(DiagnosisResult { label: label.to_string(), command: command.to_string(), output: error, success: false }),
+        }
+    }
+    close_session(session).await;
+    Ok(results)
 }
 
 #[tauri::command]

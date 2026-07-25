@@ -15,6 +15,45 @@ fn data_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(directory.join("opsnest-data.json"))
 }
 
+fn append_log_line(app: &AppHandle, filename: &str, entry: Value) -> Result<(), String> {
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join(filename);
+    let mut lines = if path.exists() {
+        fs::read_to_string(&path)
+            .map_err(|error| error.to_string())?
+            .lines()
+            .map(str::to_owned)
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    lines.push(serde_json::to_string(&entry).map_err(|error| error.to_string())?);
+    let start = lines.len().saturating_sub(2000);
+    let content = lines[start..].join("\n") + "\n";
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, content).map_err(|error| error.to_string())?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| error.to_string())?;
+    }
+    fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+fn load_log_lines(app: &AppHandle, filename: &str) -> Result<Vec<Value>, String> {
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let path = directory.join(filename);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|error| error.to_string()))
+        .collect()
+}
+
 #[tauri::command]
 pub fn load_local_data(app: AppHandle) -> Result<Value, String> {
     let path = data_path(&app)?;
@@ -35,6 +74,46 @@ pub fn save_local_data(app: AppHandle, data: Value) -> Result<(), String> {
         fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
     fs::rename(temporary, path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn append_runtime_log(app: AppHandle, entry: Value) -> Result<(), String> {
+    append_log_line(&app, "opsnest-runtime.jsonl", entry)
+}
+
+#[tauri::command]
+pub fn load_runtime_logs(app: AppHandle) -> Result<Vec<Value>, String> {
+    load_log_lines(&app, "opsnest-runtime.jsonl")
+}
+
+#[tauri::command]
+pub fn clear_runtime_logs(app: AppHandle) -> Result<(), String> {
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let path = directory.join("opsnest-runtime.jsonl");
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn append_conversation_log(app: AppHandle, entry: Value) -> Result<(), String> {
+    append_log_line(&app, "opsnest-conversations.jsonl", entry)
+}
+
+#[tauri::command]
+pub fn load_conversation_logs(app: AppHandle) -> Result<Vec<Value>, String> {
+    load_log_lines(&app, "opsnest-conversations.jsonl")
+}
+
+#[tauri::command]
+pub fn clear_conversation_logs(app: AppHandle) -> Result<(), String> {
+    let directory = app.path().app_data_dir().map_err(|error| error.to_string())?;
+    let path = directory.join("opsnest-conversations.jsonl");
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

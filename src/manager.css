@@ -37,6 +37,10 @@
 .task-history-header span { color: #8993a2; font-size: 13px; }
 .task-history-actions { display: flex; gap: 8px; }
 .task-history-actions .secondary { margin-left: 0; }
+.task-history-tabs { display: flex; gap: 8px; max-width: 1060px; margin: 0 auto 16px; padding: 4px; border: 1px solid #e2e6ee; border-radius: 12px; background: #eef1f6; }
+.task-history-tabs button { flex: 1; border: 0; border-radius: 9px; padding: 9px 12px; color: #728096; background: transparent; cursor: pointer; font: inherit; font-size: 12px; }
+.task-history-tabs button.active { color: #293652; background: #fff; box-shadow: 0 2px 7px rgba(39, 53, 80, .08); }
+.task-history-tabs b { display: inline-grid; min-width: 20px; height: 20px; margin-left: 5px; place-items: center; border-radius: 10px; color: #5267e8; background: #eef0ff; font-size: 10px; }
 .task-history-list { display: grid; gap: 12px; max-width: 1060px; margin: 0 auto; }
 .task-log-card { padding: 15px 17px; border: 1px solid #e2e6ee; border-left: 3px solid #aeb9cc; border-radius: 12px; background: #fff; }
 .task-log-card.success { border-left-color: #2bbb72; }
