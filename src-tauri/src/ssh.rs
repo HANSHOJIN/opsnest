@@ -1,6 +1,7 @@
 use russh::{client, keys, ChannelMsg, Disconnect, Sig};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Deserialize)]
@@ -21,6 +22,7 @@ pub struct SshTestRequest {
 
 static COMMAND_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
 static PERSISTENT_SHELLS: OnceLock<Mutex<HashMap<String, Arc<PersistentShell>>>> = OnceLock::new();
+static INTERACTIVE_SHELLS: OnceLock<Mutex<HashMap<String, Arc<InteractiveShell>>>> = OnceLock::new();
 static SHELL_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn command_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
@@ -29,6 +31,10 @@ fn command_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>
 
 fn persistent_shells() -> &'static Mutex<HashMap<String, Arc<PersistentShell>>> {
     PERSISTENT_SHELLS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn interactive_shells() -> &'static Mutex<HashMap<String, Arc<InteractiveShell>>> {
+    INTERACTIVE_SHELLS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +107,12 @@ async fn connect_session(request: &SshTestRequest) -> Result<client::Handle<OpsN
     }
 
     let config = client::Config {
-        inactivity_timeout: Some(Duration::from_secs(15)),
+        // Agent runs can spend longer than 15 seconds thinking, diagnosing or
+        // waiting for a model. Do not kill an otherwise healthy Shell during
+        // that quiet period; use SSH keepalives to detect a real disconnect.
+        inactivity_timeout: None,
+        keepalive_interval: Some(Duration::from_secs(10)),
+        keepalive_max: 3,
         ..Default::default()
     };
     let mut session = client::connect(
@@ -198,6 +209,19 @@ struct PersistentShell {
     writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
     output: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     command_lock: tokio::sync::Mutex<()>,
+}
+
+struct InteractiveShell {
+    session: client::Handle<OpsNestHandler>,
+    writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshTerminalEvent {
+    session_id: String,
+    data: String,
+    closed: bool,
 }
 
 async fn create_persistent_shell(request: &SshTestRequest) -> Result<Arc<PersistentShell>, String> {
@@ -325,6 +349,65 @@ async fn close_persistent_shell(session_id: &str) -> Result<(), String> {
         let _ = shell.writer.lock().await.close().await;
         close_session(&shell.session).await;
     }
+    Ok(())
+}
+
+async fn close_interactive_shell(session_id: &str) -> Result<(), String> {
+    let shell = interactive_shells()
+        .lock()
+        .map_err(|_| "无法读取交互式 SSH 会话表".to_string())?
+        .remove(session_id);
+    if let Some(shell) = shell {
+        let _ = shell.writer.lock().await.close().await;
+        close_session(&shell.session).await;
+    }
+    Ok(())
+}
+
+async fn create_interactive_shell(app: AppHandle, request: &SshTestRequest, session_id: &str) -> Result<(), String> {
+    close_interactive_shell(session_id).await?;
+    let session = connect_session(request).await?;
+    let channel = session
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("已登录，但无法打开交互式 SSH 会话：{error}"))?;
+    let _ = channel.request_pty(false, "xterm-256color", 240, 40, 0, 0, &[]).await;
+    let (mut reader, writer) = channel.split();
+    writer
+        .request_shell(true)
+        .await
+        .map_err(|error| format!("无法启动交互式 SSH Shell：{error}"))?;
+
+    let shell = Arc::new(InteractiveShell {
+        session,
+        writer: tokio::sync::Mutex::new(writer),
+    });
+    interactive_shells()
+        .lock()
+        .map_err(|_| "无法保存交互式 SSH 会话".to_string())?
+        .insert(session_id.to_string(), shell);
+
+    let event_session_id = session_id.to_string();
+    tokio::spawn(async move {
+        while let Some(message) = reader.wait().await {
+            match message {
+                ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                    let _ = app.emit("ssh-terminal-output", SshTerminalEvent {
+                        session_id: event_session_id.clone(),
+                        data: String::from_utf8_lossy(&data).into_owned(),
+                        closed: false,
+                    });
+                }
+                ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        let _ = app.emit("ssh-terminal-output", SshTerminalEvent {
+            session_id: event_session_id,
+            data: String::new(),
+            closed: true,
+        });
+    });
     Ok(())
 }
 
@@ -633,7 +716,11 @@ pub async fn execute_ssh_command(
     };
     let result = if let Some(session_id) = request.session_id.as_deref().filter(|value| !value.trim().is_empty()) {
         let shell = persistent_shell_for(&request, session_id).await?;
-        run_persistent_command(&shell, command, cancellation).await
+        let result = run_persistent_command(&shell, command, cancellation).await;
+        if matches!(&result, Err(error) if error == "SSH Shell 已断开") {
+            let _ = close_persistent_shell(session_id).await;
+        }
+        result
     } else {
         let session = connect_session(&request).await?;
         let result = run_command(&session, command, cancellation).await;
@@ -644,6 +731,62 @@ pub async fn execute_ssh_command(
         if let Ok(mut commands) = command_cancellations().lock() { commands.remove(&command_id); }
     }
     result
+}
+
+#[tauri::command]
+pub async fn open_ssh_terminal(app: AppHandle, request: SshTestRequest, session_id: String) -> Result<(), String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Err("SSH 会话 ID 不能为空。".into());
+    }
+    create_interactive_shell(app, &request, session_id).await
+}
+
+#[tauri::command]
+pub async fn write_ssh_terminal(session_id: String, data: String) -> Result<(), String> {
+    let session_id = session_id.trim();
+    let shell = interactive_shells()
+        .lock()
+        .map_err(|_| "无法读取交互式 SSH 会话表".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "SSH 终端尚未连接。".to_string())?;
+    let result = shell
+        .writer
+        .lock()
+        .await
+        .data_bytes(data.into_bytes())
+        .await
+        .map_err(|error| format!("无法写入 SSH 终端：{error}"));
+    result
+}
+
+#[tauri::command]
+pub async fn resize_ssh_terminal(session_id: String, columns: u32, rows: u32) -> Result<(), String> {
+    let session_id = session_id.trim();
+    let shell = interactive_shells()
+        .lock()
+        .map_err(|_| "无法读取交互式 SSH 会话表".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "SSH 终端尚未连接。".to_string())?;
+    let result = shell
+        .writer
+        .lock()
+        .await
+        .window_change(columns.max(20), rows.max(5), 0, 0)
+        .await
+        .map_err(|error| format!("无法调整 SSH 终端大小：{error}"));
+    result
+}
+
+#[tauri::command]
+pub async fn close_interactive_ssh_terminal(session_id: String) -> Result<(), String> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    close_interactive_shell(session_id).await
 }
 
 #[tauri::command]

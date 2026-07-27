@@ -1,6 +1,9 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
 import debianIcon from "simple-icons/icons/debian.svg?raw";
 import ubuntuIcon from "simple-icons/icons/ubuntu.svg?raw";
 import openwrtIcon from "simple-icons/icons/openwrt.svg?raw";
@@ -14,6 +17,7 @@ import nixosIcon from "simple-icons/icons/nixos.svg?raw";
 import kaliIcon from "simple-icons/icons/kalilinux.svg?raw";
 import gentooIcon from "simple-icons/icons/gentoo.svg?raw";
 import linuxIcon from "simple-icons/icons/linux.svg?raw";
+import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 import "./manager.css";
 
@@ -122,6 +126,7 @@ function App() {
   const managerMessageSnapshotRef = useRef<ManagerMessage[]>([]);
   const conversationHydratedRef = useRef(false);
   const sessionIdRef = useRef(crypto.randomUUID());
+  const terminalWriterRef = useRef<((text: string) => void) | null>(null);
 
   const appendRuntimeLog = (entry: Omit<RuntimeLog, "id" | "timestamp">) => {
     const nextEntry: RuntimeLog = { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), message: redactLogText(entry.message), details: entry.details ? redactLogText(entry.details) : undefined };
@@ -792,6 +797,8 @@ function App() {
 
   const exitTerminal = () => {
     if (server) void invoke("close_ssh_shell", { sessionId: server.id }).catch(() => undefined);
+    if (server) void invoke("close_interactive_ssh_terminal", { sessionId: server.id }).catch(() => undefined);
+    terminalWriterRef.current = null;
     activeCommandId.current = null;
     setTerminalAgentRun(null);
     setExecuting(false);
@@ -1038,8 +1045,8 @@ function App() {
     appendLog({ type: "agent", title: "Terminal AgentRun cancelled", serverId: server?.id, serverName: server?.name, content: terminalAgentRun.task, status: "cancelled" });
   };
 
-  const submitTerminalInput = async () => {
-    const input = terminalInput.trim();
+  const submitTerminalInput = async (rawInput?: string) => {
+    const input = (rawInput ?? terminalInput).trim();
     if (!server) return;
     if (/^\/?stop$/i.test(input)) {
       setTerminalInput("");
@@ -1072,7 +1079,7 @@ function App() {
     setTerminalAgentStatus("");
     setTerminalLines((lines) => [...lines, { kind: detectedAsCommand ? "command" : "ai", text: input }]);
     setError("");
-    if (!detectedAsCommand && aiConfig.interventionMode !== "none" && modelConfigured) {
+    if (aiConfig.interventionMode !== "none" && modelConfigured && (aiConfig.interventionMode === "always" || !detectedAsCommand)) {
       setExecuting(true);
       await startTerminalAgentRun(input, commandRequest);
       return;
@@ -1195,14 +1202,14 @@ function App() {
   return <main className={view === "terminal" ? "shell terminal-shell" : view === "hosts" ? "shell hosts-dashboard-mode" : "shell"}>
     <aside className="sidebar">
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
-      <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>▦ {text.cron}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
+       <nav aria-label="Navigation"><button className={view === "hosts" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>{text.cron}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
        <div className="sidebar-note">v0.1.0-alpha.6</div>
     </aside>
      <section className="content">
       {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
       {view === "cron" && <CronPanel tasks={cronTasks} servers={servers} selectedServerId={cronServerId} loading={isCronLoading} editorOpen={isCronEditorOpen} form={cronForm} language={language} error={error} onServerChange={selectCronServer} onRefresh={() => { const target = servers.find((item) => item.id === cronServerId); if (target) void loadCronTasks(target); }} onNew={() => openCronEditor()} onEdit={openCronEditor} onToggle={toggleCronTask} onDelete={deleteCronTask} onFormChange={setCronForm} onSave={saveCronTask} onCloseEditor={() => setCronEditorOpen(false)} onExit={() => setView("hosts")} />}
-      {view === "terminal" && server && <TerminalPanel server={server} text={text} language={language} input={terminalInput} lines={terminalLines} executing={isExecuting} agentStatus={terminalAgentStatus} autoLabel={language === "zh-CN" ? "自动识别" : "Auto detect"} autoPlaceholder={language === "zh-CN" ? "输入命令，或输入 stop 停止当前命令…" : "Enter a command, or type stop to stop…"} actionLabel={language === "zh-CN" ? "发送" : "Send"} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={exitTerminal} />}
+       {view === "terminal" && server && <TerminalPanel server={server} request={activeCredentials.current[server.id] ?? null} text={text} language={language} interventionMode={aiConfig.interventionMode} lines={terminalLines} executing={isExecuting} agentStatus={terminalAgentStatus} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={exitTerminal} />}
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
       {contextMenu && <ServerContextMenu text={text} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
       {view === "hosts" && <ServerDashboard servers={servers} text={text} language={language} modelStatusClass={modelStatusClass} modelStatusLabel={modelStatusLabel} onAdd={openWizard} onOpen={openTerminal} onConnect={(item) => { void connectSavedServer(item); }} onEdit={editServer} />}
@@ -1344,25 +1351,156 @@ function AgentRunPanel({ run, language, onApprove, onReject }: { run: AgentRun; 
   return <div className={`agent-run-panel ${run.phase}`}><div className="agent-run-heading"><strong>AgentRun</strong><span>{run.phase === "waiting_approval" ? (language === "zh-CN" ? "等待你的决定" : "Waiting for your approval") : run.phase}</span></div><div className="agent-run-steps">{run.steps.map((step) => <div className={`agent-run-step ${step.status}`} key={step.id}><span className="agent-run-dot"></span><div><strong>{labels[step.id]}</strong><small>{statusLabel(step.status)}{step.detail ? ` · ${step.detail}` : ""}</small></div></div>)}</div>{run.plan && <div className="agent-run-plan"><p>{run.plan.explanation}</p><code>$ {run.plan.command}</code>{run.plan.verifyCommand && <small>Verify: {run.plan.verifyCommand}</small>}<small>Risk: {run.plan.risk ?? "medium"}</small></div>}{run.error && <div className="agent-run-error">{run.error}</div>}{run.phase === "waiting_approval" && <div className="agent-run-actions"><button className="secondary" onClick={onReject}>{language === "zh-CN" ? "取消" : "Cancel"}</button><button className="primary" onClick={onApprove}>{language === "zh-CN" ? "批准执行" : "Approve and execute"}</button></div>}</div>;
 }
 
-function TerminalPanel({ server, text, language, input, lines, executing, agentStatus, autoLabel, autoPlaceholder, actionLabel, onInputChange, onSubmit, onStop, onExit }: { server: Server; text: typeof zh; language: Locale; input: string; lines: TerminalLine[]; executing: boolean; agentStatus: string; autoLabel: string; autoPlaceholder: string; actionLabel: string; onInputChange: (value: string) => void; onSubmit: () => void; onStop: () => void; onExit: () => void }) {
-  const screenRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+function TerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, onInputChange, onSubmit, onStop, onExit }: { server: Server; request: SshRequest | null; text: typeof zh; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const lineCountRef = useRef(0);
+  const inputBufferRef = useRef("");
+  const lastSubmittedRef = useRef("");
+  const previousExecutingRef = useRef(false);
+  const onSubmitRef = useRef(onSubmit);
+  const modeRef = useRef(interventionMode);
+  onSubmitRef.current = onSubmit;
+  modeRef.current = interventionMode;
+
   useEffect(() => {
-    const screen = screenRef.current;
-    if (screen) screen.scrollTop = screen.scrollHeight;
-    if (!executing) requestAnimationFrame(() => inputRef.current?.focus());
-  }, [lines, executing]);
+    const host = hostRef.current;
+    if (!host) return;
+    const terminal = new Terminal({
+      cursorBlink: true,
+      convertEol: false,
+      scrollback: 10000,
+      fontSize: 13,
+      lineHeight: 1.35,
+      fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+      theme: { background: "#101214", foreground: "#d5deeb", cursor: "#65d995", selectionBackground: "#2c4166", black: "#101214", brightBlack: "#667383", green: "#65d995", brightGreen: "#8cf1b0", cyan: "#80dce8", brightCyan: "#a9e8ee", blue: "#8ea4ff", brightBlue: "#b9c8ff" },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(host);
+    fit.fit();
+    terminalRef.current = terminal;
+
+    const writeLine = (line: TerminalLine) => {
+      const prefix = line.kind === "command" ? "$ " : line.kind === "ai" ? "✦ " : line.kind === "system" ? "• " : "";
+      const value = line.text.replace(/\r?\n/g, "\r\n");
+      const colorStart = line.kind === "ai" ? "\x1b[38;5;114m" : "";
+      const colorEnd = line.kind === "ai" ? "\x1b[0m" : "";
+      terminal.write(`${colorStart}${prefix}${value}${colorEnd}${value.endsWith("\r\n") ? "" : "\r\n"}`);
+    };
+    lines.forEach(writeLine);
+    lineCountRef.current = lines.length;
+
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    let reconnectAttempted = false;
+    void listen<{ sessionId: string; data: string; closed: boolean }>("ssh-terminal-output", (event) => {
+      if (event.payload.sessionId !== server.id) return;
+      if (event.payload.data) {
+        terminal.write(event.payload.data.replace(/\r?\n/g, "\r\n"));
+      }
+      if (event.payload.closed) {
+        terminal.write("\r\n[SSH connection closed]");
+        if (request && !reconnectAttempted && !cancelled) {
+          reconnectAttempted = true;
+          terminal.write("\r\n[reconnecting...]");
+          window.setTimeout(() => {
+            if (!cancelled) void invoke("open_ssh_terminal", { request: { ...request, sessionId: server.id }, sessionId: server.id }).catch((error) => terminal.write(`\r\n[SSH reconnect failed] ${String(error)}\r\n`));
+          }, 350);
+        } else {
+          terminal.write("\r\n");
+        }
+      }
+    }).then((stop) => { if (cancelled) stop(); else unlisten = stop; });
+
+    if (request) {
+      void invoke("open_ssh_terminal", { request: { ...request, sessionId: server.id }, sessionId: server.id }).catch((error) => {
+        terminal.write(`\r\n[SSH connection failed] ${String(error)}\r\n`);
+      });
+    }
+
+    const resize = () => {
+      fit.fit();
+      const dimensions = fit.proposeDimensions();
+      if (dimensions) void invoke("resize_ssh_terminal", { sessionId: server.id, columns: dimensions.cols, rows: dimensions.rows }).catch(() => undefined);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(host);
+    resize();
+
+    const dataDisposable = terminal.onData((data) => {
+      if (modeRef.current === "none") {
+        void invoke("write_ssh_terminal", { sessionId: server.id, data }).catch((error) => terminal.write(`\r\n[SSH write failed] ${String(error)}\r\n`));
+        return;
+      }
+      if (data === "\u0003") {
+        inputBufferRef.current = "";
+        terminal.write("^C\r\n");
+        onInputChange("");
+        onStop();
+        return;
+      }
+      if (data === "\r" || data === "\n") {
+        const value = inputBufferRef.current;
+        if (!value.trim()) { terminal.write("\r\n"); return; }
+        lastSubmittedRef.current = value.trim();
+        inputBufferRef.current = "";
+        terminal.write("\r\n");
+        onInputChange("");
+        onSubmitRef.current(value);
+        return;
+      }
+      if (data === "\u007f" || data === "\b") {
+        if (inputBufferRef.current.length) { inputBufferRef.current = inputBufferRef.current.slice(0, -1); terminal.write("\b \b"); onInputChange(inputBufferRef.current); }
+        return;
+      }
+      if (!data.includes("\u001b")) { inputBufferRef.current += data; terminal.write(data); onInputChange(inputBufferRef.current); }
+    });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+      dataDisposable.dispose();
+      observer.disconnect();
+      void invoke("close_interactive_ssh_terminal", { sessionId: server.id }).catch(() => undefined);
+      terminal.dispose();
+      terminalRef.current = null;
+    };
+  // The terminal session is intentionally recreated only when the server changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [server.id, request]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal || lines.length <= lineCountRef.current) return;
+    for (const line of lines.slice(lineCountRef.current)) {
+      if (line.kind === "command" && line.text.trim() === lastSubmittedRef.current) { lastSubmittedRef.current = ""; continue; }
+      if (line.kind === "ai" && line.text.trim() === lastSubmittedRef.current) { lastSubmittedRef.current = ""; continue; }
+      const prefix = line.kind === "command" ? "$ " : line.kind === "ai" ? "✦ " : line.kind === "system" ? "• " : "";
+      const value = line.text.replace(/\r?\n/g, "\r\n");
+      const colorStart = line.kind === "ai" ? "\x1b[38;5;114m" : "";
+      const colorEnd = line.kind === "ai" ? "\x1b[0m" : "";
+      terminal.write(`${colorStart}${prefix}${value}${colorEnd}${value.endsWith("\r\n") ? "" : "\r\n"}`);
+    }
+    lineCountRef.current = lines.length;
+  }, [lines]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    if (previousExecutingRef.current && !executing) {
+      const hostname = server.profile?.hostname || server.host;
+      const promptSymbol = server.username === "root" ? "#" : "$";
+      terminal.write(`\r\n${server.username}@${hostname}:~${promptSymbol} `);
+    }
+    previousExecutingRef.current = executing;
+    if (!executing) terminal.focus();
+  }, [executing, server]);
+
   return <section className="terminal-view">
     <div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><button className="secondary terminal-exit" onClick={onExit}>{text.terminalExit}</button></div>
-    <div className="terminal-toolbar"><span className="terminal-mode active">✦ {autoLabel}</span><span className="terminal-status">● {agentStatus || (executing ? text.terminalConnecting : text.connected)}</span></div>
-    <div className="terminal-screen" ref={screenRef}>
-      {lines.map((line, index) => <div className={"terminal-line " + line.kind} key={index}><span className="terminal-prefix">{line.kind === "command" ? "$" : line.kind === "ai" ? "✦" : line.kind === "system" ? "•" : ""}</span><pre>{line.text}</pre></div>)}
-      <form className="terminal-input-row" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
-        <span className="terminal-shell-prompt">{server.username}@{server.host}:~$</span>
-        <input ref={inputRef} value={input} onChange={(event) => onInputChange(event.target.value)} placeholder={autoPlaceholder} autoFocus disabled={executing} />
-        {executing ? <button className="terminal-stop" type="button" onClick={onStop}>停止</button> : <button className="terminal-submit" type="submit" aria-label={actionLabel} disabled={!input.trim()}>↵</button>}
-      </form>
-    </div>
+    <div className="terminal-toolbar">{executing && <button className="terminal-stop terminal-toolbar-stop" type="button" onClick={onStop}>停止</button>}<span className="terminal-status">● {agentStatus || (executing ? text.terminalConnecting : text.connected)}</span></div>
+    <div className="terminal-xterm-host" ref={hostRef} aria-label="SSH terminal" />
   </section>;
 }
 
