@@ -92,7 +92,7 @@ Recommended to try: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). I
 
 Alpha limitations remain: first-time SSH connections use trust on first use and do not yet show a fingerprint confirmation dialog; the Agent can still generate Shell commands. Use test servers or backed-up environments, verify new host fingerprints through another trusted channel, and remove passwords, API keys, tokens, cookies, domains, and private addresses before sharing logs, screenshots, or Issues.
 
-See [SECURITY.md](SECURITY.md) for the pre-release security review.
+See [SECURITY.md](SECURITY.md) for the pre-release security review, and read the [Disclaimer](DISCLAIMER.md) before use.
 
 ## Getting started
 
@@ -141,4 +141,4 @@ Near-term work includes server file management, quick installation actions, SSH 
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and icon attribution.
 
-Real-environment feedback and improvements are welcome. Read [SECURITY.md](SECURITY.md) first, and never publish credentials or unredacted server logs in an Issue.
+Real-environment feedback and improvements are welcome. Read [SECURITY.md](SECURITY.md) and the [Disclaimer](DISCLAIMER.md) first, and never publish credentials or unredacted server logs in an Issue.

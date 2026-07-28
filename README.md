@@ -92,7 +92,7 @@ OpsNest 支持 OpenAI 兼容接口，并提供 OpenAI、DeepSeek、OpenRouter、
 
 Alpha 阶段仍有明确限制：首次 SSH 连接采用首次信任（TOFU），会自动把主机密钥写入用户的 `~/.ssh/known_hosts`，但尚未提供指纹确认窗口；Agent 仍可能生成任意 Shell 命令。请通过其他可信渠道核对新服务器指纹，在测试服务器或有备份的环境中使用，并在分享日志、截图或 Issue 前删除密码、API Key、Token、Cookie、域名和私有地址。
 
-更详细的发布前安全检查见 [SECURITY.md](SECURITY.md)。
+更详细的发布前安全检查见 [SECURITY.md](SECURITY.md)。使用前请阅读 [免责声明](DISCLAIMER.md)。
 
 ## 开始使用
 
@@ -156,4 +156,4 @@ docs/
 
 第三方依赖和图标来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-欢迎提交真实环境反馈和改进建议。请先阅读 [安全说明](SECURITY.md)，不要在 Issue 中公开凭据或未脱敏的服务器日志。
+欢迎提交真实环境反馈和改进建议。请先阅读 [安全说明](SECURITY.md) 和 [免责声明](DISCLAIMER.md)，不要在 Issue 中公开凭据或未脱敏的服务器日志。
