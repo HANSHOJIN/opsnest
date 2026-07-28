@@ -154,6 +154,6 @@ docs/
 
 ## 开源与第三方声明
 
-第三方依赖和图标来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+本项目采用 [MIT License](LICENSE)。第三方依赖和图标来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 欢迎提交真实环境反馈和改进建议。请先阅读 [安全说明](SECURITY.md) 和 [免责声明](DISCLAIMER.md)，不要在 Issue 中公开凭据或未脱敏的服务器日志。

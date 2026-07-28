@@ -139,6 +139,6 @@ Near-term work includes server file management, quick installation actions, SSH 
 
 ## Open source and third-party notices
 
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and icon attribution.
+This project is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and icon attribution.
 
 Real-environment feedback and improvements are welcome. Read [SECURITY.md](SECURITY.md) and the [Disclaimer](DISCLAIMER.md) first, and never publish credentials or unredacted server logs in an Issue.
