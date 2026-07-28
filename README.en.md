@@ -2,66 +2,57 @@
 
 [简体中文](README.md) · English
 
-An SSH server management application for beginners, with a built-in AI Agent.
+A local-first SSH server manager for beginners, with a built-in AI Agent.
 
-Users only need a basic understanding of their servers. Add a server address and login details, configure a model endpoint, and start managing individual servers or a server cluster. No programming experience is required, and you do not need to memorize command-line instructions.
+Users only need a server address, a login method, and a model endpoint. OpsNest keeps a real SSH terminal while adding server dashboards, service shortcuts, and natural-language AgentRun workflows. It does not require an OpsNest cloud service or a separate deployment.
 
-OpsNest aims to be powerful without becoming difficult to use. It brings SSH, server status, file and task management, and AI Agent workflows together in one clear desktop application.
-
-> Connect your server, describe what you need in plain language, and let OpsNest handle the rest.
+> Connect to a server, describe what you need, and understand every step.
 
 ![OpsNest server dashboard](docs/assets/dashboard-en.png)
 
 ![OpsNest SSH terminal](docs/assets/terminal-en.png)
 
-OpsNest is currently in the Alpha stage. It is evolving from an early architecture prototype into a usable desktop application. It can store multiple SSH servers, run AgentRun locally, and provide both a traditional terminal and natural-language operations in the same app.
+The screenshots use fictional demo servers and contain no private infrastructure data.
 
-## Current version
+## Current status
 
-`0.1.0-alpha.6`
+Current version: `0.1.0-alpha.8`
 
-Main validation targets:
+OpsNest is still Alpha software intended for real-environment testing, feedback, and collaborative development. The current validation targets are Windows x64 clients and Debian, Ubuntu, OpenWrt/iStoreOS, and NAS-like Linux systems. It is not a production bastion host and does not claim complete coverage of every distribution, package manager, or vendor system.
 
-- Windows x64
-- Linux servers, with Debian and Ubuntu tested most often
-- SSH password login and private-key login
-- IP addresses, domain names, and custom SSH ports
-- OpenAI-compatible APIs, DeepSeek, OpenAI, OpenRouter, Ollama, and custom endpoints
+## What is implemented
 
-This is an Alpha release intended for testing and feedback.
+### Servers and desktop experience
 
-## Features
+- Save multiple servers with IP addresses, domains, and custom SSH ports
+- Password and SSH private-key login
+- Store server credentials and AI API keys in the operating-system credential store
+- Show connection status, latency, operating system, CPU, memory, system disk, and Docker information
+- Dedicated detail views for ordinary Linux, OpenWrt/iStoreOS, and NAS servers
+- Discover common web panels, Docker containers, and reachable ports
+- Add custom browser shortcuts
+- Chinese interface with English available
 
-### Server management
+### Native SSH terminal
 
-- Save multiple SSH servers
-- Use IP addresses or domain names
-- Configure custom SSH ports
-- Use passwords or SSH private keys
-- Show connection status, operating-system information, and latency
-- Edit, connect to, and remove saved servers
-- Store server credentials in the local operating-system credential store
-
-### SSH terminal sessions
-
-- Command-line-style SSH session window
-- Run normal Shell commands directly
+- Command-line-style persistent SSH Shell sessions
+- Preserve `cd`, environment variables, virtual environments, and interactive terminal programs
+- Execute normal Shell commands directly
 - Type `stop` to stop a running command
 - Keep server-manager and child-server sessions independent
-- Restore terminal conversation history after restarting the app
-- Preserve commands and raw server output
+- Restore sessions, commands, and raw server output after restarting the app
 
 ### AI AgentRun
 
-Natural-language requests can pass through the local AgentRun workflow:
+Natural-language tasks move through a local AgentRun flow:
 
 ```text
 Understand the request
-  → Read server memory
+  → Read server memory and context
   → Search the web when needed
   → Explore the server
   → Run read-only diagnosis
-  → Build the next command
+  → Build the next plan
   → Ask for approval
   → Execute
   → Verify the result
@@ -69,178 +60,85 @@ Understand the request
   → Update server memory
 ```
 
-The current Agent can:
+The Agent receives the machine identity, system type, discovered services, and relevant task history. It keeps raw command output visible while explaining the result. After a failed command it can continue analysis and make a limited recovery plan instead of retrying forever.
 
-- Continue analyzing after a failed command
-- Detect common failures such as `command not found` and missing paths
-- Make a limited number of recovery plans instead of retrying forever
-- Avoid repeating the same failed command
-- Keep the complete raw output in the terminal
-- Produce a beginner-friendly summary in addition to the raw output
-- Save completed task results as server memory for later conversations
+Settings provide three intervention modes:
 
-### Server manager
+1. **Smart AI intervention** (default): clear Shell commands execute directly; natural-language requests go to the Agent; unavailable AI falls back automatically.
+2. **AI always involved**: commands and natural language are interpreted by the model first.
+3. **AI not involved**: classic SSH behavior; input is sent directly to the remote Shell.
 
-The server manager is a normal chat workspace for multiple servers. It can:
+### Server manager, Cron, and logs
 
-- Understand the saved server inventory
-- Plan checks and maintenance tasks across servers
-- Connect to all saved servers
-- Add a server from a conversation
-- Remove a local server record and its local credential
+- Use the server manager for multi-server conversations and maintenance planning
+- Add or remove local server records through the manager conversation
+- Cron jobs run on the target server; OpsNest reads, displays, and manages them over SSH
+- Keep task history, runtime logs, AI conversation logs, and terminal sessions locally
+- Use server memory as context for later Agent conversations; it does not replace user approval
 
-### AI intervention modes
+## AI models
 
-Settings provide three modes:
+OpsNest supports OpenAI-compatible endpoints and presets for OpenAI, DeepSeek, OpenRouter, Ollama, and custom endpoints. You choose the model provider. Server command output, log fragments, or configuration content may be sent as context to that provider.
 
-1. **Smart AI intervention** (default)
-   - Shell commands execute directly
-   - Natural-language requests go to the Agent
-   - Automatically falls back when the model is unavailable
-2. **AI always involved**
-   - Both commands and natural language are interpreted by the AI first
-   - Suitable for local models
-3. **AI not involved**
-   - Works like a classic SSH management application
-   - Every input is sent directly as a Shell command
+Recommended to try: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). It provides an OpenAI-compatible endpoint that aggregates multiple free model providers and supports custom OpenAI-compatible endpoints. It is an independent third-party project; read its documentation, license, and terms before use.
 
-### Server-side scheduled tasks
+## Local data and security boundary
 
-Cron jobs run on each target server, not inside OpsNest. OpsNest reads and manages them through SSH.
+- OpsNest does not require an OpsNest cloud service; primary data stays on the local computer
+- Server passwords, private-key passphrases, private-key paths, and AI API keys use the operating-system credential store; private-key files remain at the user-selected location
+- Server lists, model URLs, interface settings, and task summaries are stored in local application data
+- Runtime logs and AI/terminal conversation logs are stored locally as JSONL files
+- OpsNest does not send credentials to the model; server output may still be sent to the model API you configure
 
-- Read user Cron, system Cron, and systemd timers
-- Create, edit, enable, disable, and delete OpsNest-managed user Cron jobs
-- Select the target server from the Scheduled Tasks page
-- Keep task operations in the local task history
+Alpha limitations remain: first-time SSH connections use trust on first use and do not yet show a fingerprint confirmation dialog; the Agent can still generate Shell commands. Use test servers or backed-up environments, verify new host fingerprints through another trusted channel, and remove passwords, API keys, tokens, cookies, domains, and private addresses before sharing logs, screenshots, or Issues.
 
-## Local data
-
-OpsNest does not require a cloud service. Main data is stored on the user's computer:
-
-- Server and model configuration: local application data
-- SSH credentials: operating-system credential storage
-- Runtime logs: `opsnest-runtime.jsonl`
-- AI and terminal conversations: `opsnest-conversations.jsonl`
-
-The model API is selected and configured by the user. Server command output may be sent as context to that model provider.
+See [SECURITY.md](SECURITY.md) for the pre-release security review.
 
 ## Getting started
 
-### Use a packaged build
+### Use a Windows build
 
-Windows users can download `OpsNest_*_x64-setup.exe`, install it, and launch the application.
+Download `OpsNest_*_x64-setup.exe` and launch it after installation:
 
-First steps:
-
-1. Open Settings and configure an AI model API
+1. Open Settings and configure a model API (AI can remain unconfigured)
 2. Add your first SSH server
-3. Connect to it from My Servers
-4. Double-click a server to open its terminal
+3. Connect from My Servers
+4. Double-click a server name to open the native SSH terminal
 5. Double-click My Servers to open the server manager
 
 ### Develop from source
 
-Requirements:
-
-- Node.js 18+
-- Rust stable toolchain
-- Tauri 2 platform dependencies
-
-Install dependencies:
+Requirements: Node.js 18+, the Rust stable toolchain, and Tauri 2 platform dependencies.
 
 ```bash
 npm install
-```
-
-Start the frontend development server:
-
-```bash
-npm run dev
-```
-
-Start the Tauri desktop development mode:
-
-```bash
-npm run tauri:dev
-```
-
-Check TypeScript:
-
-```bash
 npm run check
-```
-
-Build the frontend:
-
-```bash
+npm run dev
+npm run tauri:dev
 npm run build
-```
-
-Build the Windows installer:
-
-```bash
 npm run tauri:build
 ```
 
-Installer output:
-
-```text
-src-tauri/target/release/bundle/nsis/
-```
+Installer output: `src-tauri/target/release/bundle/nsis/`
 
 ## Project structure
 
-```text
-src/
-  main.tsx          React UI, server management, and AgentRun flows
-  styles.css        Main interface and terminal styles
-  manager.css       Server manager and task-history styles
-src-tauri/
-  src/
-    lib.rs          Tauri command registration
-    ssh.rs          SSH connections, inspection, and command execution
-    ai.rs           Model API calls
-    web.rs          Web search
-    storage.rs      Local data, logs, and credential storage
-docs/
-  architecture.md  Architecture notes
-  roadmap.md        Development roadmap
-public/
-  opsnest-icon.png  Application icon
-```
+The React interface and AgentRun flow live in `src/main.tsx`. SSH, model calls, web search, local storage, logs, and credentials are implemented under `src-tauri/src/`. Architecture notes, roadmap, and fictional demo screenshots are under `docs/`.
 
 ## Versioning
 
-OpsNest uses standard semantic versioning:
-
 - `0.1.0-alpha.N`: early testing, small fixes, and experimental features
-- `0.1.0-beta.N`: a more complete public testing stage
+- `0.1.0-beta.N`: more complete public testing
 - `0.1.0`: stable release
 
-Every packaged build should update `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the version shown in the interface.
+Before each release, check `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, the backend version command, and the version shown in the UI.
 
-## Current limitations and roadmap
+## Roadmap
 
-- The current primary target is Windows x64; macOS, Linux, Android, and iOS clients are not complete
-- Linux distribution commands, package managers, and permission models still need more coverage
-- Agent summaries and recovery planning depend on the configured model
-- Web search is an assistant for reasoning and does not yet cover every official release channel
-- Backups, rollback, batch changes, and more granular tool permissions are still being developed
-- Cloud sync and team collaboration are not currently included
+Near-term work includes server file management, quick installation actions, SSH tunnels, more system-specific home pages, and a richer Agent tool layer. See [docs/roadmap.md](docs/roadmap.md).
 
-See [docs/roadmap.md](docs/roadmap.md) for the detailed plan. The next major areas are server file management and quick installation actions on server cards.
+## Open source and third-party notices
 
-## Design goal
+See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and icon attribution.
 
-OpsNest is not meant to be just a chat box hiding a terminal. The goal is to let users:
-
-```text
-Describe the problem
-  → Understand what the Agent is doing
-  → Review the real command and result
-  → Approve actions that need approval
-  → Receive a plain-language summary
-  → Continue later with familiar server memory
-```
-
-Issues, real-environment feedback, and improvement suggestions are welcome. Before sharing logs or screenshots, remove passwords, API keys, tokens, cookies, and private addresses.
+Real-environment feedback and improvements are welcome. Read [SECURITY.md](SECURITY.md) first, and never publish credentials or unredacted server logs in an Issue.

@@ -1,3 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-fn main() { opsnest_lib::run() }
+fn main() {
+    opsnest_lib::run()
+}

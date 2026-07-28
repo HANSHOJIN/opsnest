@@ -1,6 +1,13 @@
 use russh::{client, keys, ChannelMsg, Disconnect, Sig};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex, OnceLock}, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot};
 
@@ -12,6 +19,8 @@ pub struct SshTestRequest {
     pub username: String,
     pub auth_method: String,
     pub password: Option<String>,
+    #[serde(default)]
+    pub sudo_password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
     #[serde(default)]
@@ -20,9 +29,11 @@ pub struct SshTestRequest {
     pub session_id: Option<String>,
 }
 
-static COMMAND_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
+static COMMAND_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> =
+    OnceLock::new();
 static PERSISTENT_SHELLS: OnceLock<Mutex<HashMap<String, Arc<PersistentShell>>>> = OnceLock::new();
-static INTERACTIVE_SHELLS: OnceLock<Mutex<HashMap<String, Arc<InteractiveShell>>>> = OnceLock::new();
+static INTERACTIVE_SHELLS: OnceLock<Mutex<HashMap<String, Arc<InteractiveShell>>>> =
+    OnceLock::new();
 static SHELL_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn command_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
@@ -46,16 +57,63 @@ pub struct SshTestResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OpenWrtProfile {
+    pub model: String,
+    pub firmware: String,
+    pub kernel: String,
+    pub wan_ip: String,
+    pub lan_ip: String,
+    pub lan_clients: String,
+    pub wifi_clients: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NasProfile {
+    pub kind: String,
+    pub version: String,
+    pub management_port: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerContainer {
+    pub id: String,
+    pub name: String,
+    pub image: String,
+    pub status: String,
+    pub ports: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerProfile {
     pub os_id: String,
     pub os_version: String,
     pub os_name: String,
     pub hostname: String,
     pub cpu_cores: String,
+    pub cpu_model: String,
     pub memory: String,
     pub disk: String,
     pub docker_installed: bool,
     pub docker_containers: String,
+    pub docker_items: Vec<DockerContainer>,
+    pub openwrt: Option<OpenWrtProfile>,
+    pub nas: Option<NasProfile>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredService {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub status: String,
+    pub version: String,
+    pub port: Option<u16>,
+    pub web: bool,
+    pub web_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,22 +139,31 @@ pub struct CronTask {
     pub detail: String,
 }
 
-struct OpsNestHandler;
+struct OpsNestHandler {
+    host: String,
+    port: u16,
+}
 
 impl client::Handler for OpsNestHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Host-key verification will be added to the local credential store before
-        // production release. For now this keeps first-time connections simple.
-        Ok(true)
+        match keys::known_hosts::check_known_hosts(&self.host, self.port, server_public_key)? {
+            true => Ok(true),
+            false => {
+                keys::known_hosts::learn_known_hosts(&self.host, self.port, server_public_key)?;
+                Ok(true)
+            }
+        }
     }
 }
 
-async fn connect_session(request: &SshTestRequest) -> Result<client::Handle<OpsNestHandler>, String> {
+async fn connect_session(
+    request: &SshTestRequest,
+) -> Result<client::Handle<OpsNestHandler>, String> {
     let host = request.host.trim();
     let username = request.username.trim();
     if host.is_empty() {
@@ -115,12 +182,20 @@ async fn connect_session(request: &SshTestRequest) -> Result<client::Handle<OpsN
         keepalive_max: 3,
         ..Default::default()
     };
-    let mut session = client::connect(
-        Arc::new(config),
-        format!("{host}:{}", request.port),
-        OpsNestHandler,
+    let handler = OpsNestHandler {
+        host: host.to_string(),
+        port: request.port,
+    };
+    let mut session = tokio::time::timeout(
+        Duration::from_secs(15),
+        client::connect(
+            Arc::new(config),
+            format!("{host}:{}", request.port),
+            handler,
+        ),
     )
     .await
+    .map_err(|_| "SSH 连接超时，请检查地址、端口和网络。".to_string())?
     .map_err(|error| format!("SSH 握手失败：{error}"))?;
 
     let auth_result = match request.auth_method.as_str() {
@@ -163,9 +238,13 @@ async fn connect_session(request: &SshTestRequest) -> Result<client::Handle<OpsN
 async fn measure_tcp_latency(request: &SshTestRequest) -> Result<u64, String> {
     let started = Instant::now();
     let address = format!("{}:{}", request.host.trim(), request.port);
-    tokio::net::TcpStream::connect(address)
-        .await
-        .map_err(|error| format!("无法连接 SSH 端口：{error}"))?;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::net::TcpStream::connect(address),
+    )
+    .await
+    .map_err(|_| "连接 SSH 端口超时。".to_string())?
+    .map_err(|error| format!("无法连接 SSH 端口：{error}"))?;
     Ok(started.elapsed().as_millis().min(u64::MAX as u128).max(1) as u64)
 }
 
@@ -192,7 +271,9 @@ async fn run_command(
             },
             None => channel.wait().await,
         };
-        let Some(message) = message else { break; };
+        let Some(message) = message else {
+            break;
+        };
         match message {
             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
                 output.extend_from_slice(&data);
@@ -258,8 +339,16 @@ async fn create_persistent_shell(request: &SshTestRequest) -> Result<Arc<Persist
     }))
 }
 
-async fn persistent_shell_for(request: &SshTestRequest, session_id: &str) -> Result<Arc<PersistentShell>, String> {
-    if let Some(shell) = persistent_shells().lock().map_err(|_| "无法读取 SSH 会话表".to_string())?.get(session_id).cloned() {
+async fn persistent_shell_for(
+    request: &SshTestRequest,
+    session_id: &str,
+) -> Result<Arc<PersistentShell>, String> {
+    if let Some(shell) = persistent_shells()
+        .lock()
+        .map_err(|_| "无法读取 SSH 会话表".to_string())?
+        .get(session_id)
+        .cloned()
+    {
         return Ok(shell);
     }
     let shell = create_persistent_shell(request).await?;
@@ -328,14 +417,20 @@ async fn run_persistent_command(
                 None => receive_shell_output(shell).await,
             }
         };
-        let Some(chunk) = chunk else { return Err("SSH Shell 已断开".into()); };
+        let Some(chunk) = chunk else {
+            return Err("SSH Shell 已断开".into());
+        };
         output.extend_from_slice(&chunk);
         let text = String::from_utf8_lossy(&output);
         if let Some(marker_position) = text.find(&marker) {
             let result = text[..marker_position]
                 .trim_matches(['\r', '\n'])
                 .to_string();
-            return if cancelled { Err("命令已停止".into()) } else { Ok(result) };
+            return if cancelled {
+                Err("命令已停止".into())
+            } else {
+                Ok(result)
+            };
         }
     }
 }
@@ -364,14 +459,20 @@ async fn close_interactive_shell(session_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn create_interactive_shell(app: AppHandle, request: &SshTestRequest, session_id: &str) -> Result<(), String> {
+async fn create_interactive_shell(
+    app: AppHandle,
+    request: &SshTestRequest,
+    session_id: &str,
+) -> Result<(), String> {
     close_interactive_shell(session_id).await?;
     let session = connect_session(request).await?;
     let channel = session
         .channel_open_session()
         .await
         .map_err(|error| format!("已登录，但无法打开交互式 SSH 会话：{error}"))?;
-    let _ = channel.request_pty(false, "xterm-256color", 240, 40, 0, 0, &[]).await;
+    let _ = channel
+        .request_pty(false, "xterm-256color", 240, 40, 0, 0, &[])
+        .await;
     let (mut reader, writer) = channel.split();
     writer
         .request_shell(true)
@@ -392,21 +493,27 @@ async fn create_interactive_shell(app: AppHandle, request: &SshTestRequest, sess
         while let Some(message) = reader.wait().await {
             match message {
                 ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-                    let _ = app.emit("ssh-terminal-output", SshTerminalEvent {
-                        session_id: event_session_id.clone(),
-                        data: String::from_utf8_lossy(&data).into_owned(),
-                        closed: false,
-                    });
+                    let _ = app.emit(
+                        "ssh-terminal-output",
+                        SshTerminalEvent {
+                            session_id: event_session_id.clone(),
+                            data: String::from_utf8_lossy(&data).into_owned(),
+                            closed: false,
+                        },
+                    );
                 }
                 ChannelMsg::Close => break,
                 _ => {}
             }
         }
-        let _ = app.emit("ssh-terminal-output", SshTerminalEvent {
-            session_id: event_session_id,
-            data: String::new(),
-            closed: true,
-        });
+        let _ = app.emit(
+            "ssh-terminal-output",
+            SshTerminalEvent {
+                session_id: event_session_id,
+                data: String::new(),
+                closed: true,
+            },
+        );
     });
     Ok(())
 }
@@ -425,22 +532,69 @@ fn value_for(output: &str, key: &str, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+fn clean_device_label(value: String, fallback: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.contains("default string")
+        || normalized.contains("to be filled by o.e.m")
+        || normalized == "system product name"
+        || normalized == "unknown"
+    {
+        fallback.to_string()
+    } else {
+        value.trim().to_string()
+    }
+}
+
+fn parse_docker_items(output: &str) -> Vec<DockerContainer> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields = line
+                .strip_prefix("OPSNEST_DOCKER_ITEM=")?
+                .splitn(5, '|')
+                .collect::<Vec<_>>();
+            if fields.len() < 5 || fields[0].trim().is_empty() || fields[1].trim().is_empty() {
+                return None;
+            }
+            Some(DockerContainer {
+                id: fields[0].trim().to_string(),
+                name: fields[1].trim().to_string(),
+                image: fields[2].trim().to_string(),
+                status: fields[3].trim().to_string(),
+                ports: fields[4].trim().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn cron_line_parts(line: &str, system: bool) -> Option<(String, String, String)> {
     let mut rest = line.trim();
-    if rest.is_empty() || rest.starts_with('#') || rest.starts_with("SHELL=") || rest.starts_with("PATH=") || rest.starts_with("MAILTO=") {
+    if rest.is_empty()
+        || rest.starts_with('#')
+        || rest.starts_with("SHELL=")
+        || rest.starts_with("PATH=")
+        || rest.starts_with("MAILTO=")
+    {
         return None;
     }
     if rest.starts_with('@') {
         let mut fields = rest.splitn(3, char::is_whitespace);
         let schedule = fields.next()?.to_string();
         let (user, command) = if system {
-            (fields.next()?.to_string(), fields.next()?.trim().to_string())
+            (
+                fields.next()?.to_string(),
+                fields.next()?.trim().to_string(),
+            )
         } else {
-            (String::new(), rest.split_once(char::is_whitespace)?.1.trim().to_string())
+            (
+                String::new(),
+                rest.split_once(char::is_whitespace)?.1.trim().to_string(),
+            )
         };
         if command.is_empty() {
             return None;
@@ -460,7 +614,11 @@ fn cron_line_parts(line: &str, system: bool) -> Option<(String, String, String)>
         return None;
     }
     let schedule = fields[..5].join(" ");
-    let user = if system { fields[5].clone() } else { String::new() };
+    let user = if system {
+        fields[5].clone()
+    } else {
+        String::new()
+    };
     Some((schedule, user, command))
 }
 
@@ -471,12 +629,20 @@ fn cron_marker(line: &str) -> Option<(String, String, bool)> {
     if id.trim().is_empty() || name.trim().is_empty() {
         return None;
     }
-    Some((id.trim().to_string(), name.trim().to_string(), enabled.trim() == "1"))
+    Some((
+        id.trim().to_string(),
+        name.trim().to_string(),
+        enabled.trim() == "1",
+    ))
 }
 
 fn parse_cron_output(output: &str, username: &str) -> Vec<CronTask> {
     let section = |begin: &str, end: &str| {
-        output.split_once(&format!("{begin}\n")).and_then(|(_, rest)| rest.split_once(&format!("\n{end}"))).map(|(value, _)| value).unwrap_or("")
+        output
+            .split_once(&format!("{begin}\n"))
+            .and_then(|(_, rest)| rest.split_once(&format!("\n{end}")))
+            .map(|(value, _)| value)
+            .unwrap_or("")
     };
     let user_section = section("OPSNEST_USER_CRON_BEGIN", "OPSNEST_USER_CRON_END");
     let system_section = section("OPSNEST_SYSTEM_CRON_BEGIN", "OPSNEST_SYSTEM_CRON_END");
@@ -489,28 +655,88 @@ fn parse_cron_output(output: &str, username: &str) -> Vec<CronTask> {
             if let Some(entry) = lines.next() {
                 let normalized = entry.trim().trim_start_matches("# ").trim();
                 if let Some((schedule, _, command)) = cron_line_parts(normalized, false) {
-                    tasks.push(CronTask { id, name, source: "用户 Cron".into(), user: username.into(), schedule, command, enabled, editable: true, detail: "当前 SSH 用户的 crontab".into() });
+                    tasks.push(CronTask {
+                        id,
+                        name,
+                        source: "用户 Cron".into(),
+                        user: username.into(),
+                        schedule,
+                        command,
+                        enabled,
+                        editable: true,
+                        detail: "当前 SSH 用户的 crontab".into(),
+                    });
                 }
             }
             continue;
         }
         if let Some((schedule, _, command)) = cron_line_parts(line, false) {
             index += 1;
-            tasks.push(CronTask { id: format!("user:{index}"), name: command.split_whitespace().next().unwrap_or("Cron 任务").into(), source: "用户 Cron".into(), user: username.into(), schedule, command, enabled: true, editable: false, detail: "服务器上已有的用户 Cron".into() });
+            tasks.push(CronTask {
+                id: format!("user:{index}"),
+                name: command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("Cron 任务")
+                    .into(),
+                source: "用户 Cron".into(),
+                user: username.into(),
+                schedule,
+                command,
+                enabled: true,
+                editable: false,
+                detail: "服务器上已有的用户 Cron".into(),
+            });
         }
     }
     for line in system_section.lines() {
-        if line.starts_with("OPSNEST_FILE=") || line.starts_with("--") { continue; }
+        if line.starts_with("OPSNEST_FILE=") || line.starts_with("--") {
+            continue;
+        }
         if let Some((schedule, user, command)) = cron_line_parts(line, true) {
             index += 1;
-            tasks.push(CronTask { id: format!("system:{index}"), name: command.split_whitespace().next().unwrap_or("系统 Cron").into(), source: "系统 Cron".into(), user, schedule, command, enabled: true, editable: false, detail: "/etc/crontab 或 /etc/cron.d".into() });
+            tasks.push(CronTask {
+                id: format!("system:{index}"),
+                name: command
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("系统 Cron")
+                    .into(),
+                source: "系统 Cron".into(),
+                user,
+                schedule,
+                command,
+                enabled: true,
+                editable: false,
+                detail: "/etc/crontab 或 /etc/cron.d".into(),
+            });
         }
     }
-    for line in timer_section.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if line.starts_with("NEXT") || line.starts_with("n/a") || line.contains("LAST") { continue; }
+    for line in timer_section
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line.starts_with("NEXT") || line.starts_with("n/a") || line.contains("LAST") {
+            continue;
+        }
         index += 1;
-        let name = line.split_whitespace().last().unwrap_or("systemd timer").to_string();
-        tasks.push(CronTask { id: format!("timer:{index}"), name, source: "systemd timer".into(), user: "system".into(), schedule: "timer".into(), command: line.into(), enabled: true, editable: false, detail: "服务器 systemd timer 状态".into() });
+        let name = line
+            .split_whitespace()
+            .last()
+            .unwrap_or("systemd timer")
+            .to_string();
+        tasks.push(CronTask {
+            id: format!("timer:{index}"),
+            name,
+            source: "systemd timer".into(),
+            user: "system".into(),
+            schedule: "timer".into(),
+            command: line.into(),
+            enabled: true,
+            editable: false,
+            detail: "服务器 systemd timer 状态".into(),
+        });
     }
     tasks
 }
@@ -550,30 +776,348 @@ pub async fn test_ssh_connection(request: SshTestRequest) -> Result<SshTestRespo
 #[tauri::command]
 pub async fn inspect_server(request: SshTestRequest) -> Result<ServerProfile, String> {
     let session = connect_session(&request).await?;
-    let command = format!(r#"
+    let sudo_password = request
+        .sudo_password
+        .as_deref()
+        .or(request.password.as_deref())
+        .map(shell_quote)
+        .unwrap_or_else(|| "''".to_string());
+    let command = format!(
+        r#"
 printf 'OPSNEST_OS='; {SYSTEM_INFO_COMMAND}
 printf 'OPSNEST_OS_ID='; if [ -r /etc/os-release ]; then awk -F= '/^ID={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/os-release 2>/dev/null; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_ID={{gsub(/^"|"$/, "", $2); print tolower($2); exit}}' /etc/openwrt_release 2>/dev/null; else printf 'linux'; fi
 printf 'OPSNEST_OS_VERSION='; if [ -r /etc/os-release ]; then awk -F= '/^VERSION_ID={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/os-release 2>/dev/null; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_RELEASE={{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/openwrt_release 2>/dev/null; else uname -r 2>/dev/null; fi
-printf '\nOPSNEST_HOSTNAME='; hostname 2>/dev/null || printf 'unknown'
-printf '\nOPSNEST_CPU='; nproc 2>/dev/null || printf 'unknown'
+printf '\nOPSNEST_HOSTNAME='; hostname_value=$(hostname 2>/dev/null || true); if [ -z "$hostname_value" ] && [ -r /proc/sys/kernel/hostname ]; then hostname_value=$(cat /proc/sys/kernel/hostname 2>/dev/null || true); fi; if [ -z "$hostname_value" ] && command -v uci >/dev/null 2>&1; then hostname_value=$(uci -q get system.@system[0].hostname 2>/dev/null || true); fi; if [ -n "$hostname_value" ]; then printf '%s' "$hostname_value"; else printf 'unknown'; fi
+printf '\nOPSNEST_CPU='; cpu_count=$(nproc 2>/dev/null || true); if [ -z "$cpu_count" ] && [ -r /proc/cpuinfo ]; then cpu_count=$(awk '/^processor[[:space:]]*:/ {{count++}} END {{print count+0}}' /proc/cpuinfo 2>/dev/null); fi; if [ -z "$cpu_count" ] && command -v getconf >/dev/null 2>&1; then cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || true); fi; [ -n "$cpu_count" ] && [ "$cpu_count" -gt 0 ] 2>/dev/null && printf '%s' "$cpu_count" || printf 'unknown'
+printf '\nOPSNEST_CPU_MODEL='; if [ -r /proc/cpuinfo ]; then awk -F: '/^(model name|Hardware|Processor)[[:space:]]*:/ {{gsub(/^[[:space:]]+/, "", $2); if ($2 != "") {{print $2; exit}}}}' /proc/cpuinfo 2>/dev/null; fi
 printf '\nOPSNEST_MEMORY='; awk '/MemTotal/ {{printf "%.1f GB", $2/1024/1024}}' /proc/meminfo 2>/dev/null || printf 'unknown'
 printf '\nOPSNEST_DISK='; df -h / 2>/dev/null | awk 'NR==2 {{print $4 " free of " $2}}'
-if command -v docker >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; printf '\nOPSNEST_CONTAINERS='; docker ps -q 2>/dev/null | wc -l; else printf '\nOPSNEST_DOCKER=missing'; printf '\nOPSNEST_CONTAINERS=0'; fi
-"#);
+container_exec() {{
+  if command -v docker >/dev/null 2>&1; then
+    docker "$@" 2>/dev/null && return 0
+    if command -v sudo >/dev/null 2>&1; then sudo -n docker "$@" 2>/dev/null && return 0; fi
+    if command -v sudo >/dev/null 2>&1 && [ -n "$OPSNEST_SUDO_PASSWORD" ]; then
+      printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' docker "$@" 2>/dev/null && return 0
+    fi
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman "$@" 2>/dev/null && return 0
+    if command -v sudo >/dev/null 2>&1; then sudo -n podman "$@" 2>/dev/null && return 0; fi
+    if command -v sudo >/dev/null 2>&1 && [ -n "$OPSNEST_SUDO_PASSWORD" ]; then
+      printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' podman "$@" 2>/dev/null && return 0
+    fi
+  fi
+  return 1
+}}
+OPSNEST_SUDO_PASSWORD={sudo_password}
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  printf '\nOPSNEST_DOCKER=installed'
+  if container_exec info >/dev/null 2>&1; then
+    printf '\nOPSNEST_DOCKER_ACCESS=ok'
+    running_containers=$(container_exec ps -q 2>/dev/null)
+    printf '\nOPSNEST_CONTAINERS='
+    printf '%s\n' "$running_containers" | sed '/^[[:space:]]*$/d' | wc -l
+  else
+    printf '\nOPSNEST_DOCKER_ACCESS=unavailable'
+    printf '\nOPSNEST_CONTAINERS=unavailable'
+  fi
+  container_list=$(container_exec ps -a --format '{{{{.ID}}}}|{{{{.Names}}}}|{{{{.Image}}}}|{{{{.Status}}}}|{{{{.Ports}}}}' 2>/dev/null || true)
+  if [ -n "$container_list" ]; then
+    printf '%s\n' "$container_list" | while IFS='|' read -r container_id container_name container_image container_status container_ports; do
+      [ -n "$container_id" ] || continue
+      if [ -z "$container_ports" ]; then
+        network_mode=$(container_exec inspect "$container_id" --format '{{{{.HostConfig.NetworkMode}}}}' 2>/dev/null || true)
+        if [ "$network_mode" = "host" ]; then
+          exposed_port=$(container_exec inspect "$container_id" --format '{{{{json .Config.ExposedPorts}}}}' 2>/dev/null | sed -nE 's/.*"([0-9]+)\/(tcp|udp)".*/\1/p' | head -n 1)
+          case "$container_name" in xiaoya|xiaoya-*) [ -z "$exposed_port" ] && exposed_port=5678;; esac
+          [ -n "$exposed_port" ] && container_ports="0.0.0.0:$exposed_port->$exposed_port/tcp"
+        fi
+      fi
+      printf 'OPSNEST_DOCKER_ITEM=%s|%s|%s|%s|%s\n' "$container_id" "$container_name" "$container_image" "$container_status" "$container_ports"
+    done
+  fi
+  if [ -z "$container_list" ]; then
+    for container_id in $(container_exec ps -aq 2>/dev/null); do
+      [ -n "$container_id" ] || continue
+      container_name=$(container_exec inspect "$container_id" --format '{{{{.Name}}}}' 2>/dev/null | sed 's#^/##' | head -n 1)
+      container_image=$(container_exec inspect "$container_id" --format '{{{{.Config.Image}}}}' 2>/dev/null | head -n 1)
+      container_status=$(container_exec inspect "$container_id" --format '{{{{.State.Status}}}}' 2>/dev/null | head -n 1)
+      [ -n "$container_name" ] || container_name="$container_id"
+      [ -n "$container_status" ] || container_status='unknown'
+      printf 'OPSNEST_DOCKER_ITEM=%s|%s|%s|%s|%s\n' "$container_id" "$container_name" "$container_image" "$container_status" ''
+    done
+  fi
+else
+  printf '\nOPSNEST_DOCKER=missing'
+  printf '\nOPSNEST_CONTAINERS=0'
+fi
+printf '\nOPSNEST_OPENWRT_MODEL='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null | head -n 1; elif [ -r /tmp/sysinfo/model ]; then cat /tmp/sysinfo/model; fi
+printf '\nOPSNEST_OPENWRT_FIRMWARE='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call system board 2>/dev/null | jsonfilter -e '@.release.description' 2>/dev/null | head -n 1; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_DESCRIPTION=/{{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/openwrt_release 2>/dev/null; fi
+printf '\nOPSNEST_OPENWRT_KERNEL='; uname -r 2>/dev/null
+printf '\nOPSNEST_WAN_IP='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1; fi
+printf '\nOPSNEST_LAN_IP='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1; fi
+printf '\nOPSNEST_LAN_CLIENTS='; lan_device=$(uci -q get network.lan.device 2>/dev/null || true); [ -z "$lan_device" ] && lan_device=$(uci -q get network.lan.ifname 2>/dev/null || true); [ -z "$lan_device" ] && lan_device=br-lan; lan_clients=$(ip neigh show dev "$lan_device" 2>/dev/null | awk '$1 ~ /^[0-9]/ && $NF ~ /^(REACHABLE|DELAY|PROBE)$/ {{print $1}}' | sort -u | wc -l); if [ "$lan_clients" -eq 0 ] && [ -r /tmp/dhcp.leases ]; then lan_clients=$(awk 'NF >= 3 {{print $2}}' /tmp/dhcp.leases | sort -u | wc -l); fi; printf '%s' "$lan_clients"
+printf '\nOPSNEST_WIFI_CLIENTS='; wifi_clients=0; if command -v iw >/dev/null 2>&1; then for wifi_device in $(iw dev 2>/dev/null | awk '$1 == "Interface" {{print $2}}'); do count=$(iw dev "$wifi_device" station dump 2>/dev/null | awk '$1 == "Station" {{count++}} END {{print count+0}}'); wifi_clients=$((wifi_clients + count)); done; elif command -v iwinfo >/dev/null 2>&1; then for wifi_device in $(iwinfo 2>/dev/null | awk '$2 == "ESSID:" {{print $1}}'); do count=$(iwinfo "$wifi_device" assoclist 2>/dev/null | awk '/dBm/ {{count++}} END {{print count+0}}'); wifi_clients=$((wifi_clients + count)); done; fi; printf '%s' "$wifi_clients"
+printf '\nOPSNEST_NAS_KIND='; if grep -qiE 'fnos|fnnas|飞牛' /etc/os-release /etc/fnos_release /etc/fnos-version /etc/*release 2>/dev/null || [ -d /usr/local/fnos ] || [ -d /var/lib/fnos ] || hostname 2>/dev/null | grep -qiE 'feiniu|fnos|fnnas' || ps 2>/dev/null | grep -v grep | grep -E 'fnos|fnnas|fnmain' >/dev/null 2>&1; then printf 'fnos'; else printf ''; fi
+printf '\nOPSNEST_NAS_VERSION='; for nas_version_file in /etc/fnos_release /etc/fnos-version /usr/local/fnos/version /usr/local/fnos/VERSION; do if [ -r "$nas_version_file" ]; then tr '\n\r' '  ' < "$nas_version_file"; break; fi; done
+printf '\nOPSNEST_NAS_PORT='; nas_port=''; for candidate in 5666 8000; do if command -v ss >/dev/null 2>&1 && ss -lntH 2>/dev/null | awk '{{print $4}}' | grep -E ":${{candidate}}$" >/dev/null 2>&1; then nas_port="$candidate"; break; elif command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | awk '{{print $4}}' | grep -E ":${{candidate}}$" >/dev/null 2>&1; then nas_port="$candidate"; break; fi; done; printf '%s' "$nas_port"
+"#
+    );
     let output = run_command(&session, &command, None).await?;
     close_session(&session).await;
+    let os_id = value_for(&output, "OPSNEST_OS_ID=", "linux").to_lowercase();
+    let os_name = value_for(&output, "OPSNEST_OS=", "Linux");
+    let openwrt_model =
+        clean_device_label(value_for(&output, "OPSNEST_OPENWRT_MODEL=", ""), &os_name);
+    let is_openwrt = matches!(os_id.as_str(), "openwrt" | "istoreos" | "immortalwrt")
+        || os_name.to_ascii_lowercase().contains("openwrt")
+        || os_name.to_ascii_lowercase().contains("istoreos")
+        || os_name.to_ascii_lowercase().contains("immortalwrt");
     let docker_installed = value_for(&output, "OPSNEST_DOCKER=", "missing") == "installed";
+    let nas_kind = value_for(&output, "OPSNEST_NAS_KIND=", "").to_lowercase();
+    let nas = (nas_kind == "fnos").then(|| NasProfile {
+        kind: "fnos".to_string(),
+        version: value_for(&output, "OPSNEST_NAS_VERSION=", "unknown").to_string(),
+        management_port: value_for(&output, "OPSNEST_NAS_PORT=", "5666").to_string(),
+    });
+    let openwrt = is_openwrt.then(|| OpenWrtProfile {
+        model: openwrt_model,
+        firmware: value_for(
+            &output,
+            "OPSNEST_OPENWRT_FIRMWARE=",
+            &value_for(&output, "OPSNEST_OS_VERSION=", "unknown"),
+        ),
+        kernel: value_for(&output, "OPSNEST_OPENWRT_KERNEL=", "unknown"),
+        wan_ip: value_for(&output, "OPSNEST_WAN_IP=", "unknown"),
+        lan_ip: value_for(&output, "OPSNEST_LAN_IP=", "unknown"),
+        lan_clients: value_for(&output, "OPSNEST_LAN_CLIENTS=", "0"),
+        wifi_clients: value_for(&output, "OPSNEST_WIFI_CLIENTS=", "0"),
+    });
     Ok(ServerProfile {
-        os_id: value_for(&output, "OPSNEST_OS_ID=", "linux").to_lowercase(),
+        os_id,
         os_version: value_for(&output, "OPSNEST_OS_VERSION=", "").to_string(),
-        os_name: value_for(&output, "OPSNEST_OS=", "Linux"),
+        os_name,
         hostname: value_for(&output, "OPSNEST_HOSTNAME=", "未知主机"),
         cpu_cores: value_for(&output, "OPSNEST_CPU=", "未知"),
+        cpu_model: clean_device_label(value_for(&output, "OPSNEST_CPU_MODEL=", ""), "未知"),
         memory: value_for(&output, "OPSNEST_MEMORY=", "未知"),
         disk: value_for(&output, "OPSNEST_DISK=", "未知"),
         docker_installed,
         docker_containers: value_for(&output, "OPSNEST_CONTAINERS=", "0"),
+        docker_items: parse_docker_items(&output),
+        openwrt,
+        nas,
     })
+}
+
+const SERVICE_DISCOVERY_COMMAND: &str = r#"
+emit_service() {
+  service_id="$1"; service_name="$2"; category="$3"; status="$4"; version="$5"; port="$6"; web="$7"
+  version=$(printf '%s' "$version" | tr '\n\r|' '   ' | cut -c1-80)
+  web_path=''
+  if [ "$service_id" = "1panel" ]; then
+    if [ -r /opt/1panel/conf/app.yaml ]; then
+      web_path=$(grep -Ei 'securityEntrance|security-entrance|security_entrance' /opt/1panel/conf/app.yaml 2>/dev/null | head -n 1 | sed -E 's/.*:[[:space:]]*//' | tr -d ' ' | tr -d '"')
+    fi
+    if [ -z "$web_path" ] && command -v 1pctl >/dev/null 2>&1; then
+      one_url=$(1pctl user-info 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | head -n 1 | tr -d '\r')
+      web_path=$(printf '%s' "$one_url" | sed -E 's#^https?://[^/]+(/.*)$#\1#')
+    fi
+    case "$web_path" in
+      /*) ;;
+      "") ;;
+      *) web_path="/$web_path" ;;
+    esac
+  fi
+  printf 'OPSNEST_SERVICE|%s|%s|%s|%s|%s|%s|%s|%s\n' "$service_id" "$service_name" "$category" "$status" "$version" "$port" "$web" "$web_path"
+}
+
+port_is_listening() {
+  port="$1"
+  if command -v ss >/dev/null 2>&1; then
+    ss -lntH 2>/dev/null | awk '{print $4}' | grep -E ":${port}$" >/dev/null 2>&1
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -lnt 2>/dev/null | awk '{print $4}' | grep -E ":${port}$" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
+if grep -qiE 'fnos|fnnas|飞牛' /etc/os-release /etc/fnos_release /etc/fnos-version /etc/*release 2>/dev/null || [ -d /usr/local/fnos ] || [ -d /var/lib/fnos ] || hostname 2>/dev/null | grep -qiE 'feiniu|fnos|fnnas' || ps 2>/dev/null | grep -v grep | grep -E 'fnos|fnnas|fnmain' >/dev/null 2>&1; then
+  fnos_port=''
+  for candidate in 5666 8000; do
+    if port_is_listening "$candidate"; then fnos_port="$candidate"; break; fi
+  done
+  [ -z "$fnos_port" ] && fnos_port=5666
+  fnos_status=installed
+  port_is_listening "$fnos_port" && fnos_status=running
+  fnos_version=''
+  for nas_version_file in /etc/fnos_release /etc/fnos-version /usr/local/fnos/version /usr/local/fnos/VERSION; do
+    if [ -r "$nas_version_file" ]; then fnos_version=$(tr '\n\r' '  ' < "$nas_version_file"); break; fi
+  done
+  emit_service fnos '飞牛 fnOS' panel "$fnos_status" "$fnos_version" "$fnos_port" yes
+fi
+
+if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ] && command -v ubus >/dev/null 2>&1; then
+  for init_service in uhttpd dropbear dnsmasq odhcpd firewall rpcd netifd odhcp6c hostapd wpa_supplicant miniupnpd mwan3 sqm adblock banip ddns tailscale wireguard openclash passwall openlist lucky; do
+    if [ -x "/etc/init.d/$init_service" ]; then
+      service_status=installed
+      pidof "$init_service" >/dev/null 2>&1 && service_status=running
+      service_port=''
+      service_web=no
+      case "$init_service" in
+        uhttpd) service_port=80; service_web=yes; service_name='LuCI / uHTTPd'; service_category=panel;;
+        dropbear) service_port=22; service_name='Dropbear SSH'; service_category=network;;
+        dnsmasq) service_port=53; service_name='Dnsmasq'; service_category=network;;
+        odhcpd) service_port=547; service_name='odhcpd'; service_category=network;;
+        rpcd) service_name='rpcd'; service_category=system;;
+        netifd) service_name='netifd'; service_category=network;;
+        firewall) service_name='Firewall'; service_category=network;;
+        hostapd|wpa_supplicant) service_name="$init_service"; service_category=wifi;;
+        openclash) service_name='OpenClash'; service_category=router;;
+        passwall) service_name='PassWall'; service_category=router;;
+        openlist) service_name='OpenList'; service_category=panel; service_port=5244; service_web=yes;;
+        lucky) service_name='Lucky'; service_category=panel; service_port=16601; service_web=yes;;
+        *) service_name="$init_service"; service_category=router;;
+      esac
+      emit_service "openwrt-$init_service" "$service_name" "$service_category" "$service_status" 'OpenWrt service' "$service_port" "$service_web"
+    fi
+  done
+fi
+
+if [ -x /www/server/panel/pyenv/bin/python ] || [ -d /www/server/panel ] || command -v bt >/dev/null 2>&1; then
+  panel_status=stopped
+  ps 2>/dev/null | grep -v grep | grep -E '(/www/server/panel|BT-Panel|panelAuth)' >/dev/null 2>&1 && panel_status=running
+  panel_port=''
+  if [ -r /www/server/panel/data/port.pl ]; then panel_port=$(tr -dc '0-9' < /www/server/panel/data/port.pl | cut -c1-5); fi
+  [ -z "$panel_port" ] && panel_port=8888
+  emit_service baota '宝塔面板' panel "$panel_status" 'detected' "$panel_port" yes
+fi
+
+if [ -d /opt/1panel ] || command -v 1pctl >/dev/null 2>&1; then
+  one_status=stopped
+  ps 2>/dev/null | grep -v grep | grep -E '1panel|1p-daemon' >/dev/null 2>&1 && one_status=running
+  one_port=''
+  one_url=''
+  if command -v 1pctl >/dev/null 2>&1; then
+    one_url=$(1pctl user-info 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | head -n 1 | tr -d '\r')
+  fi
+  if [ -n "$one_url" ]; then
+    one_port=$(printf '%s' "$one_url" | sed -nE 's#^https?://[^/:]+:([0-9]+)(/.*)?$#\1#p')
+  fi
+  if [ -z "$one_port" ] && command -v ss >/dev/null 2>&1; then
+    one_port=$(ss -lntpH 2>/dev/null | grep -E '1panel|1p-daemon' | sed -nE 's/.*:([0-9]+)[[:space:]].*/\1/p' | head -n 1)
+  fi
+  if [ -z "$one_port" ] && [ -r /opt/1panel/conf/app.yaml ]; then
+    one_port=$(awk -F: '/^[[:space:]]*port:/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /opt/1panel/conf/app.yaml 2>/dev/null)
+  fi
+  one_web=yes
+  [ -z "$one_port" ] && one_web=no
+  emit_service 1panel '1Panel' panel "$one_status" 'detected' "$one_port" "$one_web"
+fi
+
+container_exec() {
+  if command -v docker >/dev/null 2>&1; then
+    docker "$@" 2>/dev/null && return 0
+    if command -v sudo >/dev/null 2>&1; then sudo -n docker "$@" 2>/dev/null && return 0; fi
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    podman "$@" 2>/dev/null && return 0
+    if command -v sudo >/dev/null 2>&1; then sudo -n podman "$@" 2>/dev/null && return 0; fi
+  fi
+  return 1
+}
+container_ports_for() {
+  container="$1"
+  ports=$(container_exec port "$container" 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+  if [ -n "$ports" ]; then printf '0.0.0.0:%s->%s/tcp' "$ports" "$ports"; return 0; fi
+  network_mode=$(container_exec inspect "$container" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
+  if [ "$network_mode" != "host" ]; then return 0; fi
+  exposed_port=$(container_exec inspect "$container" --format '{{json .Config.ExposedPorts}}' 2>/dev/null | sed -nE 's/.*"([0-9]+)\/(tcp|udp)".*/\1/p' | head -n 1)
+  case "$container" in xiaoya|xiaoya-*) [ -z "$exposed_port" ] && exposed_port=5678;; esac
+  [ -n "$exposed_port" ] && printf '0.0.0.0:%s->%s/tcp' "$exposed_port" "$exposed_port"
+}
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  docker_version=$(container_exec version --format '{{.Server.Version}}' 2>/dev/null || container_exec --version 2>/dev/null)
+  emit_service docker 'Docker' container running "$docker_version" '' no
+  for container in $(container_exec ps --format '{{.Names}}' 2>/dev/null); do
+    service_name="$container"
+    container_ports=$(container_ports_for "$container")
+    service_port=$(printf '%s' "$container_ports" | sed -n 's/.*:\([0-9][0-9]*\)->.*/\1/p')
+    service_web=no
+    [ -n "$service_port" ] && service_web=yes
+    case "$container" in
+      portainer) service_name='Portainer';;
+      grafana) service_name='Grafana';;
+      uptime-kuma) service_name='Uptime Kuma';;
+      openlist) service_name='OpenList'; [ -z "$service_port" ] && service_port=5244; service_web=yes;;
+      lucky) service_name='Lucky'; [ -z "$service_port" ] && service_port=16601; service_web=yes;;
+    esac
+    container_image=$(container_exec inspect "$container" --format '{{.Config.Image}}' 2>/dev/null | head -n 1)
+    emit_service "docker-$container" "$service_name" container running "$container_image" "$service_port" "$service_web"
+  done
+fi
+
+for web_service in nginx apache2 httpd caddy; do
+  if command -v "$web_service" >/dev/null 2>&1; then
+    web_status=stopped
+    ps 2>/dev/null | grep -v grep | grep "$web_service" >/dev/null 2>&1 && web_status=running
+    web_version=$($web_service -v 2>/dev/null | head -n 1)
+    emit_service "$web_service" "$web_service" web "$web_status" "$web_version" '' no
+  fi
+done
+
+for runtime in php node python3 java; do
+  if command -v "$runtime" >/dev/null 2>&1; then
+    runtime_version=$($runtime --version 2>&1 | head -n 1)
+    emit_service "$runtime" "$runtime" runtime installed "$runtime_version" '' no
+  fi
+done
+
+for database in mysqld mariadbd postgres redis-server mongod; do
+  if command -v "$database" >/dev/null 2>&1; then
+    database_version=$($database --version 2>&1 | head -n 1)
+    emit_service "$database" "$database" database detected "$database_version" '' no
+  fi
+done
+"#;
+
+fn parse_discovered_services(output: &str) -> Vec<DiscoveredService> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields = line
+                .strip_prefix("OPSNEST_SERVICE|")?
+                .split('|')
+                .collect::<Vec<_>>();
+            if fields.len() < 7 {
+                return None;
+            }
+            Some(DiscoveredService {
+                id: fields[0].to_string(),
+                name: fields[1].to_string(),
+                category: fields[2].to_string(),
+                status: fields[3].to_string(),
+                version: fields[4].to_string(),
+                port: fields[5].parse::<u16>().ok(),
+                web: fields[6] == "yes",
+                web_path: fields
+                    .get(7)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string()),
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn discover_server_services(
+    request: SshTestRequest,
+) -> Result<Vec<DiscoveredService>, String> {
+    let session = connect_session(&request).await?;
+    let output = run_command(&session, SERVICE_DISCOVERY_COMMAND, None).await?;
+    close_session(&session).await;
+    Ok(parse_discovered_services(&output))
 }
 
 fn validate_cron_field(value: &str, label: &str, max_len: usize) -> Result<String, String> {
@@ -584,18 +1128,46 @@ fn validate_cron_field(value: &str, label: &str, max_len: usize) -> Result<Strin
     Ok(value.to_string())
 }
 
-fn cron_mutation_script(id: &str, name: &str, schedule: &str, command: &str, enabled: bool, delete: bool) -> String {
+fn cron_mutation_script(
+    id: &str,
+    name: &str,
+    schedule: &str,
+    command: &str,
+    enabled: bool,
+    delete: bool,
+) -> String {
     let raw_id = id.to_string();
     let quoted_id = shell_quote(id);
-    let line = if delete { None } else {
-        let safe_name = name.replace(['\r', '\n', '#'], " ").replace(" ENABLED:", " ");
-        let marker = format!("# OPSNEST-ID:{raw_id} NAME:{} ENABLED:{}", safe_name.trim(), if enabled { "1" } else { "0" });
-        let entry = format!("{} {}{}", if enabled { "" } else { "# " }, schedule, if command.is_empty() { String::new() } else { format!(" {command}") });
+    let line = if delete {
+        None
+    } else {
+        let safe_name = name
+            .replace(['\r', '\n', '#'], " ")
+            .replace(" ENABLED:", " ");
+        let marker = format!(
+            "# OPSNEST-ID:{raw_id} NAME:{} ENABLED:{}",
+            safe_name.trim(),
+            if enabled { "1" } else { "0" }
+        );
+        let entry = format!(
+            "{} {}{}",
+            if enabled { "" } else { "# " },
+            schedule,
+            if command.is_empty() {
+                String::new()
+            } else {
+                format!(" {command}")
+            }
+        );
         Some((marker, entry))
     };
     let mut script = format!("tmp=$(mktemp) || exit 1; (crontab -l 2>/dev/null || true) | awk -v id={quoted_id} 'index($0, \"# OPSNEST-ID:\" id \" \" ) != 1 {{print}}' > \"$tmp\" || exit 1; ");
     if let Some((marker, entry)) = line {
-        script.push_str(&format!("printf '%s\\n' {} {} >> \"$tmp\"; ", shell_quote(&marker), shell_quote(&entry)));
+        script.push_str(&format!(
+            "printf '%s\\n' {} {} >> \"$tmp\"; ",
+            shell_quote(&marker),
+            shell_quote(&entry)
+        ));
     }
     script.push_str("crontab \"$tmp\"; status=$?; rm -f \"$tmp\"; exit $status");
     script
@@ -610,9 +1182,19 @@ pub async fn list_server_cron(request: SshTestRequest) -> Result<Vec<CronTask>, 
 }
 
 #[tauri::command]
-pub async fn save_server_cron(request: SshTestRequest, id: String, name: String, schedule: String, command: String, enabled: bool) -> Result<(), String> {
+pub async fn save_server_cron(
+    request: SshTestRequest,
+    id: String,
+    name: String,
+    schedule: String,
+    command: String,
+    enabled: bool,
+) -> Result<(), String> {
     let id = validate_cron_field(&id, "任务 ID", 100)?;
-    if !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+    if !id
+        .chars()
+        .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    {
         return Err("任务 ID 格式不正确。".into());
     }
     let name = validate_cron_field(&name, "任务名称", 120)?;
@@ -628,7 +1210,10 @@ pub async fn save_server_cron(request: SshTestRequest, id: String, name: String,
 #[tauri::command]
 pub async fn delete_server_cron(request: SshTestRequest, id: String) -> Result<(), String> {
     let id = validate_cron_field(&id, "任务 ID", 100)?;
-    if !id.chars().all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_') {
+    if !id
+        .chars()
+        .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    {
         return Err("任务 ID 格式不正确。".into());
     }
     let session = connect_session(&request).await?;
@@ -645,9 +1230,18 @@ fn diagnosis_commands(focus: &str) -> Vec<(&'static str, &'static str)> {
         ("运行时间与负载", "uptime"),
         ("磁盘空间", "df -hP"),
         ("内存状态", "free -h 2>/dev/null || true"),
-        ("失败服务", "systemctl --failed --no-legend --no-pager 2>/dev/null || true"),
-        ("监听端口", "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true"),
-        ("Docker 容器", "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null || true"),
+        (
+            "失败服务",
+            "systemctl --failed --no-legend --no-pager 2>/dev/null || true",
+        ),
+        (
+            "监听端口",
+            "ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || true",
+        ),
+        (
+            "Docker 容器",
+            "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}' 2>/dev/null || true",
+        ),
     ];
     if focus.contains("网站")
         || focus.contains("网页")
@@ -676,19 +1270,35 @@ fn diagnosis_commands(focus: &str) -> Vec<(&'static str, &'static str)> {
         commands.push(("Hermes 版本", "hermes --version 2>&1 || true"));
     }
     if focus.contains("llama") {
-        commands.push(("llama.cpp 安装位置", "command -v llama-server || command -v llama-cli || true"));
+        commands.push((
+            "llama.cpp 安装位置",
+            "command -v llama-server || command -v llama-cli || true",
+        ));
     }
     commands
 }
 
 #[tauri::command]
-pub async fn diagnose_server(request: SshTestRequest, focus: String) -> Result<Vec<DiagnosisResult>, String> {
+pub async fn diagnose_server(
+    request: SshTestRequest,
+    focus: String,
+) -> Result<Vec<DiagnosisResult>, String> {
     let session = connect_session(&request).await?;
     let mut results = Vec::new();
     for (label, command) in diagnosis_commands(&focus) {
         match run_command(&session, command, None).await {
-            Ok(output) => results.push(DiagnosisResult { label: label.to_string(), command: command.to_string(), output: output.chars().take(4000).collect(), success: true }),
-            Err(error) => results.push(DiagnosisResult { label: label.to_string(), command: command.to_string(), output: error, success: false }),
+            Ok(output) => results.push(DiagnosisResult {
+                label: label.to_string(),
+                command: command.to_string(),
+                output: output.chars().take(4000).collect(),
+                success: true,
+            }),
+            Err(error) => results.push(DiagnosisResult {
+                label: label.to_string(),
+                command: command.to_string(),
+                output: error,
+                success: false,
+            }),
         }
     }
     close_session(&session).await;
@@ -707,14 +1317,25 @@ pub async fn execute_ssh_command(
     if command.len() > 8_000 {
         return Err("命令太长，请分次执行。".into());
     }
-    let (cancellation, command_id) = if let Some(command_id) = request.command_id.clone().filter(|value| !value.trim().is_empty()) {
+    let (cancellation, command_id) = if let Some(command_id) = request
+        .command_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    {
         let (sender, receiver) = oneshot::channel();
-        command_cancellations().lock().map_err(|_| "无法创建命令控制器".to_string())?.insert(command_id.clone(), sender);
+        command_cancellations()
+            .lock()
+            .map_err(|_| "无法创建命令控制器".to_string())?
+            .insert(command_id.clone(), sender);
         (Some(receiver), Some(command_id))
     } else {
         (None, None)
     };
-    let result = if let Some(session_id) = request.session_id.as_deref().filter(|value| !value.trim().is_empty()) {
+    let result = if let Some(session_id) = request
+        .session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         let shell = persistent_shell_for(&request, session_id).await?;
         let result = run_persistent_command(&shell, command, cancellation).await;
         if matches!(&result, Err(error) if error == "SSH Shell 已断开") {
@@ -728,13 +1349,19 @@ pub async fn execute_ssh_command(
         result
     };
     if let Some(command_id) = command_id {
-        if let Ok(mut commands) = command_cancellations().lock() { commands.remove(&command_id); }
+        if let Ok(mut commands) = command_cancellations().lock() {
+            commands.remove(&command_id);
+        }
     }
     result
 }
 
 #[tauri::command]
-pub async fn open_ssh_terminal(app: AppHandle, request: SshTestRequest, session_id: String) -> Result<(), String> {
+pub async fn open_ssh_terminal(
+    app: AppHandle,
+    request: SshTestRequest,
+    session_id: String,
+) -> Result<(), String> {
     let session_id = session_id.trim();
     if session_id.is_empty() {
         return Err("SSH 会话 ID 不能为空。".into());
@@ -762,7 +1389,11 @@ pub async fn write_ssh_terminal(session_id: String, data: String) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn resize_ssh_terminal(session_id: String, columns: u32, rows: u32) -> Result<(), String> {
+pub async fn resize_ssh_terminal(
+    session_id: String,
+    columns: u32,
+    rows: u32,
+) -> Result<(), String> {
     let session_id = session_id.trim();
     let shell = interactive_shells()
         .lock()
@@ -800,7 +1431,10 @@ pub async fn close_ssh_shell(session_id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn stop_ssh_command(command_id: String) -> Result<(), String> {
-    let sender = command_cancellations().lock().map_err(|_| "无法停止命令".to_string())?.remove(command_id.trim());
+    let sender = command_cancellations()
+        .lock()
+        .map_err(|_| "无法停止命令".to_string())?
+        .remove(command_id.trim());
     match sender {
         Some(sender) => sender.send(()).map_err(|_| "命令已经结束".to_string()),
         None => Err("没有正在执行的命令".to_string()),
@@ -836,8 +1470,27 @@ mod tests {
 
     #[test]
     fn mutation_script_keeps_marker_id_unquoted() {
-        let script = cron_mutation_script("job-1", "Backup", "0 3 * * *", "/opt/backup.sh", true, false);
+        let script = cron_mutation_script(
+            "job-1",
+            "Backup",
+            "0 3 * * *",
+            "/opt/backup.sh",
+            true,
+            false,
+        );
         assert!(script.contains("# OPSNEST-ID:job-1 NAME:Backup ENABLED:1"));
         assert!(script.contains("awk -v id='job-1'"));
+    }
+
+    #[test]
+    fn parses_docker_container_fields() {
+        let output =
+            "OPSNEST_DOCKER_ITEM=abc123|web|nginx:latest|Up 2 hours|0.0.0.0:8080->80/tcp\n";
+        let items = parse_docker_items(output);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "web");
+        assert_eq!(items[0].image, "nginx:latest");
+        assert_eq!(items[0].status, "Up 2 hours");
+        assert_eq!(items[0].ports, "0.0.0.0:8080->80/tcp");
     }
 }

@@ -49,9 +49,14 @@ pub async fn chat_completion(request: AiChatRequest) -> Result<String, String> {
     let status = response.status();
     let raw = response.text().await.map_err(|error| error.to_string())?;
     if !status.is_success() {
-        return Err(format!("{} {}", status.as_u16(), raw.chars().take(400).collect::<String>()));
+        return Err(format!(
+            "{} {}",
+            status.as_u16(),
+            raw.chars().take(400).collect::<String>()
+        ));
     }
-    let payload: Value = serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
+    let payload: Value =
+        serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
     payload
         .get("choices")
         .and_then(|choices| choices.get(0))
