@@ -2,7 +2,7 @@
 
 [简体中文](README.md) · English
 
-A local-first SSH server manager for beginners, with a built-in AI Agent.
+An SSH server manager for beginners, with a built-in AI Agent.
 
 Users only need a server address, a login method, and a model endpoint. OpsNest keeps a real SSH terminal while adding server dashboards, service shortcuts, and natural-language AgentRun workflows. It does not require an OpsNest cloud service or a separate deployment.
 

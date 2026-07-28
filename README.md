@@ -1,8 +1,8 @@
-# OpsNest
+# OpsNest 运维小窝
 
 简体中文 · [English](README.en.md)
 
-一款面向新手、内置 AI Agent 的本地优先服务器 SSH 管理软件。
+一款面向新手、内置 AI Agent 的服务器 SSH 管理软件。
 
 用户只需要知道服务器地址、登录方式，并配置一个模型接口，就可以开始管理自己的服务器或服务器集群。OpsNest 保留真实 SSH 终端，也提供服务器仪表板、服务入口和自然语言 AgentRun；不要求用户记住 Linux 命令，也不要求部署 OpsNest 云端服务。
 

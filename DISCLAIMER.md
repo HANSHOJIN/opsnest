@@ -2,7 +2,7 @@
 
 ## 中文
 
-OpsNest 是一款本地优先、仍处于 Alpha 阶段的开源实验性软件。使用 OpsNest 即表示你理解并接受以下事项：
+OpsNest 是基于个人兴趣爱好和使用方便性开发的、仍处于 Alpha 阶段的开源实验性软件。使用 OpsNest 即表示你理解并接受以下事项：
 
 - AI 输出可能不完整、错误或产生不适用于当前系统的建议；它不构成专业运维、安全、法律或其他专业意见。
 - 你始终负责确认目标服务器、命令、执行计划、权限和最终结果。请在执行前阅读命令和影响范围，不要仅凭 AI 的表述判断操作已经成功。
@@ -16,7 +16,7 @@ OpsNest 是一款本地优先、仍处于 Alpha 阶段的开源实验性软件�
 
 ## English
 
-OpsNest is a local-first open-source experimental application in the Alpha stage. By using OpsNest, you acknowledge and accept the following:
+OpsNest is an open-source experimental application developed out of personal interest and for practical convenience, and is still in the Alpha stage. By using OpsNest, you acknowledge and accept the following:
 
 - AI output may be incomplete, incorrect, or unsuitable for the current system. It is not professional operations, security, legal, or other expert advice.
 - You remain responsible for confirming the target server, commands, execution plan, permissions, and results. Review commands and impact before execution; do not treat an AI statement as proof that an operation succeeded.
