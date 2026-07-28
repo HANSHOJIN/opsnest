@@ -1029,7 +1029,17 @@ container_exec() {
 }
 container_ports_for() {
   container="$1"
-  ports=$(container_exec port "$container" 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+  port_output=$(container_exec port "$container" 2>/dev/null || true)
+  # MediaHelp's web UI listens on container port 80. Its 8091 mapping is a
+  # backend/302 service and must not be used as the browser management URL.
+  case "$container" in
+    mediahelper|mediahelp|media-help)
+      ports=$(printf '%s\n' "$port_output" | sed -nE '/^80\/tcp[[:space:]]*->/s/.*:([0-9][0-9]*)$/\1/p' | head -n 1)
+      [ -z "$ports" ] && ports=3300
+      [ -n "$ports" ] && printf '0.0.0.0:%s->80/tcp' "$ports"; return 0
+      ;;
+  esac
+  ports=$(printf '%s\n' "$port_output" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
   if [ -n "$ports" ]; then printf '0.0.0.0:%s->%s/tcp' "$ports" "$ports"; return 0; fi
   network_mode=$(container_exec inspect "$container" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null)
   if [ "$network_mode" != "host" ]; then return 0; fi
@@ -1047,6 +1057,7 @@ if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
     service_web=no
     [ -n "$service_port" ] && service_web=yes
     case "$container" in
+      mediahelper|mediahelp|media-help) service_name='MediaHelp'; [ -z "$service_port" ] && service_port=3300; service_web=yes;;
       portainer) service_name='Portainer';;
       grafana) service_name='Grafana';;
       uptime-kuma) service_name='Uptime Kuma';;
