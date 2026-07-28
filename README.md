@@ -80,8 +80,6 @@ Agent 会把机器身份、系统类型、已发现服务和之前的任务结�
 
 OpsNest 支持 OpenAI 兼容接口，并提供 OpenAI、DeepSeek、OpenRouter、Ollama 和自定义接口预设。用户自行选择模型服务商；服务器命令输出、日志片段或配置内容可能会作为上下文发送给所选模型服务。
 
-推荐尝试：[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)。它提供 OpenAI 兼容的统一接口，可聚合多个免费模型提供方，也支持自定义 OpenAI 兼容端点。它是独立的第三方项目，使用前请阅读其文档、许可和服务条款。
-
 ## 本地数据与安全边界
 
 - OpsNest 不要求用户部署云端服务，主要数据保存在本机
@@ -93,6 +91,10 @@ OpsNest 支持 OpenAI 兼容接口，并提供 OpenAI、DeepSeek、OpenRouter、
 Alpha 阶段仍有明确限制：首次 SSH 连接采用首次信任（TOFU），会自动把主机密钥写入用户的 `~/.ssh/known_hosts`，但尚未提供指纹确认窗口；Agent 仍可能生成任意 Shell 命令。请通过其他可信渠道核对新服务器指纹，在测试服务器或有备份的环境中使用，并在分享日志、截图或 Issue 前删除密码、API Key、Token、Cookie、域名和私有地址。
 
 更详细的发布前安全检查见 [SECURITY.md](SECURITY.md)。使用前请阅读 [免责声明](DISCLAIMER.md)。
+
+## 友情链接
+
+推荐尝试：[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)。它提供 OpenAI 兼容的统一接口，可聚合多个免费模型提供方，也支持自定义 OpenAI 兼容端点。它是独立的第三方项目，使用前请阅读其文档、许可和服务条款。
 
 ## 开始使用
 

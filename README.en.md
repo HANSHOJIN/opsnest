@@ -80,8 +80,6 @@ Settings provide three intervention modes:
 
 OpsNest supports OpenAI-compatible endpoints and presets for OpenAI, DeepSeek, OpenRouter, Ollama, and custom endpoints. You choose the model provider. Server command output, log fragments, or configuration content may be sent as context to that provider.
 
-Recommended to try: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). It provides an OpenAI-compatible endpoint that aggregates multiple free model providers and supports custom OpenAI-compatible endpoints. It is an independent third-party project; read its documentation, license, and terms before use.
-
 ## Local data and security boundary
 
 - OpsNest does not require an OpsNest cloud service; primary data stays on the local computer
@@ -93,6 +91,10 @@ Recommended to try: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). I
 Alpha limitations remain: first-time SSH connections use trust on first use and do not yet show a fingerprint confirmation dialog; the Agent can still generate Shell commands. Use test servers or backed-up environments, verify new host fingerprints through another trusted channel, and remove passwords, API keys, tokens, cookies, domains, and private addresses before sharing logs, screenshots, or Issues.
 
 See [SECURITY.md](SECURITY.md) for the pre-release security review, and read the [Disclaimer](DISCLAIMER.md) before use.
+
+## Friend link
+
+Recommended to try: [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). It provides an OpenAI-compatible endpoint that aggregates multiple free model providers and supports custom OpenAI-compatible endpoints. It is an independent third-party project; read its documentation, license, and terms before use.
 
 ## Getting started
 

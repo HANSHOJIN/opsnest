@@ -83,7 +83,6 @@ const AI_STORAGE_KEY = "opsnest.ai-model";
 const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
 const LANGUAGE_STORAGE_KEY = "opsnest.language";
 const APP_VERSION = "0.1.0-alpha.8";
-const FREELLMAPI_URL = "https://github.com/tashfeenahmed/freellmapi";
 let customServiceRegistry: Record<string, DiscoveredService[]> = {};
 let customServiceServerRegistry: Record<string, Server> = {};
 let customServiceDeleteAction: ((serverId: string, serviceId: string) => void) | undefined;
@@ -1475,7 +1474,7 @@ function App() {
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
        <nav aria-label="Navigation"><button className={view === "hosts" || view === "server" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>{text.cron}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
-       <div className="sidebar-footer"><div className="sidebar-note">v{APP_VERSION}</div><button className="sidebar-friend-link" onClick={() => openServiceUrl(FREELLMAPI_URL)}><strong>{language === "zh-CN" ? "推荐 AI 接口 · FreeLLMAPI" : "Recommended AI API · FreeLLMAPI"}</strong><span>{language === "zh-CN" ? "OpenAI 兼容的免费模型聚合接口" : "OpenAI-compatible free-model gateway"}</span></button></div>
+       <div className="sidebar-footer"><div className="sidebar-note">v{APP_VERSION}</div></div>
     </aside>
      <section className="content">
       {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
