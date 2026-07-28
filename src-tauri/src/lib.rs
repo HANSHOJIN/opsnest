@@ -19,8 +19,8 @@ fn open_external_url(url: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("explorer.exe")
-            .arg(url)
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|error| error.to_string())?;
