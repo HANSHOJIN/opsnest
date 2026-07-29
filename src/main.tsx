@@ -1812,7 +1812,7 @@ function LegacyServiceIcon({ service, serverId, large = false }: { service: Pick
   const icon = iconKey && imageIcon
     ? `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><image href="${imageIcon}" width="200" height="200" preserveAspectRatio="xMidYMid meet"/></svg>`
     : iconKey ? serviceIcons[iconKey] : undefined;
-  const remoteKey = iconKey ?? normalizeIconKey(service.name ?? service.id);
+  const remoteKey = iconKey ?? normalizeIconKey(service.id || service.name);
   const candidates = iconCandidates(remoteKey, service.version, remoteKey === "openlist" ? ["alist", "open-list"] : []);
   const ownerId = serverId ?? activeServiceServerId;
   const canEdit = Boolean(ownerId && service.category !== "container" && id !== "docker");
@@ -1847,7 +1847,7 @@ function ServiceIcon({ service, serverId, large = false }: { service: Pick<Disco
   const icon = iconKey && imageIcon
     ? `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><image href="${imageIcon}" width="200" height="200" preserveAspectRatio="xMidYMid meet"/></svg>`
     : iconKey ? serviceIcons[iconKey] : undefined;
-  const remoteKey = iconKey ?? normalizeIconKey(service.name ?? service.id);
+  const remoteKey = iconKey ?? normalizeIconKey(service.id || service.name);
   const candidates = iconCandidates(remoteKey, service.version, remoteKey === "openlist" ? ["alist", "open-list"] : []);
   const ownerId = serverId ?? activeServiceServerId;
   const canEdit = Boolean(ownerId && service.category !== "container" && id !== "docker");
