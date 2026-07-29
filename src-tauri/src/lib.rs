@@ -42,11 +42,53 @@ fn open_external_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn resolve_service_url(
+    host: String,
+    port: u16,
+    preferred_scheme: Option<String>,
+) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() || port == 0 {
+        return Err("Invalid service address.".into());
+    }
+    let preferred = preferred_scheme
+        .as_deref()
+        .filter(|scheme| matches!(*scheme, "http" | "https"));
+    let mut schemes = Vec::with_capacity(2);
+    if let Some(scheme) = preferred {
+        schemes.push(scheme);
+    }
+    for scheme in ["https", "http"] {
+        if !schemes.contains(&scheme) {
+            schemes.push(scheme);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+    for scheme in schemes {
+        let url = format!("{scheme}://{host}:{port}/");
+        if client.head(&url).send().await.is_ok() {
+            return Ok(url);
+        }
+    }
+    // Keep the common HTTP fallback when the service rejects HEAD or is not
+    // reachable from the local machine. The browser can still provide the
+    // final diagnostic to the user.
+    Ok(format!("http://{host}:{port}/"))
+}
+
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             app_version,
             open_external_url,
+            resolve_service_url,
             ai::chat_completion,
             web::search_web,
             ssh::test_ssh_connection,

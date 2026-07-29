@@ -16,7 +16,7 @@ The screenshots use fictional demo servers and contain no private infrastructure
 
 ## Current status
 
-Current version: `0.1.0-alpha.8`
+Current version: `0.1.0-alpha.9`
 
 OpsNest is still Alpha software intended for real-environment testing, feedback, and collaborative development. The current validation targets are Windows x64 clients and Debian, Ubuntu, OpenWrt/iStoreOS, and NAS-like Linux systems. It is not a production bastion host and does not claim complete coverage of every distribution, package manager, or vendor system.
 

@@ -1,7 +1,7 @@
 use russh::{client, keys, ChannelMsg, Disconnect, Sig};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -114,6 +114,7 @@ pub struct DiscoveredService {
     pub port: Option<u16>,
     pub web: bool,
     pub web_path: Option<String>,
+    pub web_scheme: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -756,6 +757,81 @@ if [ -z "$os_name" ]; then os_name=$(uname -srm 2>/dev/null); fi
 printf '%s\n' "${os_name:-Linux}"
 "#;
 
+const PROFILE_FALLBACK_COMMAND_PREFIX: &str = r#"
+printf 'OPSNEST_OS='; if [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_DESCRIPTION=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/openwrt_release; elif [ -r /etc/os-release ]; then awk -F= '/^PRETTY_NAME=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release; else uname -srm; fi
+printf 'OPSNEST_OS_ID='; if [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_ID=/{gsub(/^"|"$/, "", $2); print tolower($2); exit}' /etc/openwrt_release; elif [ -r /etc/os-release ]; then awk -F= '/^ID=/{gsub(/^"|"$/, "", $2); print tolower($2); exit}' /etc/os-release; else printf 'linux'; fi
+printf 'OPSNEST_OS_VERSION='; if [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_RELEASE=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/openwrt_release; elif [ -r /etc/os-release ]; then awk -F= '/^VERSION_ID=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release; else uname -r; fi
+printf '\nOPSNEST_HOSTNAME='; hostname 2>/dev/null || cat /proc/sys/kernel/hostname 2>/dev/null || printf 'unknown'
+printf '\nOPSNEST_CPU='; nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || printf 'unknown'
+printf '\nOPSNEST_CPU_MODEL='; awk -F: '/^(model name|Hardware|Processor)[[:space:]]*:/{gsub(/^[[:space:]]+/, "", $2); if ($2 != "") {print $2; exit}}' /proc/cpuinfo 2>/dev/null
+printf '\nOPSNEST_MEMORY='; awk '/MemTotal/{printf "%.1f GB", $2/1024/1024}' /proc/meminfo 2>/dev/null
+printf '\nOPSNEST_DISK='; df -h / 2>/dev/null | awk 'NR==2 {print $4 " free of " $2}'
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then printf '\nOPSNEST_DOCKER=installed'; else printf '\nOPSNEST_DOCKER=missing'; fi
+printf '\nOPSNEST_OPENWRT_MODEL='; [ -r /tmp/sysinfo/model ] && cat /tmp/sysinfo/model
+printf '\nOPSNEST_OPENWRT_FIRMWARE='; [ -r /etc/openwrt_release ] && awk -F= '/^DISTRIB_DESCRIPTION=/{gsub(/^"|"$/, "", $2); print $2; exit}' /etc/openwrt_release
+printf '\nOPSNEST_OPENWRT_KERNEL='; uname -r 2>/dev/null
+"#;
+
+// OpenWrt variants do not all expose the same network helpers. Prefer ubus,
+// then parse its JSON without jsonfilter, and finally fall back to UCI and the
+// kernel routing/address tables. The markers are always emitted so a partial
+// probe cannot make the frontend treat an old value as current.
+const OPENWRT_NETWORK_PROBE: &str = r#"
+openwrt_interface_ipv4() {
+  interface_name="$1"
+  interface_status=$(ubus call "network.interface.$interface_name" status 2>/dev/null || true)
+  address=''
+  if [ -n "$interface_status" ] && command -v jsonfilter >/dev/null 2>&1; then
+    address=$(printf '%s' "$interface_status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1)
+  fi
+  if [ -z "$address" ] && [ -n "$interface_status" ]; then
+    address=$(printf '%s' "$interface_status" | grep -o '"address"[[:space:]]*:[[:space:]]*"[0-9][0-9.]*"' 2>/dev/null | head -n 1 | sed 's/.*"\([0-9][0-9.]*\)".*/\1/')
+  fi
+  printf '%s' "$address"
+}
+openwrt_lan_device=$(uci -q get network.lan.device 2>/dev/null || true)
+[ -z "$openwrt_lan_device" ] && openwrt_lan_device=$(uci -q get network.lan.ifname 2>/dev/null || true)
+[ -z "$openwrt_lan_device" ] && openwrt_lan_device=br-lan
+openwrt_wan_ip=$(openwrt_interface_ipv4 wan)
+[ -z "$openwrt_wan_ip" ] && openwrt_wan_ip=$(uci -q get network.wan.ipaddr 2>/dev/null || true)
+[ -z "$openwrt_wan_ip" ] && openwrt_wan_ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i == "src") {print $(i+1); exit}}')
+printf '\nOPSNEST_WAN_IP=%s' "${openwrt_wan_ip:-unknown}"
+openwrt_lan_ip=$(openwrt_interface_ipv4 lan)
+[ -z "$openwrt_lan_ip" ] && openwrt_lan_ip=$(uci -q get network.lan.ipaddr 2>/dev/null || true)
+[ -z "$openwrt_lan_ip" ] && openwrt_lan_ip=$(ip -4 addr show dev "$openwrt_lan_device" 2>/dev/null | awk '/inet / {sub("/.*", "", $2); if ($2 != "127.0.0.1") {print $2; exit}}')
+printf '\nOPSNEST_LAN_IP=%s' "${openwrt_lan_ip:-unknown}"
+printf '\nOPSNEST_LAN_CLIENTS='
+openwrt_lan_clients=''
+if command -v ubus >/dev/null 2>&1; then
+  openwrt_dhcp_leases=$(ubus call dhcp ipv4leases 2>/dev/null || true)
+  if [ -n "$openwrt_dhcp_leases" ]; then
+    openwrt_lan_clients=$(printf '%s' "$openwrt_dhcp_leases" | grep -o '"mac"' 2>/dev/null | wc -l)
+  fi
+fi
+if [ -z "$openwrt_lan_clients" ] || [ "$openwrt_lan_clients" -eq 0 ] 2>/dev/null; then
+  if [ -r /tmp/dhcp.leases ]; then
+    openwrt_lan_clients=$(awk 'NF >= 3 {print tolower($2)}' /tmp/dhcp.leases | sort -u | wc -l)
+  else
+    openwrt_lan_clients=0
+  fi
+fi
+printf '%s' "${openwrt_lan_clients:-0}"
+printf '\nOPSNEST_WIFI_CLIENTS='
+openwrt_wifi_clients=0
+if command -v iw >/dev/null 2>&1; then
+  for wifi_device in $(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}'); do
+    count=$(iw dev "$wifi_device" station dump 2>/dev/null | awk '$1 == "Station" {count++} END {print count+0}')
+    openwrt_wifi_clients=$((openwrt_wifi_clients + count))
+  done
+elif command -v iwinfo >/dev/null 2>&1; then
+  for wifi_device in $(iwinfo 2>/dev/null | awk '$2 == "ESSID:" {print $1}'); do
+    count=$(iwinfo "$wifi_device" assoclist 2>/dev/null | awk '/dBm/ {count++} END {print count+0}')
+    openwrt_wifi_clients=$((openwrt_wifi_clients + count))
+  done
+fi
+printf '%s' "$openwrt_wifi_clients"
+"#;
+
 #[tauri::command]
 pub async fn test_ssh_connection(request: SshTestRequest) -> Result<SshTestResponse, String> {
     let latency_ms = measure_tcp_latency(&request).await?;
@@ -854,17 +930,26 @@ fi
 printf '\nOPSNEST_OPENWRT_MODEL='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null | head -n 1; elif [ -r /tmp/sysinfo/model ]; then cat /tmp/sysinfo/model; fi
 printf '\nOPSNEST_OPENWRT_FIRMWARE='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call system board 2>/dev/null | jsonfilter -e '@.release.description' 2>/dev/null | head -n 1; elif [ -r /etc/openwrt_release ]; then awk -F= '/^DISTRIB_DESCRIPTION=/{{gsub(/^"|"$/, "", $2); print $2; exit}}' /etc/openwrt_release 2>/dev/null; fi
 printf '\nOPSNEST_OPENWRT_KERNEL='; uname -r 2>/dev/null
-printf '\nOPSNEST_WAN_IP='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call network.interface.wan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1; fi
-printf '\nOPSNEST_LAN_IP='; if command -v ubus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1; fi
-printf '\nOPSNEST_LAN_CLIENTS='; lan_device=$(uci -q get network.lan.device 2>/dev/null || true); [ -z "$lan_device" ] && lan_device=$(uci -q get network.lan.ifname 2>/dev/null || true); [ -z "$lan_device" ] && lan_device=br-lan; lan_clients=$(ip neigh show dev "$lan_device" 2>/dev/null | awk '$1 ~ /^[0-9]/ && $NF ~ /^(REACHABLE|DELAY|PROBE)$/ {{print $1}}' | sort -u | wc -l); if [ "$lan_clients" -eq 0 ] && [ -r /tmp/dhcp.leases ]; then lan_clients=$(awk 'NF >= 3 {{print $2}}' /tmp/dhcp.leases | sort -u | wc -l); fi; printf '%s' "$lan_clients"
-printf '\nOPSNEST_WIFI_CLIENTS='; wifi_clients=0; if command -v iw >/dev/null 2>&1; then for wifi_device in $(iw dev 2>/dev/null | awk '$1 == "Interface" {{print $2}}'); do count=$(iw dev "$wifi_device" station dump 2>/dev/null | awk '$1 == "Station" {{count++}} END {{print count+0}}'); wifi_clients=$((wifi_clients + count)); done; elif command -v iwinfo >/dev/null 2>&1; then for wifi_device in $(iwinfo 2>/dev/null | awk '$2 == "ESSID:" {{print $1}}'); do count=$(iwinfo "$wifi_device" assoclist 2>/dev/null | awk '/dBm/ {{count++}} END {{print count+0}}'); wifi_clients=$((wifi_clients + count)); done; fi; printf '%s' "$wifi_clients"
+{OPENWRT_NETWORK_PROBE}
 printf '\nOPSNEST_NAS_KIND='; if grep -qiE 'fnos|fnnas|飞牛' /etc/os-release /etc/fnos_release /etc/fnos-version /etc/*release 2>/dev/null || [ -d /usr/local/fnos ] || [ -d /var/lib/fnos ] || hostname 2>/dev/null | grep -qiE 'feiniu|fnos|fnnas' || ps 2>/dev/null | grep -v grep | grep -E 'fnos|fnnas|fnmain' >/dev/null 2>&1; then printf 'fnos'; else printf ''; fi
 printf '\nOPSNEST_NAS_VERSION='; for nas_version_file in /etc/fnos_release /etc/fnos-version /usr/local/fnos/version /usr/local/fnos/VERSION; do if [ -r "$nas_version_file" ]; then tr '\n\r' '  ' < "$nas_version_file"; break; fi; done
 printf '\nOPSNEST_NAS_PORT='; nas_port=''; for candidate in 5666 8000; do if command -v ss >/dev/null 2>&1 && ss -lntH 2>/dev/null | awk '{{print $4}}' | grep -E ":${{candidate}}$" >/dev/null 2>&1; then nas_port="$candidate"; break; elif command -v netstat >/dev/null 2>&1 && netstat -lnt 2>/dev/null | awk '{{print $4}}' | grep -E ":${{candidate}}$" >/dev/null 2>&1; then nas_port="$candidate"; break; fi; done; printf '%s' "$nas_port"
 "#
     );
-    let output = run_command(&session, &command, None).await?;
-    close_session(&session).await;
+    let mut output = run_command(&session, &command, None).await?;
+    if !output.contains("OPSNEST_HOSTNAME=") {
+        close_session(&session).await;
+        if let Ok(fallback_session) = connect_session(&request).await {
+            let fallback_command =
+                format!("{PROFILE_FALLBACK_COMMAND_PREFIX}{OPENWRT_NETWORK_PROBE}");
+            if let Ok(fallback) = run_command(&fallback_session, &fallback_command, None).await {
+                output.push_str(&fallback);
+            }
+            close_session(&fallback_session).await;
+        }
+    } else {
+        close_session(&session).await;
+    }
     let os_id = value_for(&output, "OPSNEST_OS_ID=", "linux").to_lowercase();
     let os_name = value_for(&output, "OPSNEST_OS=", "Linux");
     let openwrt_model =
@@ -912,7 +997,7 @@ printf '\nOPSNEST_NAS_PORT='; nas_port=''; for candidate in 5666 8000; do if com
 
 const SERVICE_DISCOVERY_COMMAND: &str = r#"
 emit_service() {
-  service_id="$1"; service_name="$2"; category="$3"; status="$4"; version="$5"; port="$6"; web="$7"
+  service_id="$1"; service_name="$2"; category="$3"; status="$4"; version="$5"; port="$6"; web="$7"; web_scheme="${8:-http}"
   version=$(printf '%s' "$version" | tr '\n\r|' '   ' | cut -c1-80)
   web_path=''
   if [ "$service_id" = "1panel" ]; then
@@ -929,7 +1014,7 @@ emit_service() {
       *) web_path="/$web_path" ;;
     esac
   fi
-  printf 'OPSNEST_SERVICE|%s|%s|%s|%s|%s|%s|%s|%s\n' "$service_id" "$service_name" "$category" "$status" "$version" "$port" "$web" "$web_path"
+  printf 'OPSNEST_SERVICE|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$service_id" "$service_name" "$category" "$status" "$version" "$port" "$web" "$web_path" "$web_scheme"
 }
 
 port_is_listening() {
@@ -965,8 +1050,16 @@ if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ] && command -v ubus >
       pidof "$init_service" >/dev/null 2>&1 && service_status=running
       service_port=''
       service_web=no
+      service_scheme=http
       case "$init_service" in
-        uhttpd) service_port=80; service_web=yes; service_name='LuCI / uHTTPd'; service_category=panel;;
+        uhttpd)
+          service_web=yes; service_name='LuCI / uHTTPd'; service_category=panel
+          https_port=$(uci -q get uhttpd.main.listen_https 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+          http_port=$(uci -q get uhttpd.main.listen_http 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+          if [ -n "$https_port" ]; then service_port="$https_port"; service_scheme=https
+          elif [ -n "$http_port" ]; then service_port="$http_port"
+          else service_port=80; fi
+          ;;
         dropbear) service_port=22; service_name='Dropbear SSH'; service_category=network;;
         dnsmasq) service_port=53; service_name='Dnsmasq'; service_category=network;;
         odhcpd) service_port=547; service_name='odhcpd'; service_category=network;;
@@ -980,7 +1073,7 @@ if [ -r /etc/openwrt_release ] || [ -r /etc/config/system ] && command -v ubus >
         lucky) service_name='Lucky'; service_category=panel; service_port=16601; service_web=yes;;
         *) service_name="$init_service"; service_category=router;;
       esac
-      emit_service "openwrt-$init_service" "$service_name" "$service_category" "$service_status" 'OpenWrt service' "$service_port" "$service_web"
+      emit_service "openwrt-$init_service" "$service_name" "$service_category" "$service_status" 'OpenWrt service' "$service_port" "$service_web" "$service_scheme"
     fi
   done
 fi
@@ -1020,10 +1113,16 @@ container_exec() {
   if command -v docker >/dev/null 2>&1; then
     docker "$@" 2>/dev/null && return 0
     if command -v sudo >/dev/null 2>&1; then sudo -n docker "$@" 2>/dev/null && return 0; fi
+    if command -v sudo >/dev/null 2>&1 && [ -n "$OPSNEST_SUDO_PASSWORD" ]; then
+      printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' docker "$@" 2>/dev/null && return 0
+    fi
   fi
   if command -v podman >/dev/null 2>&1; then
     podman "$@" 2>/dev/null && return 0
     if command -v sudo >/dev/null 2>&1; then sudo -n podman "$@" 2>/dev/null && return 0; fi
+    if command -v sudo >/dev/null 2>&1 && [ -n "$OPSNEST_SUDO_PASSWORD" ]; then
+      printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' podman "$@" 2>/dev/null && return 0
+    fi
   fi
   return 1
 }
@@ -1091,9 +1190,64 @@ for database in mysqld mariadbd postgres redis-server mongod; do
     emit_service "$database" "$database" database detected "$database_version" '' no
   fi
 done
+printf 'OPSNEST_SERVICE_SCAN_DONE\n'
+"#;
+
+// Some OpenWrt/iStoreOS SSH servers reject the larger discovery script before
+// it can emit its final marker. Keep a short platform probe as a fallback so
+// the common router services are still discoverable.
+const OPENWRT_SERVICE_FALLBACK_COMMAND: &str = r#"
+emit() { printf 'OPSNEST_SERVICE|%s|%s|%s|%s|%s|%s|%s||%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8"; }
+if [ -r /etc/openwrt_release ] || command -v ubus >/dev/null 2>&1; then
+  for service in uhttpd dropbear dnsmasq odhcpd rpcd netifd firewall hostapd wpa_supplicant miniupnpd openclash passwall openlist lucky; do
+    if [ -x "/etc/init.d/$service" ]; then
+      status=installed; pidof "$service" >/dev/null 2>&1 && status=running
+      name="$service"; category=router; port=''; web=no; scheme=http
+      case "$service" in
+        uhttpd)
+          name='LuCI / uHTTPd'; category=panel; web=yes
+          https_port=$(uci -q get uhttpd.main.listen_https 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+          http_port=$(uci -q get uhttpd.main.listen_http 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' | head -n 1)
+          if [ -n "$https_port" ]; then port="$https_port"; scheme=https
+          elif [ -n "$http_port" ]; then port="$http_port"
+          else port=80; fi
+          ;;
+        dropbear) name='Dropbear SSH'; category=network; port=22;;
+        dnsmasq) name='Dnsmasq'; category=network; port=53;;
+        odhcpd) name='odhcpd'; category=network; port=547;;
+        rpcd) name='rpcd'; category=system;;
+        netifd) name='netifd'; category=network;;
+        firewall) name='Firewall'; category=network;;
+        hostapd|wpa_supplicant) category=wifi;;
+        openclash) name='OpenClash'; category=router;;
+        passwall) name='PassWall'; category=router;;
+        openlist) name='OpenList'; category=panel; port=5244; web=yes;;
+        lucky) name='Lucky'; category=panel; port=16601; web=yes;;
+      esac
+      emit "openwrt-$service" "$name" "$category" "$status" 'OpenWrt service' "$port" "$web" "$scheme"
+    fi
+  done
+fi
+if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  container_exec() { if command -v docker >/dev/null 2>&1; then docker "$@" 2>/dev/null && return 0; if command -v sudo >/dev/null 2>&1; then sudo -n docker "$@" 2>/dev/null && return 0; [ -n "$OPSNEST_SUDO_PASSWORD" ] && printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' docker "$@" 2>/dev/null && return 0; fi; fi; if command -v podman >/dev/null 2>&1; then podman "$@" 2>/dev/null && return 0; if command -v sudo >/dev/null 2>&1; then sudo -n podman "$@" 2>/dev/null && return 0; [ -n "$OPSNEST_SUDO_PASSWORD" ] && printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' podman "$@" 2>/dev/null && return 0; fi; fi; return 1; }
+  version=$(container_exec version --format '{{.Server.Version}}' 2>/dev/null || container_exec --version 2>/dev/null | head -n 1)
+  emit docker Docker container running "$version" '' no
+  for container in $(container_exec ps --format '{{.Names}}' 2>/dev/null); do
+    name="$container"; port_output=$(container_exec port "$container" 2>/dev/null | head -n 1); port=$(printf '%s' "$port_output" | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'); web=no
+    case "$container" in
+      xiaoya|xiaoya-*) name='Xiaoya'; [ -z "$port" ] && port=5678; web=yes;;
+      mediahelper|mediahelp|media-help) name='MediaHelp'; [ -z "$port" ] && port=3300; web=yes;;
+      openlist) name='OpenList'; [ -z "$port" ] && port=5244; web=yes;;
+      lucky) name='Lucky'; [ -z "$port" ] && port=16601; web=yes;;
+    esac
+    emit "docker-$container" "$name" container running "$container" "$port" "$web"
+  done
+fi
+printf 'OPSNEST_SERVICE_SCAN_DONE\n'
 "#;
 
 fn parse_discovered_services(output: &str) -> Vec<DiscoveredService> {
+    let mut seen = HashSet::new();
     output
         .lines()
         .filter_map(|line| {
@@ -1104,17 +1258,33 @@ fn parse_discovered_services(output: &str) -> Vec<DiscoveredService> {
             if fields.len() < 7 {
                 return None;
             }
+            let id = fields[0].to_string();
+            if !seen.insert(id.clone()) {
+                return None;
+            }
+            let port = fields[5].parse::<u16>().ok();
+            // Some OpenWrt/container probes report a port but lose the
+            // explicit web marker when output is combined with a fallback
+            // probe. Recover the useful browser entry points deterministically
+            // from the service category and published port.
+            let web = fields[6] == "yes"
+                || (fields[2] == "panel" && port.is_some())
+                || (fields[2] == "container" && port.is_some());
             Some(DiscoveredService {
-                id: fields[0].to_string(),
+                id,
                 name: fields[1].to_string(),
                 category: fields[2].to_string(),
                 status: fields[3].to_string(),
                 version: fields[4].to_string(),
-                port: fields[5].parse::<u16>().ok(),
-                web: fields[6] == "yes",
+                port,
+                web,
                 web_path: fields
                     .get(7)
                     .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string()),
+                web_scheme: fields
+                    .get(8)
+                    .filter(|value| **value == "http" || **value == "https")
                     .map(|value| value.to_string()),
             })
         })
@@ -1126,9 +1296,31 @@ pub async fn discover_server_services(
     request: SshTestRequest,
 ) -> Result<Vec<DiscoveredService>, String> {
     let session = connect_session(&request).await?;
-    let output = run_command(&session, SERVICE_DISCOVERY_COMMAND, None).await?;
+    let sudo_password = request
+        .sudo_password
+        .as_deref()
+        .or(request.password.as_deref())
+        .map(shell_quote)
+        .unwrap_or_else(|| "''".to_string());
+    let compact_command =
+        format!("OPSNEST_SUDO_PASSWORD={sudo_password}\n{OPENWRT_SERVICE_FALLBACK_COMMAND}");
+    let generic_command =
+        format!("OPSNEST_SUDO_PASSWORD={sudo_password}\n{SERVICE_DISCOVERY_COMMAND}");
+    // Run the compact probe first. OpenWrt/iStoreOS variants may reject or
+    // truncate the larger generic command through Dropbear.
+    let compact = run_command(&session, &compact_command, None)
+        .await
+        .unwrap_or_default();
+    let generic = run_command(&session, &generic_command, None)
+        .await
+        .unwrap_or_default();
+    let output = format!("{compact}\n{generic}");
     close_session(&session).await;
-    Ok(parse_discovered_services(&output))
+    let services = parse_discovered_services(&output);
+    if services.is_empty() && output.trim().is_empty() {
+        return Err("服务扫描未返回结果，请重新连接后再试。".into());
+    }
+    Ok(services)
 }
 
 fn validate_cron_field(value: &str, label: &str, max_len: usize) -> Result<String, String> {
@@ -1503,5 +1695,46 @@ mod tests {
         assert_eq!(items[0].image, "nginx:latest");
         assert_eq!(items[0].status, "Up 2 hours");
         assert_eq!(items[0].ports, "0.0.0.0:8080->80/tcp");
+    }
+
+    #[test]
+    fn restores_web_entry_for_panel_and_container_ports() {
+        let output = concat!(
+            "OPSNEST_SERVICE|openwrt-luci|LuCI / uHTTPd|panel|running|OpenWrt service|80|no||https\n",
+            "OPSNEST_SERVICE|docker-xiaoya|Xiaoya|container|running|xiaoya|5678|no|\n",
+            "OPSNEST_SERVICE|openwrt-dropbear|Dropbear SSH|network|running|OpenWrt service|22|no|\n",
+        );
+        let services = parse_discovered_services(output);
+        assert_eq!(services.len(), 3, "{services:?}");
+        assert!(
+            services
+                .iter()
+                .find(|item| item.name == "LuCI / uHTTPd")
+                .unwrap()
+                .web
+        );
+        assert_eq!(
+            services
+                .iter()
+                .find(|item| item.name == "LuCI / uHTTPd")
+                .unwrap()
+                .web_scheme
+                .as_deref(),
+            Some("https")
+        );
+        assert!(
+            services
+                .iter()
+                .find(|item| item.name == "Xiaoya")
+                .unwrap()
+                .web
+        );
+        assert!(
+            !services
+                .iter()
+                .find(|item| item.name == "Dropbear SSH")
+                .unwrap()
+                .web
+        );
     }
 }

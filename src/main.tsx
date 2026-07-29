@@ -26,6 +26,10 @@ import grafanaIcon from "simple-icons/icons/grafana.svg?raw";
 import portainerIcon from "simple-icons/icons/portainer.svg?raw";
 import onePanelIcon from "simple-icons/icons/1panel.svg?raw";
 import alistIcon from "simple-icons/icons/alist.svg?raw";
+import openListImage from "./assets/openlist.png";
+import homeBoxImage from "./assets/homebox.png";
+import luckyImage from "./assets/lucky.png";
+import fnosImage from "./assets/fnos.png";
 import mysqlIcon from "simple-icons/icons/mysql.svg?raw";
 import mariadbIcon from "simple-icons/icons/mariadb.svg?raw";
 import postgresqlIcon from "simple-icons/icons/postgresql.svg?raw";
@@ -71,7 +75,7 @@ type OpenWrtProfile = { model: string; firmware: string; kernel: string; wanIp: 
 type NasProfile = { kind: string; version: string; managementPort: string };
 type DockerContainer = { id: string; name: string; image: string; status: string; ports: string };
 type ServerProfile = { osId?: string; osVersion?: string; osName: string; hostname: string; cpuCores: string; cpuModel?: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string; dockerItems?: DockerContainer[]; openwrt?: OpenWrtProfile; nas?: NasProfile };
-type DiscoveredService = { id: string; name: string; category: string; status: string; version: string; port?: number | null; web: boolean; webPath?: string };
+type DiscoveredService = { id: string; name: string; category: string; status: string; version: string; port?: number | null; web: boolean; webPath?: string; webScheme?: "http" | "https" };
 type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[]; services?: DiscoveredService[]; customServices?: DiscoveredService[]; servicesScannedAt?: string };
 type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; sudoPassword: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean };
 type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; sudoPassword?: string | null; privateKeyPath: string | null; passphrase: string | null; commandId?: string; sessionId?: string };
@@ -82,7 +86,7 @@ const STORAGE_KEY = "opsnest.servers";
 const AI_STORAGE_KEY = "opsnest.ai-model";
 const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
 const LANGUAGE_STORAGE_KEY = "opsnest.language";
-const APP_VERSION = "0.1.0-alpha.8";
+const APP_VERSION = "0.1.0-alpha.9";
 let customServiceRegistry: Record<string, DiscoveredService[]> = {};
 let customServiceServerRegistry: Record<string, Server> = {};
 let customServiceDeleteAction: ((serverId: string, serviceId: string) => void) | undefined;
@@ -140,6 +144,7 @@ function App() {
   const [isWizardOpen, setWizardOpen] = useState(false);
   const [isConnecting, setConnecting] = useState(false);
   const [isScanning, setScanning] = useState(false);
+  const [discoveringServerId, setDiscoveringServerId] = useState<string | null>(null);
   const [isAnalyzing, setAnalyzing] = useState(false);
   const [isTestingModel, setTestingModel] = useState(false);
   const [modelStatus, setModelStatus] = useState("");
@@ -219,7 +224,7 @@ function App() {
           if (migrated) localStorage.removeItem(AI_STORAGE_KEY);
         }
         if ((!stored.servers?.length && legacyServers.length) || (!stored.aiConfig && legacyAi)) await invoke("save_local_data", { data: { servers: legacyServers, aiConfig: savedAiWithCredential ? { ...savedAiWithCredential, apiKey: "" } : null, aiConnectionStatus: savedModelConnection, language: savedLanguage ?? "zh-CN" } });
-        appendRuntimeLog({ level: "info", event: "app.start", message: "OpsNest started and local logs were loaded." });
+        appendRuntimeLog({ level: "info", event: "app.start", message: "OpsNest started and local logs were loaded.", details: `version=${APP_VERSION}; servers=${restored.length}` });
       } catch (loadError) {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
         const savedAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
@@ -252,6 +257,15 @@ function App() {
     void load();
     return () => { cancelled = true; };
   }, []);
+
+  // The detail view and the sidebar are fed by separate state values. Keep the
+  // selected detail snapshot aligned with the persisted server list so a scan
+  // completed by one view is immediately visible when another view is opened.
+  useEffect(() => {
+    if (!server) return;
+    const latest = servers.find((item) => item.id === server.id);
+    if (latest && JSON.stringify(latest) !== JSON.stringify(server)) setServer(latest);
+  }, [servers, server]);
 
   useEffect(() => {
     if (!conversationHydratedRef.current) return;
@@ -340,6 +354,9 @@ function App() {
   };
 
   const discoverServerServices = async (target: Server): Promise<DiscoveredService[]> => {
+    if (discoveringServerId === target.id) return target.services ?? [];
+    setDiscoveringServerId(target.id);
+    try {
     let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
     if (!request) {
       try {
@@ -353,14 +370,35 @@ function App() {
       setError(text.noCredentials);
       throw new Error(text.noCredentials);
     }
-    const services = await invoke<DiscoveredService[]>("discover_server_services", { request });
-    const updated = { ...target, services, servicesScannedAt: new Date().toISOString() };
-    const nextServers = servers.map((item) => item.id === target.id ? updated : item);
-    setServer((current) => current?.id === target.id ? updated : current);
-    setServers(nextServers);
-    persistData(nextServers);
-    appendRuntimeLog({ level: "info", event: "ssh.services.discovered", message: "Server services discovered.", details: `${target.name}: ${services.map((item) => item.name).join(", ") || "none"}` });
-    return services;
+    setError("");
+    let profile = target.profile;
+    try {
+      const scannedProfile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), target.host);
+      // A failed/partial shell probe can still return a syntactically valid object.
+      // Never replace a useful saved profile with an all-unknown result.
+      if (hasUsefulServerProfile(scannedProfile) || !target.profile) profile = scannedProfile;
+    } catch (inspectError) {
+      appendRuntimeLog({ level: "warn", event: "ssh.inspect.failed", message: "Service discovery continued, but server profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) });
+    }
+    try {
+      const services = await invoke<DiscoveredService[]>("discover_server_services", { request });
+      const updatedFields = { system: profile?.osName ?? target.system, profile, services, servicesScannedAt: new Date().toISOString() };
+      setServer((current) => current?.id === target.id ? { ...current, ...updatedFields, profile: profile ?? current.profile } : current);
+      setServers((current) => {
+        const next = current.map((item) => item.id === target.id ? { ...item, ...updatedFields, profile: profile ?? item.profile } : item);
+        persistData(next);
+        return next;
+      });
+      appendRuntimeLog({ level: "info", event: "ssh.services.discovered", message: "Server profile and services discovered.", details: `${target.name}: ${services.map((item) => item.name).join(", ") || "none"}` });
+      return services;
+    } catch (serviceError) {
+      appendRuntimeLog({ level: "error", event: "ssh.services.failed", message: "Server service discovery failed; existing profile and services were kept.", details: serviceError instanceof Error ? serviceError.message : String(serviceError) });
+      setError(serviceError instanceof Error ? serviceError.message : typeof serviceError === "string" ? serviceError : text.scanFailed);
+      return target.services ?? [];
+    }
+    } finally {
+      setDiscoveringServerId((current) => current === target.id ? null : current);
+    }
   };
 
   const connectSavedServer = async (selected: Server, openTerminalAfter = false) => {
@@ -387,12 +425,15 @@ function App() {
       const result = await invoke<{ system: string; latencyMs: number }>("test_ssh_connection", { request });
       appendRuntimeLog({ level: "info", event: "ssh.connection.success", message: "SSH connection succeeded.", details: `${selected.host}:${selected.port}` });
       let profile: ServerProfile | undefined;
-      try { profile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), selected.host); }
+      try {
+        const scannedProfile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), selected.host);
+        profile = hasUsefulServerProfile(scannedProfile) || !selected.profile ? scannedProfile : selected.profile;
+      }
       catch (inspectError) { appendRuntimeLog({ level: "warn", event: "ssh.inspect.failed", message: "SSH reconnected, but server profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) }); }
       let services: DiscoveredService[] | undefined;
       try { services = await invoke<DiscoveredService[]>("discover_server_services", { request }); }
       catch (serviceError) { appendRuntimeLog({ level: "warn", event: "ssh.services.failed", message: "SSH connected, but service discovery failed.", details: serviceError instanceof Error ? serviceError.message : String(serviceError) }); }
-      const connectedServer = { ...selected, system: profile?.osName ?? result.system, latency: result.latencyMs, status: "connected" as ServerStatus, profile, services: services ?? selected.services, servicesScannedAt: services ? new Date().toISOString() : selected.servicesScannedAt };
+      const connectedServer = { ...selected, system: profile?.osName ?? selected.system ?? result.system, latency: result.latencyMs, status: "connected" as ServerStatus, profile: profile ?? selected.profile, services: services ?? selected.services, servicesScannedAt: services ? new Date().toISOString() : selected.servicesScannedAt };
       setServer(connectedServer);
       setServers((current) => current.map((item) => item.id === selected.id ? connectedServer : item));
       persistData(servers.map((item) => item.id === selected.id ? connectedServer : item));
@@ -1383,9 +1424,15 @@ function App() {
     if (!request) { setError(text.noCredentials); return; }
     setScanning(true); setError("");
     try {
-      const profile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), server.host);
-      const updated = { ...server, profile, aiSummary: undefined };
-      setServer(updated); persistServers([updated, ...servers.filter((item) => item.id !== updated.id)]);
+      const scannedProfile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), server.host);
+      const profile = hasUsefulServerProfile(scannedProfile) || !server.profile ? scannedProfile : server.profile;
+      const updatedFields = { system: profile.osName ?? server.system, profile, aiSummary: undefined };
+      setServer((current) => current?.id === server.id ? { ...current, ...updatedFields, profile } : current);
+      setServers((current) => {
+        const next = current.map((item) => item.id === server.id ? { ...item, ...updatedFields, profile } : item);
+        persistData(next);
+        return next;
+      });
     } catch (scanError) { appendRuntimeLog({ level: "error", event: "ssh.inspect.failed", message: "Server inspection failed.", details: scanError instanceof Error ? scanError.message : String(scanError) }); setError(scanError instanceof Error ? scanError.message : typeof scanError === "string" ? scanError : text.scanFailed); }
     finally { setScanning(false); }
   };
@@ -1483,7 +1530,7 @@ function App() {
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
       {contextMenu && <ServerContextMenu text={text} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
       {view === "hosts" && <ServerDashboard servers={servers} text={text} language={language} modelStatusClass={modelStatusClass} modelStatusLabel={modelStatusLabel} onAdd={openWizard} onOpen={openTerminal} onConnect={(item) => { void connectSavedServer(item); }} onEdit={editServer} />}
-      {view === "server" && server && (isOpenWrtProfile(server.profile) ? <OpenWrtRouterView server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} /> : isNasProfile(server.profile, `${server.name} ${server.host}`) ? <NasServerView server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} /> : <ServerDetailViewDynamic server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} />)}
+      {view === "server" && server && (isOpenWrtProfile(server.profile) || /openwrt|istoreos|路由器/i.test(server.name + " " + server.host) ? <OpenWrtRouterView server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onScan={() => { void scanServer(); }} isScanning={isScanning} isDiscovering={discoveringServerId === server.id} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} /> : isNasProfile(server.profile, `${server.name} ${server.host}`) ? <NasServerView server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onScan={() => { void scanServer(); }} isScanning={isScanning} isDiscovering={discoveringServerId === server.id} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} /> : <ServerDetailViewDynamic server={server} text={text} language={language} onBack={() => setView("hosts")} onOpen={() => openTerminal(server)} onConnect={() => { void connectSavedServer(server); }} onScan={() => { void scanServer(); }} isScanning={isScanning} isDiscovering={discoveringServerId === server.id} onDiscover={() => { void discoverServerServices(server); }} onEdit={() => editServer(server)} onManager={openManager} onCron={openCron} onAddCustomService={addCustomService} onDeleteCustomService={deleteCustomService} />)}
        {view === "settings" && <section className="settings-view"><header className="topbar"><div><p className="eyebrow">{text.localConfig}</p><h1>{text.settings}</h1></div><span className="status-pill">{text.localOnly}</span></header><div className="settings-card"><div className="settings-heading"><div><h2>{text.addAiModel}</h2><p>{text.aiModelIntro}</p></div><span className="read-only-pill">{text.apiDirect}</span></div><label className="field-label">{text.language}<select value={language} onChange={(event) => changeLanguage(event.target.value as Locale)}><option value="zh-CN">{text.simplifiedChinese}</option><option value="en-US">{text.english}</option></select></label><p className="settings-note language-note">{text.languageNote}</p><label className="field-label">{text.modelService}<select value={aiConfig.provider} onChange={(event) => selectProvider(event.target.value as AiProvider)}>{Object.entries(providerPresets).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</select></label><label className="field-label">{text.apiAddress}<input value={aiConfig.baseUrl} onChange={(event) => updateAi("baseUrl", event.target.value)} placeholder={text.apiPlaceholder} /></label><label className="field-label">{text.apiKey}{!providerPresets[aiConfig.provider].keyRequired && <span> {text.optional}</span>}<input type="password" value={aiConfig.apiKey} onChange={(event) => updateAi("apiKey", event.target.value)} placeholder={aiConfig.provider === "ollama" ? text.ollamaKey : text.keyPlaceholder} /></label><label className="field-label">{text.modelName}<input value={aiConfig.model} onChange={(event) => updateAi("model", event.target.value)} placeholder={text.modelPlaceholder} /></label><div className="settings-actions"><button className="secondary" onClick={testAiConfig} disabled={isTestingModel}>{isTestingModel ? text.testing : text.testConnection}</button><button className="primary" onClick={saveAiConfig}>{text.saveModel}</button></div>{modelStatus && <p className="success-text">✓ {modelStatus}</p>}</div></section>}
      {view === "settings" && <section className="settings-card intervention-settings"><div className="settings-heading"><div><h2>{language === "zh-CN" ? "AI 介入模式" : "AI intervention"}</h2><p>{language === "zh-CN" ? "选择 AI 参与服务器会话的程度。" : "Choose how deeply AI participates in server sessions."}</p></div><span className="read-only-pill">{aiConfig.interventionMode === "always" ? (language === "zh-CN" ? "全程" : "Always") : aiConfig.interventionMode === "none" ? (language === "zh-CN" ? "关闭" : "Off") : (language === "zh-CN" ? "智能" : "Smart")}</span></div><label className="field-label">{language === "zh-CN" ? "会话模式" : "Session mode"}<select value={aiConfig.interventionMode} onChange={(event) => updateAi("interventionMode", event.target.value as AiInterventionMode)}><option value="smart">{language === "zh-CN" ? "AI 智能介入（推荐）" : "Smart AI intervention (recommended)"}</option><option value="always">{language === "zh-CN" ? "AI 全程介入（推荐本地模型）" : "AI always involved (recommended for local models)"}</option><option value="none">{language === "zh-CN" ? "AI 全程不介入（传统 SSH）" : "AI not involved (classic SSH)"}</option></select></label><p className="settings-note">{aiConfig.interventionMode === "always" ? (language === "zh-CN" ? "命令和自然语言都会先交给 AI 理解。" : "Commands and natural language are both interpreted by AI first.") : aiConfig.interventionMode === "none" ? (language === "zh-CN" ? "所有输入直接作为 Shell 命令执行。" : "All input is sent directly as a Shell command.") : (language === "zh-CN" ? "识别为命令时直接执行，自然语言才调用 AI；模型不可用时自动降级。" : "Commands execute directly, natural language uses AI; unavailable AI falls back automatically.")}</p></section>}
      {view === "settings" && error && <div className="global-error settings-error">{error}</div>}
@@ -1545,7 +1592,7 @@ const systemIconMarkup: Record<string, string> = {
   debian: debianIcon,
   ubuntu: ubuntuIcon,
   openwrt: openwrtIcon,
-  fnos: `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="3" width="18" height="18" rx="5" fill="#2d6df6"/><path fill="#fff" d="M5.6 8.15c.42 1.12 1.14 1.72 2.12 1.72.74 0 1.42-.34 2.28-1.1.86.76 1.54 1.1 2.28 1.1.98 0 1.7-.6 2.12-1.72.25.68.22 1.42-.12 2.05-.35.65-.9 1.08-1.56 1.28v2.08h-1.42v2.46h-2.6v-2.46H7.28v-2.08c-.66-.2-1.21-.63-1.56-1.28-.34-.63-.37-1.37-.12-2.05Zm2.36 3.34v2.07h1.2v-2.07h-1.2Zm4.08 0v2.07h1.2v-2.07h-1.2Z"/></svg>`,
+  fnos: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${fnosImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
   nas: freenasIcon,
   alpine: alpineIcon,
   arch: archIcon,
@@ -1578,9 +1625,112 @@ function getSystemIconKey(profile?: ServerProfile, system?: string) {
   return "linux";
 }
 
+const ICON_CATALOG_RAW_BASE = "https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/public/icons";
+const iconMemoryCache = new Map<string, string | null>();
+const iconRequests = new Map<string, Promise<string | null>>();
+
+function normalizeIconKey(value: string | undefined) {
+  return (value ?? "").trim().toLowerCase().replace(/[_\s]+/g, "-").replace(/[^a-z0-9@.-]/g, "").replace(/-+/g, "-");
+}
+
+function iconVersionKey(value: string | undefined) {
+  const match = (value ?? "").match(/(\d+)(?:\.(\d+))?/);
+  return match ? `${match[1]}${match[2] ? `.${match[2]}` : ""}` : undefined;
+}
+
+function iconCacheKey(directory: "services" | "systems", key: string) {
+  return `opsnest-icon:v1:${directory}:${key}`;
+}
+
+function validSvg(value: string | null) {
+  return Boolean(value && /<svg(?:\s|>)/i.test(value));
+}
+
+function readCachedIcon(directory: "services" | "systems", key: string) {
+  const memoryKey = `${directory}/${key}`;
+  if (iconMemoryCache.has(memoryKey)) return iconMemoryCache.get(memoryKey) ?? null;
+  try {
+    const cached = window.localStorage.getItem(iconCacheKey(directory, key));
+    if (validSvg(cached)) {
+      iconMemoryCache.set(memoryKey, cached);
+      return cached;
+    }
+  } catch {
+    // The cache is optional when the webview storage is unavailable.
+  }
+  return undefined;
+}
+
+async function fetchIconCatalog(directory: "services" | "systems", candidates: string[]) {
+  for (const candidate of candidates) {
+    const key = `${directory}/${candidate}`;
+    const cached = readCachedIcon(directory, candidate);
+    if (cached) return cached;
+    if (iconMemoryCache.has(key)) continue;
+    if (iconRequests.has(key)) {
+      const result = await iconRequests.get(key);
+      if (result) return result;
+      continue;
+    }
+    const request = (async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 2800);
+      try {
+        const response = await fetch(`${ICON_CATALOG_RAW_BASE}/${directory}/${encodeURIComponent(candidate)}.svg`, { signal: controller.signal });
+        if (!response.ok) return null;
+        const svg = await response.text();
+        if (!validSvg(svg)) return null;
+        iconMemoryCache.set(key, svg);
+        try { window.localStorage.setItem(iconCacheKey(directory, candidate), svg); } catch { /* optional cache */ }
+        return svg;
+      } catch {
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+    iconRequests.set(key, request);
+    const result = await request;
+    iconRequests.delete(key);
+    if (result) return result;
+    iconMemoryCache.set(key, null);
+  }
+  return null;
+}
+
+function iconCandidates(key: string, version?: string, aliases: string[] = []) {
+  const normalized = normalizeIconKey(key);
+  const versioned = iconVersionKey(version);
+  return [...new Set([
+    ...(versioned && normalized ? [`${normalized}@${versioned}`] : []),
+    normalized,
+    ...aliases.map(normalizeIconKey),
+  ].filter(Boolean))];
+}
+
+function svgDataUri(svg: string) {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function RemoteIcon({ directory, candidates, fallback, empty = "?", className = "" }: { directory: "services" | "systems"; candidates: string[]; fallback?: string; empty?: string; className?: string }) {
+  const cacheCandidate = candidates.map((candidate) => readCachedIcon(directory, candidate)).find((value): value is string => Boolean(value));
+  const [remoteSvg, setRemoteSvg] = useState<string | null>(cacheCandidate ?? null);
+  useEffect(() => {
+    let cancelled = false;
+    if (cacheCandidate) return () => { cancelled = true; };
+    void fetchIconCatalog(directory, candidates).then((svg) => { if (!cancelled && svg) setRemoteSvg(svg); });
+    return () => { cancelled = true; };
+  }, [directory, candidates.join("|")]);
+  if (remoteSvg) return <img className={className} src={svgDataUri(remoteSvg)} alt="" aria-hidden="true" />;
+  if (fallback) return <span className={className} dangerouslySetInnerHTML={{ __html: fallback }} />;
+  return <span className={className} aria-hidden="true">{empty}</span>;
+}
+
 function SystemIcon({ profile, system }: { profile?: ServerProfile; system?: string }) {
   const iconKey = getSystemIconKey(profile, system);
-  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"} dangerouslySetInnerHTML={{ __html: systemIconMarkup[iconKey] }} />;
+  const aliases = iconKey === "fnos" ? ["feiniu", "fnos"] : iconKey === "nas" ? ["truenas", "freenas"] : [];
+  const candidates = iconCandidates(iconKey, profile?.osVersion ?? profile?.openwrt?.firmware, aliases);
+  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"}><RemoteIcon directory="systems" candidates={candidates} fallback={systemIconMarkup[iconKey]} className="system-icon-image" /></div>;
 }
 
 function ServerContextMenu({ text, editLabel, state, onConnect, onTerminal, onEdit }: { text: typeof zh; editLabel: string; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onEdit: () => void }) {
@@ -1609,13 +1759,25 @@ const serviceIcons: Record<string, string> = {
   java: javaIcon,
 };
 
-function ServiceIcon({ service, serverId, large = false }: { service: Pick<DiscoveredService, "id" | "category"> & Partial<Pick<DiscoveredService, "port" | "web" | "webPath">>; serverId?: string; large?: boolean }) {
+const serviceImageIcons: Record<string, string> = {
+  openlist: openListImage,
+  homebox: homeBoxImage,
+  lucky: luckyImage,
+};
+
+function LegacyServiceIcon({ service, serverId, large = false }: { service: Pick<DiscoveredService, "id" | "category"> & Partial<Pick<DiscoveredService, "name" | "version" | "port" | "web" | "webPath">>; serverId?: string; large?: boolean }) {
   const [editing, setEditing] = useState(false);
   const [editPort, setEditPort] = useState(service.port ? String(service.port) : "");
   const [editPath, setEditPath] = useState(service.webPath ?? "");
   useEffect(() => { setEditPort(service.port ? String(service.port) : ""); setEditPath(service.webPath ?? ""); }, [service.port, service.webPath]);
   const id = service.id.toLowerCase();
-  const icon = Object.entries(serviceIcons).find(([key]) => id === key || id.includes(key))?.[1];
+  const iconKey = Object.keys({ ...serviceIcons, ...serviceImageIcons }).find((key) => id === key || id.includes(key));
+  const imageIcon = iconKey ? serviceImageIcons[iconKey] : undefined;
+  const icon = iconKey && imageIcon
+    ? `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><image href="${imageIcon}" width="200" height="200" preserveAspectRatio="xMidYMid meet"/></svg>`
+    : iconKey ? serviceIcons[iconKey] : undefined;
+  const remoteKey = iconKey ?? normalizeIconKey(service.name ?? service.id);
+  const candidates = iconCandidates(remoteKey, service.version, remoteKey === "openlist" ? ["alist", "open-list"] : []);
   const ownerId = serverId ?? activeServiceServerId;
   const canEdit = Boolean(ownerId && service.category !== "container" && id !== "docker");
   const save = () => {
@@ -1638,7 +1800,42 @@ function ServiceIcon({ service, serverId, large = false }: { service: Pick<Disco
   </span>;
 }
 
-function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onDiscover, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onDiscover: () => void; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function ServiceIcon({ service, serverId, large = false }: { service: Pick<DiscoveredService, "id" | "category"> & Partial<Pick<DiscoveredService, "name" | "version" | "port" | "web" | "webPath">>; serverId?: string; large?: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [editPort, setEditPort] = useState(service.port ? String(service.port) : "");
+  const [editPath, setEditPath] = useState(service.webPath ?? "");
+  useEffect(() => { setEditPort(service.port ? String(service.port) : ""); setEditPath(service.webPath ?? ""); }, [service.port, service.webPath]);
+  const id = service.id.toLowerCase();
+  const iconKey = Object.keys({ ...serviceIcons, ...serviceImageIcons }).find((key) => id === key || id.includes(key));
+  const imageIcon = iconKey ? serviceImageIcons[iconKey] : undefined;
+  const icon = iconKey && imageIcon
+    ? `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><image href="${imageIcon}" width="200" height="200" preserveAspectRatio="xMidYMid meet"/></svg>`
+    : iconKey ? serviceIcons[iconKey] : undefined;
+  const remoteKey = iconKey ?? normalizeIconKey(service.name ?? service.id);
+  const candidates = iconCandidates(remoteKey, service.version, remoteKey === "openlist" ? ["alist", "open-list"] : []);
+  const ownerId = serverId ?? activeServiceServerId;
+  const canEdit = Boolean(ownerId && service.category !== "container" && id !== "docker");
+  const save = () => {
+    const port = Number.parseInt(editPort.trim(), 10);
+    if (!ownerId || !Number.isInteger(port) || port < 1 || port > 65535) return;
+    discoveredServiceUpdateAction?.(ownerId, service.id, port, editPath);
+    setEditing(false);
+  };
+  return <span className={`service-entry-icon service-icon-${service.category} ${large ? "service-entry-icon-large" : ""}`}>
+    <RemoteIcon directory="services" candidates={candidates} fallback={icon} empty={service.category === "panel" ? "▣" : service.category === "database" ? "●" : "✦"} className="service-svg-icon" />
+    {canEdit && <>
+      <button className="service-icon-edit" type="button" title="编辑入口" aria-label="编辑入口" onClick={(event) => { event.stopPropagation(); setEditing((value) => !value); }}>✎</button>
+      {editing && <span className="service-edit-popover" onClick={(event) => event.stopPropagation()}>
+        <strong>编辑入口</strong>
+        <input aria-label="端口" inputMode="numeric" value={editPort} onChange={(event) => setEditPort(event.target.value)} placeholder="端口" />
+        <input aria-label="管理路径" value={editPath} onChange={(event) => setEditPath(event.target.value)} placeholder="管理路径（可选）" />
+        <button type="button" onClick={save}>保存</button>
+      </span>}
+    </>}
+  </span>;
+}
+
+function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
   activeServiceServerId = server.id;
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1653,12 +1850,12 @@ function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onCon
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{zhMode ? "单机详情" : "Server details"}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></header>
     <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>
     <section className="detail-overview-card"><div className="detail-overview-heading"><div><p className="eyebrow">{zhMode ? "运行概览" : "Overview"}</p><h2>{zhMode ? "这台服务器现在怎么样？" : "How is this server doing?"}</h2><span>{zhMode ? "连接后自动读取系统、资源和已发现服务。" : "System resources and detected services are read after connecting."}</span></div><span className={`latency-badge ${getLatencyClass(server.latency)}`}>{formatLatency(server.latency, language)}</span></div><div className="detail-metric-grid"><div><span>{text.system}</span><strong>{profile?.osName ?? server.system}</strong></div><div><span>{text.hostname}</span><strong>{profile?.hostname ?? (zhMode ? "尚未读取" : "Not scanned")}</strong></div><div><span>{text.cpu}</span><strong>{profile?.cpuCores ? `${profile.cpuCores} ${zhMode ? "核" : "cores"}` : "—"}</strong></div><div><span>{text.memory}</span><strong>{profile?.memory ?? "—"}</strong></div><div><span>{text.disk}</span><strong>{profile?.disk ?? "—"}</strong></div><div><span>{text.docker}</span><strong>{profile?.dockerInstalled ? text.installedRunning(profile.dockerContainers) : profile ? text.notInstalled : "—"}</strong></div></div></section>
-    <div className="detail-columns"><section className="detail-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "服务与入口" : "Services and entry points"}</p><h2>{zhMode ? "服务器上有什么" : "What is installed"}</h2></div><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新发现" : "Discover again"}</button></div><div className="service-entry-grid"><article className="service-entry service-entry-active"><div className="service-entry-icon">⌁</div><div className="service-entry-body"><div><h3>SSH</h3><span>{zhMode ? "原生终端会话" : "Native terminal session"}</span></div><b>{connected ? (zhMode ? "可用" : "Available") : (zhMode ? "未连接" : "Offline")}</b></div><button className="service-entry-button" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开" : "Open") : (zhMode ? "连接" : "Connect")}</button></article>{visibleServices.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`service-entry ${service.status === "running" ? "service-entry-active" : ""}`} key={service.id}><ServiceIcon service={service} serverId={server.id} /><div className="service-entry-body"><div><h3>{service.name}</h3><span>{categoryLabel(service.category)} · :{service.port}{service.version ? ` · ${service.version}` : ""}</span></div><b>{statusLabel(service.status)}</b></div><button className="service-entry-button" onClick={() => openServiceUrl(url)}>{zhMode ? "打开管理页" : "Open panel"}</button></article>})}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} />{!visibleServices.length && <div className="service-discovery-empty"><strong>{zhMode ? "尚未发现服务入口" : "No service entry points yet"}</strong><span>{zhMode ? "告诉 AI“把我新装的宝塔面板加入首页”，或点击重新发现。" : "Ask AI to add your new panel to the home page, or run discovery now."}</span><button className="secondary" onClick={onDiscover} disabled={!connected}>{zhMode ? "立即发现" : "Discover now"}</button></div>}</div></section><aside className="detail-side-column"><section className="detail-section quick-panel"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "快捷入口" : "Quick access"}</p><h2>{zhMode ? "常用操作" : "Common actions"}</h2></div></div><button className="quick-action" onClick={onOpen}><span>⌁</span><div><strong>{zhMode ? "打开 SSH 终端" : "Open SSH terminal"}</strong><small>{zhMode ? "进入这台服务器的原生会话" : "Open the native session"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "询问 AI 助手" : "Ask AI assistant"}</strong><small>{zhMode ? "让 AI 了解并分析这台服务器" : "Ask AI to understand and analyze this server"}</small></div></button><button className="quick-action" onClick={onCron}><span>▦</span><div><strong>{zhMode ? "查看定时任务" : "View scheduled tasks"}</strong><small>{zhMode ? "管理服务器上的 Cron" : "Manage server-side Cron"}</small></div></button></section><section className="detail-section detail-note"><p className="eyebrow">{zhMode ? "已保存" : "Saved locally"}</p><strong>{visibleServices.length ? (zhMode ? `已发现 ${visibleServices.length} 个服务入口` : `${visibleServices.length} service entries discovered`) : (zhMode ? "等待发现服务入口" : "Waiting for service discovery")}</strong><p>{server.servicesScannedAt ? new Date(server.servicesScannedAt).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US") : (zhMode ? "连接服务器后即可开始发现。" : "Connect to start discovery.")}</p></section></aside></div>
+    <div className="detail-columns"><section className="detail-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "服务与入口" : "Services and entry points"}</p><h2>{zhMode ? "服务器上有什么" : "What is installed"}</h2></div><div className="detail-heading-actions"><button className="text-button" onClick={onScan} disabled={!connected || isScanning}>{isScanning ? (zhMode ? "扫描中…" : "Scanning…") : (zhMode ? "重新扫描硬件" : "Rescan hardware")}</button><button className="text-button" onClick={onDiscover} disabled={!connected || isDiscovering}>{isDiscovering ? (zhMode ? "发现中…" : "Discovering…") : (zhMode ? "重新发现服务" : "Discover services")}</button></div></div><div className="service-entry-grid"><article className="service-entry service-entry-active"><div className="service-entry-icon">⌁</div><div className="service-entry-body"><div><h3>SSH</h3><span>{zhMode ? "原生终端会话" : "Native terminal session"}</span></div><b>{connected ? (zhMode ? "可用" : "Available") : (zhMode ? "未连接" : "Offline")}</b></div><button className="service-entry-button" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开" : "Open") : (zhMode ? "连接" : "Connect")}</button></article>{visibleServices.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`service-entry ${service.status === "running" ? "service-entry-active" : ""}`} key={service.id}><ServiceIcon service={service} serverId={server.id} /><div className="service-entry-body"><div><h3>{service.name}</h3><span>{categoryLabel(service.category)} · :{service.port}{service.version ? ` · ${service.version}` : ""}</span></div><b>{statusLabel(service.status)}</b></div><button className="service-entry-button" onClick={() => openServiceUrl(url)}>{zhMode ? "打开管理页" : "Open panel"}</button></article>})}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} />{!visibleServices.length && <div className="service-discovery-empty"><strong>{zhMode ? "尚未发现服务入口" : "No service entry points yet"}</strong><span>{zhMode ? "告诉 AI“把我新装的宝塔面板加入首页”，或点击重新发现。" : "Ask AI to add your new panel to the home page, or run discovery now."}</span><button className="secondary" onClick={onDiscover} disabled={!connected || isDiscovering}>{isDiscovering ? (zhMode ? "发现中…" : "Discovering…") : (zhMode ? "立即发现" : "Discover now") }</button></div>}</div></section><aside className="detail-side-column"><section className="detail-section quick-panel"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "快捷入口" : "Quick access"}</p><h2>{zhMode ? "常用操作" : "Common actions"}</h2></div></div><button className="quick-action" onClick={onOpen}><span>⌁</span><div><strong>{zhMode ? "打开 SSH 终端" : "Open SSH terminal"}</strong><small>{zhMode ? "进入这台服务器的原生会话" : "Open the native session"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "询问 AI 助手" : "Ask AI assistant"}</strong><small>{zhMode ? "让 AI 了解并分析这台服务器" : "Ask AI to understand and analyze this server"}</small></div></button><button className="quick-action" onClick={onCron}><span>▦</span><div><strong>{zhMode ? "查看定时任务" : "View scheduled tasks"}</strong><small>{zhMode ? "管理服务器上的 Cron" : "Manage server-side Cron"}</small></div></button></section><section className="detail-section detail-note"><p className="eyebrow">{zhMode ? "已保存" : "Saved locally"}</p><strong>{visibleServices.length ? (zhMode ? `已发现 ${visibleServices.length} 个服务入口` : `${visibleServices.length} service entries discovered`) : (zhMode ? "等待发现服务入口" : "Waiting for service discovery")}</strong><p>{server.servicesScannedAt ? new Date(server.servicesScannedAt).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US") : (zhMode ? "连接服务器后即可开始发现。" : "Connect to start discovery.")}</p></section></aside></div>
   </section>;
 }
 
 function isOpenWrtProfile(profile?: ServerProfile) {
-  const value = (profile?.osId || "") + " " + (profile?.osName || "");
+  const value = `${profile?.osId || ""} ${profile?.osName || ""} ${profile?.hostname || ""}`;
   return /openwrt|istoreos|immortalwrt/i.test(value);
 }
 
@@ -1667,7 +1864,7 @@ function isNasProfile(profile?: ServerProfile, label = "") {
   return profile?.nas?.kind === "fnos" || /fnos|fnnas|feiniu|飞牛|truenas|freenas|synology|qnap|openmediavault/.test(value);
 }
 
-function NasServerView({ server, text, language, onBack, onOpen, onConnect, onDiscover, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onDiscover: () => void; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function NasServerView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
   activeServiceServerId = server.id;
   const zhMode = language === "zh-CN";
   const profile = server.profile ? { ...server.profile } : undefined;
@@ -1679,10 +1876,10 @@ function NasServerView({ server, text, language, onBack, onOpen, onConnect, onDi
   if (profile && dockerInstalled) profile.dockerInstalled = true;
   const displayName = profile?.nas?.kind === "fnos" ? "Feiniu fnOS" : "NAS";
   const statusLabel = (status: string) => status === "running" ? (zhMode ? "运行中" : "Running") : status === "installed" ? (zhMode ? "已安装" : "Installed") : (zhMode ? "已发现" : "Detected");
-  return <section className="server-detail-view nas-detail-view">
+  return <section className="server-detail-view nas-detail-view">{isDiscovering && <div className="discovery-progress-banner">{zhMode ? "正在发现服务…" : "Discovering services…"}</div>}
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{displayName}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></header>
     <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>
-    <section className="nas-overview-card"><div className="nas-overview-heading"><div><p className="eyebrow">{displayName}</p><h2>{zhMode ? "存储与服务" : "Storage and services"}</h2><span>{profile?.nas?.version && profile.nas.version !== "unknown" ? profile.nas.version : (zhMode ? "连接后读取系统与应用服务" : "System and app services read after connection")}</span></div><button className="text-button" onClick={onConnect}>{zhMode ? "重新扫描" : "Rescan"}</button></div><div className="detail-metric-grid"><div><span>{text.system}</span><strong>{profile?.osName ?? server.system}</strong></div><div><span>{text.hostname}</span><strong>{profile?.hostname ?? "—"}</strong></div><div><span>{text.cpu}</span><strong>{profile?.cpuModel || profile?.cpuCores || "—"}</strong></div><div><span>{text.memory}</span><strong>{profile?.memory ?? "—"}</strong></div><div><span>{text.disk}</span><strong>{profile?.disk ?? "—"}</strong></div><div><span>{text.docker}</span><strong>{profile?.dockerInstalled ? text.installedRunning(profile.dockerContainers) : (profile ? text.notInstalled : "—")}</strong></div></div></section>
+    <section className="nas-overview-card"><div className="nas-overview-heading"><div><p className="eyebrow">{displayName}</p><h2>{zhMode ? "存储与服务" : "Storage and services"}</h2><span>{profile?.nas?.version && profile.nas.version !== "unknown" ? profile.nas.version : (zhMode ? "连接后读取系统与应用服务" : "System and app services read after connection")}</span></div><button className="text-button" onClick={onScan} disabled={!connected || isScanning}>{isScanning ? (zhMode ? "扫描中…" : "Scanning…") : (zhMode ? "重新扫描" : "Rescan") }</button></div><div className="detail-metric-grid"><div><span>{text.system}</span><strong>{profile?.osName ?? server.system}</strong></div><div><span>{text.hostname}</span><strong>{profile?.hostname ?? "—"}</strong></div><div><span>{text.cpu}</span><strong>{profile?.cpuModel || profile?.cpuCores || "—"}</strong></div><div><span>{text.memory}</span><strong>{profile?.memory ?? "—"}</strong></div><div><span>{text.disk}</span><strong>{profile?.disk ?? "—"}</strong></div><div><span>{text.docker}</span><strong>{profile?.dockerInstalled ? text.installedRunning(profile.dockerContainers) : (profile ? text.notInstalled : "—")}</strong></div></div></section>
     {profile?.dockerInstalled && <section className="docker-overview-card"><div className="docker-card-heading"><div className="docker-brand"><ServiceIcon service={{ id: "docker", category: "container" }} large /><div><p className="eyebrow">Docker</p><h2>{zhMode ? "容器概览" : "Container overview"}</h2><span>{zhMode ? "NAS 上的容器与端口入口" : "Containers and web entry points on this NAS"}</span></div></div><span className="connected-badge">● {dockerService?.status === "running" ? (zhMode ? "运行中" : "Running") : (zhMode ? "已安装" : "Installed")}</span></div><div className="docker-card-stats"><div><span>{zhMode ? "运行中容器" : "Running containers"}</span><strong>{profile.dockerContainers}</strong></div><div><span>{zhMode ? "Docker 版本" : "Docker version"}</span><strong>{dockerService?.version || "—"}</strong></div><div><span>{zhMode ? "管理方式" : "Management"}</span><strong>SSH</strong></div><div><span>{zhMode ? "数据来源" : "Source"}</span><strong>{zhMode ? "服务器扫描" : "Server scan"}</strong></div></div><DockerContainersPanel server={server} containers={profile.dockerItems ?? []} language={language} /></section>}
     <section className="detail-section nas-services-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "服务入口" : "Service entry points"}</p><h2>{zhMode ? "NAS 应用" : "NAS applications"}</h2><span>{zhMode ? "自动识别管理页面和可访问端口。" : "Management pages and reachable ports discovered automatically."}</span></div><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新发现" : "Discover again"}</button></div>{services.length ? <div className="router-service-grid">{services.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`router-service-card ${service.status === "running" ? "router-service-running" : ""}`} key={service.id}><div className="router-service-card-top"><ServiceIcon service={service} serverId={server.id} large /><span className="router-service-status">● {statusLabel(service.status)}</span></div><h3>{service.name}</h3><p>{service.version || (zhMode ? "NAS 服务" : "NAS service")}</p><small>{zhMode ? "端口" : "Port"} :{service.port}</small><button className="service-entry-button" onClick={() => openServiceUrl(url)}>{zhMode ? "打开管理页" : "Open panel"}</button></article>; })}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} /></div> : <div className="service-discovery-empty"><strong>{zhMode ? "尚未发现应用入口" : "No application entry points yet"}</strong><span>{zhMode ? "点击重新发现，OpsNest 会扫描 fnOS、Docker 和常见管理端口。" : "Run discovery to scan fnOS, Docker and common management ports."}</span><button className="secondary" onClick={onDiscover} disabled={!connected}>{zhMode ? "立即发现" : "Discover now"}</button></div>}</section>
     <div className="router-bottom-grid"><button className="quick-action" onClick={onOpen}><span>⌁</span><div><strong>{zhMode ? "原生 SSH 终端" : "Native SSH terminal"}</strong><small>{zhMode ? "进入 NAS 命令行" : "Open the NAS shell"}</small></div></button><button className="quick-action" onClick={onCron}><span>▦</span><div><strong>{zhMode ? "定时任务" : "Scheduled tasks"}</strong><small>{zhMode ? "管理服务器上的 Cron" : "Manage server-side Cron"}</small></div></button></div>
@@ -1705,13 +1902,13 @@ function OpenWrtRouterViewLegacy({ server, text, language, onBack, onOpen, onCon
   return <section className="server-detail-view router-detail-view">
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{zhMode ? "OpenWrt 路由器" : "OpenWrt router"}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><div className="router-status-group"><span className={"network-badge network-badge-lan " + (router?.lanIp && router.lanIp !== "unknown" ? "network-badge-active" : "")}>● {zhMode ? "内网" : "LAN"}</span><span className={"network-badge network-badge-wan " + (router?.wanIp && router.wanIp !== "unknown" ? "network-badge-active" : "")}>● {zhMode ? "外网" : "WAN"}</span><span className={"connected-badge " + server.status + "-badge"}>● {getServerStatusLabel(server.status, language, text)}</span></div></header>
     <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接路由器" : "Connect router")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onCron}>{zhMode ? "定时任务" : "Scheduled tasks"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑路由器" : "Edit router"}</button></div>
-    <section className="router-overview-card"><div className="router-overview-heading"><div><p className="eyebrow">OpenWrt</p><h2>{displayValue(router?.model, profile?.osName ?? "OpenWrt")}</h2><span>{displayValue(router?.firmware, profile?.osVersion || (zhMode ? "固件信息将在连接后读取" : "Firmware information is read after connection"))}</span></div><div className="router-kernel-pill"><small>{zhMode ? "内核分支" : "Kernel branch"}</small><strong>{displayValue(router?.kernel, profile?.osVersion || "—")}</strong></div></div><div className="router-metric-grid"><div className="router-metric-wan"><span>{zhMode ? "外网 WAN" : "WAN / Internet"}</span><strong>{displayValue(router?.wanIp, "—")}</strong><small>{zhMode ? "当前出口地址" : "Current uplink address"}</small></div><div className="router-metric-lan"><span>{zhMode ? "内网 LAN" : "LAN network"}</span><strong>{displayValue(router?.lanIp, "—")}</strong><small>{zhMode ? "路由器内网地址" : "Router LAN address"}</small></div><div><span>{zhMode ? "内网客户端" : "LAN clients"}</span><strong>{displayValue(router?.lanClients, "0")}</strong><small>{zhMode ? "在线邻居 / DHCP 客户端" : "Reachable and DHCP clients"}</small></div><div><span>{zhMode ? "无线客户端" : "Wi-Fi clients"}</span><strong>{displayValue(router?.wifiClients, "0")}</strong><small>{zhMode ? "无线接口已关联设备" : "Associated wireless stations"}</small></div></div><div className="router-overview-footer"><span>{overviewFooter}</span><button className="text-button" onClick={onConnect}>{zhMode ? "重新扫描" : "Rescan router"}</button></div></section>
+    <section className="router-overview-card"><div className="router-overview-heading"><div><p className="eyebrow">OpenWrt</p><h2>{displayValue(router?.model, profile?.osName ?? "OpenWrt")}</h2><span>{displayValue(router?.firmware, profile?.osVersion || (zhMode ? "固件信息将在连接后读取" : "Firmware information is read after connection"))}</span></div><div className="router-kernel-pill"><small>{zhMode ? "内核分支" : "Kernel branch"}</small><strong>{displayValue(router?.kernel, profile?.osVersion || "—")}</strong></div></div><div className="router-metric-grid"><div className="router-metric-wan"><span>{zhMode ? "外网 WAN" : "WAN / Internet"}</span><strong>{displayValue(router?.wanIp, "—")}</strong><small>{zhMode ? "当前出口地址" : "Current uplink address"}</small></div><div className="router-metric-lan"><span>{zhMode ? "内网 LAN" : "LAN network"}</span><strong>{displayValue(router?.lanIp, "—")}</strong><small>{zhMode ? "路由器内网地址" : "Router LAN address"}</small></div><div><span>{zhMode ? "内网客户端" : "LAN clients"}</span><strong>{displayValue(router?.lanClients, "0")}</strong><small>{zhMode ? "在线邻居 / DHCP 客户端" : "Reachable and DHCP clients"}</small></div><div><span>{zhMode ? "无线客户端" : "Wi-Fi clients"}</span><strong>{displayValue(router?.wifiClients, "0")}</strong><small>{zhMode ? "无线接口已关联设备" : "Associated wireless stations"}</small></div></div><div className="router-overview-footer"><span>{overviewFooter}</span><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新扫描" : "Rescan router"}</button></div></section>
     <section className="detail-section router-services-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "路由器服务" : "Router services"}</p><h2>{zhMode ? "内置服务与管理入口" : "Built-in services and entry points"}</h2><span>{zhMode ? "根据 OpenWrt 的 init 服务和常见组件自动识别。" : "Detected from OpenWrt init services and common components."}</span></div><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新发现" : "Discover again"}</button></div>{services.length ? <div className="router-service-grid">{services.map((service) => { const url = service.web && service.port ? "http://" + server.host + ":" + service.port : ""; return <article className={"router-service-card " + (service.status === "running" ? "router-service-running" : "")} key={service.id}><div className="router-service-card-top"><ServiceIcon service={service} serverId={server.id} large /><span className="router-service-status">● {statusLabel(service.status)}</span></div><h3>{service.name}</h3><p>{service.version || (zhMode ? "OpenWrt 内置组件" : "OpenWrt component")}</p><small>{service.port ? (zhMode ? "端口 :" : "Port :") + service.port : (zhMode ? "系统服务" : "System service")}</small><button className="service-entry-button" onClick={() => url ? window.open(url, "_blank", "noopener,noreferrer") : onOpen()}>{url ? (zhMode ? "打开管理页" : "Open panel") : (zhMode ? "打开终端" : "Open terminal")}</button></article>})}</div> : <div className="service-discovery-empty"><strong>{zhMode ? "尚未读取路由器服务" : "Router services have not been scanned"}</strong><span>{zhMode ? "连接后点击重新发现，OpsNest 会读取 OpenWrt 的内置服务和常见插件。" : "Connect and run discovery to read built-in OpenWrt services and common plugins."}</span><button className="secondary" onClick={onDiscover} disabled={!connected}>{zhMode ? "立即发现" : "Discover now"}</button></div>}</section>
     <div className="router-bottom-grid"><button className="quick-action" onClick={onOpen}><span>〉</span><div><strong>{zhMode ? "原生 SSH 终端" : "Native SSH terminal"}</strong><small>{zhMode ? "进入路由器命令行" : "Open the router shell"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "让 AI 管理路由器" : "Ask AI to manage the router"}</strong><small>{zhMode ? "分析网络和内置服务" : "Analyze network and built-in services"}</small></div></button></div>
   </section>;
 }
 
-function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onDiscover, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onDiscover: () => void; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
   activeServiceServerId = server.id;
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1731,9 +1928,9 @@ function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, 
   const overviewFooter = zhMode ? `系统：${profile?.osName ?? server.system} · CPU：${cpuSummary} · 内存：${profile?.memory ?? "—"} · 磁盘：${profile?.disk ?? "—"}` : `System: ${profile?.osName ?? server.system} · CPU: ${cpuSummary} · Memory: ${profile?.memory ?? "—"} · Disk: ${profile?.disk ?? "—"}`;
   return <section className="server-detail-view router-detail-view">
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{zhMode ? "OpenWrt 路由器" : "OpenWrt router"}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><div className="router-status-group"><span className="network-badge network-badge-lan network-badge-active">● {zhMode ? "内网" : "LAN"}</span><span className="network-badge network-badge-wan network-badge-active">● {zhMode ? "外网" : "WAN"}</span><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></div></header>
-    <section className="router-overview-card"><div className="router-overview-heading"><div><p className="eyebrow">OpenWrt</p><h2>{displayValue(router?.model, profile?.osName ?? "OpenWrt")}</h2><span>{displayValue(router?.firmware, profile?.osVersion || (zhMode ? "固件信息将在连接后读取" : "Firmware information is read after connection"))}</span></div><div className="router-kernel-pill"><small>{zhMode ? "内核分支" : "Kernel branch"}</small><strong>{displayValue(router?.kernel, profile?.osVersion || "—")}</strong></div></div><div className="router-metric-grid"><div className="router-metric-wan"><span>{zhMode ? "外网 WAN" : "WAN / Internet"}</span><strong>{displayValue(router?.wanIp, "—")}</strong><small>{zhMode ? "当前出口地址" : "Current uplink address"}</small></div><div className="router-metric-lan"><span>{zhMode ? "内网 LAN" : "LAN network"}</span><strong>{displayValue(router?.lanIp, "—")}</strong><small>{zhMode ? "路由器内网地址" : "Router LAN address"}</small></div><div><span>{zhMode ? "内网客户端" : "LAN clients"}</span><strong>{displayValue(router?.lanClients, "0")}</strong><small>{zhMode ? "在线邻居 / DHCP 客户端" : "Reachable and DHCP clients"}</small></div><div><span>{zhMode ? "无线客户端" : "Wi-Fi clients"}</span><strong>{displayValue(router?.wifiClients, "0")}</strong><small>{zhMode ? "无线接口已关联设备" : "Associated wireless stations"}</small></div></div><div className="router-overview-footer"><span>{overviewFooter}</span><button className="text-button" onClick={onConnect}>{zhMode ? "重新扫描" : "Rescan router"}</button></div></section>
+    <section className="router-overview-card"><div className="router-overview-heading"><div><p className="eyebrow">OpenWrt</p><h2>{displayValue(router?.model, profile?.osName ?? "OpenWrt")}</h2><span>{displayValue(router?.firmware, profile?.osVersion || (zhMode ? "固件信息将在连接后读取" : "Firmware information is read after connection"))}</span></div><div className="router-kernel-pill"><small>{zhMode ? "内核分支" : "Kernel branch"}</small><strong>{displayValue(router?.kernel, profile?.osVersion || "—")}</strong></div></div><div className="router-metric-grid"><div className="router-metric-wan"><span>{zhMode ? "外网 WAN" : "WAN / Internet"}</span><strong>{displayValue(router?.wanIp, "—")}</strong><small>{zhMode ? "当前出口地址" : "Current uplink address"}</small></div><div className="router-metric-lan"><span>{zhMode ? "内网 LAN" : "LAN network"}</span><strong>{displayValue(router?.lanIp, "—")}</strong><small>{zhMode ? "路由器内网地址" : "Router LAN address"}</small></div><div><span>{zhMode ? "内网客户端" : "LAN clients"}</span><strong>{displayValue(router?.lanClients, "0")}</strong><small>{zhMode ? "在线邻居 / DHCP 客户端" : "Reachable and DHCP clients"}</small></div><div><span>{zhMode ? "无线客户端" : "Wi-Fi clients"}</span><strong>{displayValue(router?.wifiClients, "0")}</strong><small>{zhMode ? "无线接口已关联设备" : "Associated wireless stations"}</small></div></div><div className="router-overview-footer"><span>{overviewFooter}</span><button className="text-button" onClick={onScan} disabled={!connected || isScanning}>{isScanning ? (zhMode ? "扫描中…" : "Scanning…") : (zhMode ? "重新扫描" : "Rescan router")}</button></div></section>
     {dockerInstalled && <section className="docker-overview-card"><div className="docker-card-heading"><div className="docker-brand"><ServiceIcon service={{ id: "docker", category: "container" }} large /><div><p className="eyebrow">Docker</p><h2>{zhMode ? "容器运行概览" : "Container overview"}</h2><span>{zhMode ? "查看 Docker 安装状态、版本和正在运行的容器。" : "Docker status, version and running containers."}</span></div></div><span className="connected-badge connected-badge">● {dockerService?.status === "running" ? (zhMode ? "运行中" : "Running") : (zhMode ? "已安装" : "Installed")}</span></div><div className="docker-card-stats"><div><span>{zhMode ? "运行中容器" : "Running containers"}</span><strong>{profile?.dockerContainers ?? "—"}</strong></div><div><span>{zhMode ? "Docker 版本" : "Docker version"}</span><strong>{dockerService?.version || (zhMode ? "已安装" : "Installed")}</strong></div><div><span>{zhMode ? "管理方式" : "Management"}</span><strong>SSH</strong></div><div><span>{zhMode ? "数据来源" : "Source"}</span><strong>{zhMode ? "服务器扫描" : "Server scan"}</strong></div></div><DockerContainersPanel server={server} containers={profile?.dockerItems ?? []} language={language} /></section>}
-    <section className="detail-section router-services-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "路由器服务" : "Router services"}</p><h2>{zhMode ? "内置服务与管理入口" : "Built-in services and entry points"}</h2></div><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新发现" : "Discover again"}</button></div>{visibleServices.length ? <div className="router-service-grid">{visibleServices.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`router-service-card ${service.status === "running" ? "router-service-running" : ""}`} key={service.id}><div className="router-service-card-top"><ServiceIcon service={service} serverId={server.id} large /><span className="router-service-status">● {statusLabel(service.status)}</span></div><h3>{service.name}</h3><p>{service.version || (zhMode ? "OpenWrt 内置组件" : "OpenWrt component")}</p><small>{service.port ? `${zhMode ? "端口" : "Port"} :${service.port}` : (zhMode ? "系统服务" : "System service")}</small><button className="service-entry-button" onClick={() => openServiceUrl(url)}>{zhMode ? "打开管理页" : "Open panel"}</button></article>; })}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} /></div> : <><div className="service-discovery-empty"><strong>{zhMode ? "尚未读取路由器服务" : "Router services have not been scanned"}</strong><span>{zhMode ? "连接后点击重新发现，OpsNest 会读取 OpenWrt 的内置服务和常见插件。" : "Connect and run discovery to read built-in OpenWrt services and common plugins."}</span><button className="secondary" onClick={onDiscover} disabled={!connected}>{zhMode ? "立即发现" : "Discover now"}</button></div><CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} /></>}</section>
+    <section className="detail-section router-services-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "路由器服务" : "Router services"}</p><h2>{zhMode ? "内置服务与管理入口" : "Built-in services and entry points"}</h2></div><button className="text-button" onClick={onDiscover} disabled={!connected || isDiscovering}>{isDiscovering ? (zhMode ? "发现中…" : "Discovering…") : (zhMode ? "重新发现" : "Discover again")}</button></div>{visibleServices.length ? <div className="router-service-grid">{visibleServices.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`router-service-card ${service.status === "running" ? "router-service-running" : ""}`} key={service.id}><div className="router-service-card-top"><ServiceIcon service={service} serverId={server.id} large /><span className="router-service-status">● {statusLabel(service.status)}</span></div><h3>{service.name}</h3><p>{service.version || (zhMode ? "OpenWrt 内置组件" : "OpenWrt component")}</p><small>{service.port ? `${zhMode ? "端口" : "Port"} :${service.port}` : (zhMode ? "系统服务" : "System service")}</small><button className="service-entry-button" onClick={() => openServiceUrl(url)}>{zhMode ? "打开管理页" : "Open panel"}</button></article>; })}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} /></div> : <><div className="service-discovery-empty"><strong>{zhMode ? "尚未读取路由器服务" : "Router services have not been scanned"}</strong><span>{zhMode ? "连接后点击重新发现，OpsNest 会读取 OpenWrt 的内置服务和常见插件。" : "Connect and run discovery to read built-in OpenWrt services and common plugins."}</span><button className="secondary" onClick={onDiscover} disabled={!connected || isDiscovering}>{isDiscovering ? (zhMode ? "发现中…" : "Discovering…") : (zhMode ? "立即发现" : "Discover now")}</button></div><CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} /></>}</section>
     <div className="router-bottom-grid"><button className="quick-action" onClick={onOpen}><span>〉</span><div><strong>{zhMode ? "原生 SSH 终端" : "Native SSH terminal"}</strong><small>{zhMode ? "进入路由器命令行" : "Open the router shell"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "让 AI 管理路由器" : "Ask AI to manage the router"}</strong><small>{zhMode ? "分析网络和内置服务" : "Analyze network and built-in services"}</small></div></button></div>
   </section>;
 }
@@ -2088,6 +2285,23 @@ function isPlaceholderHostname(value: string | undefined) {
   return !normalized || ["unknown", "unknown hostname", "未知", "未知主机"].includes(normalized);
 }
 
+function isUnknownProfileValue(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return !normalized || ["unknown", "未知", "未知主机", "unknown hostname", "unavailable", "—", "-"].includes(normalized);
+}
+
+function hasUsefulServerProfile(profile?: ServerProfile) {
+  if (!profile) return false;
+  const osName = profile.osName.trim().toLowerCase();
+  const osVersion = profile.osVersion?.trim().toLowerCase() ?? "";
+  const hasResources = [profile.cpuCores, profile.cpuModel, profile.memory, profile.disk]
+    .some((value) => !isUnknownProfileValue(value));
+  const hasContainerData = profile.dockerInstalled || Boolean(profile.dockerItems?.length);
+  const hasSpecificIdentity = Boolean(osVersion && !isUnknownProfileValue(osVersion))
+    || (osName !== "linux" && !isUnknownProfileValue(osName));
+  return hasResources || hasContainerData || hasSpecificIdentity;
+}
+
 function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): ServerProfile {
   const systemIdentity = `${profile.osId ?? ""} ${profile.osName ?? ""}`.toLowerCase();
   const isOpenWrt = /openwrt|istoreos|immortalwrt/.test(systemIdentity);
@@ -2124,11 +2338,25 @@ function getServiceUrl(host: string, service: DiscoveredService) {
   if (!service.web || !service.port) return "";
   const path = service.webPath?.trim() ?? "";
   const normalizedPath = path ? (path.startsWith("/") ? path : `/${path}`) : "";
-  return `http://${host}:${service.port}${normalizedPath}`;
+  const scheme = service.webScheme ?? "http";
+  return `${scheme}://${host}:${service.port}${normalizedPath}`;
 }
 
 function openServiceUrl(url: string) {
-  void invoke("open_external_url", { url }).catch(() => window.open(url, "_blank", "noopener,noreferrer"));
+  const fallback = () => void invoke("open_external_url", { url }).catch(() => window.open(url, "_blank", "noopener,noreferrer"));
+  try {
+    const parsed = new URL(url);
+    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+    if (!parsed.hostname || !Number.isInteger(port) || port < 1 || port > 65535) return fallback();
+    void invoke<string>("resolve_service_url", { host: parsed.hostname, port, preferredScheme: null })
+      .then((baseUrl) => {
+        const suffix = `${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}${parsed.hash}`;
+        return invoke("open_external_url", { url: `${baseUrl.replace(/\/$/, "")}${suffix}` });
+      })
+      .catch(fallback);
+  } catch {
+    fallback();
+  }
 }
 
 function CustomServiceShortcutCard({ serverId, service, language, onDelete }: { serverId: string; service: DiscoveredService; language: Locale; onDelete?: (serverId: string, serviceId: string) => void }) {
