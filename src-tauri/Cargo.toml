@@ -1,6 +1,6 @@
 [package]
 name = "opsnest"
-version = "0.1.0-alpha.9"
+version = "0.1.1-alpha.1"
 description = "Local-first AI server manager"
 authors = ["OpsNest contributors"]
 edition = "2021"

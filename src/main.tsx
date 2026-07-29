@@ -4,41 +4,41 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import debianIcon from "simple-icons/icons/debian.svg?raw";
-import ubuntuIcon from "simple-icons/icons/ubuntu.svg?raw";
-import openwrtIcon from "simple-icons/icons/openwrt.svg?raw";
-import alpineIcon from "simple-icons/icons/alpinelinux.svg?raw";
-import archIcon from "simple-icons/icons/archlinux.svg?raw";
-import fedoraIcon from "simple-icons/icons/fedora.svg?raw";
-import centosIcon from "simple-icons/icons/centos.svg?raw";
-import rockyIcon from "simple-icons/icons/rockylinux.svg?raw";
-import almaIcon from "simple-icons/icons/almalinux.svg?raw";
-import nixosIcon from "simple-icons/icons/nixos.svg?raw";
-import kaliIcon from "simple-icons/icons/kalilinux.svg?raw";
-import gentooIcon from "simple-icons/icons/gentoo.svg?raw";
-import linuxIcon from "simple-icons/icons/linux.svg?raw";
-import freenasIcon from "simple-icons/icons/freenas.svg?raw";
-import dockerIcon from "simple-icons/icons/docker.svg?raw";
-import nginxIcon from "simple-icons/icons/nginx.svg?raw";
-import apacheIcon from "simple-icons/icons/apache.svg?raw";
-import caddyIcon from "simple-icons/icons/caddy.svg?raw";
-import grafanaIcon from "simple-icons/icons/grafana.svg?raw";
-import portainerIcon from "simple-icons/icons/portainer.svg?raw";
-import onePanelIcon from "simple-icons/icons/1panel.svg?raw";
-import alistIcon from "simple-icons/icons/alist.svg?raw";
-import openListImage from "./assets/openlist.png";
-import homeBoxImage from "./assets/homebox.png";
-import luckyImage from "./assets/lucky.png";
-import fnosImage from "./assets/fnos.png";
-import mysqlIcon from "simple-icons/icons/mysql.svg?raw";
-import mariadbIcon from "simple-icons/icons/mariadb.svg?raw";
-import postgresqlIcon from "simple-icons/icons/postgresql.svg?raw";
-import redisIcon from "simple-icons/icons/redis.svg?raw";
-import mongodbIcon from "simple-icons/icons/mongodb.svg?raw";
-import phpIcon from "simple-icons/icons/php.svg?raw";
-import nodeIcon from "simple-icons/icons/nodedotjs.svg?raw";
-import pythonIcon from "simple-icons/icons/python.svg?raw";
-import javaIcon from "simple-icons/icons/openjdk.svg?raw";
+import debianIcon from "../icons/packed/systems/debian.svg?raw";
+import ubuntuIcon from "../icons/packed/systems/ubuntu.svg?raw";
+import openwrtIcon from "../icons/packed/systems/openwrt.svg?raw";
+import alpineIcon from "../icons/packed/systems/alpine.svg?raw";
+import archIcon from "../icons/packed/systems/arch.svg?raw";
+import fedoraIcon from "../icons/packed/systems/fedora.svg?raw";
+import centosIcon from "../icons/packed/systems/centos.svg?raw";
+import rockyIcon from "../icons/packed/systems/rocky.svg?raw";
+import almaIcon from "../icons/packed/systems/alma.svg?raw";
+import nixosIcon from "../icons/packed/systems/nixos.svg?raw";
+import kaliIcon from "../icons/packed/systems/kali.svg?raw";
+import gentooIcon from "../icons/packed/systems/gentoo.svg?raw";
+import linuxIcon from "../icons/packed/systems/linux.svg?raw";
+import freenasIcon from "../icons/packed/systems/freenas.svg?raw";
+import dockerIcon from "../icons/packed/services/docker.svg?raw";
+import nginxIcon from "../icons/packed/services/nginx.svg?raw";
+import apacheIcon from "../icons/packed/services/apache.svg?raw";
+import caddyIcon from "../icons/packed/services/caddy.svg?raw";
+import grafanaIcon from "../icons/packed/services/grafana.svg?raw";
+import portainerIcon from "../icons/packed/services/portainer.svg?raw";
+import onePanelIcon from "../icons/packed/services/1panel.svg?raw";
+import alistIcon from "../icons/packed/services/alist.svg?raw";
+import openListImage from "../icons/packed/services/openlist.png";
+import homeBoxImage from "../icons/packed/services/homebox.png";
+import luckyImage from "../icons/packed/services/lucky.png";
+import fnosImage from "../icons/packed/systems/fnos.png";
+import mysqlIcon from "../icons/packed/services/mysql.svg?raw";
+import mariadbIcon from "../icons/packed/services/mariadb.svg?raw";
+import postgresqlIcon from "../icons/packed/services/postgresql.svg?raw";
+import redisIcon from "../icons/packed/services/redis.svg?raw";
+import mongodbIcon from "../icons/packed/services/mongodb.svg?raw";
+import phpIcon from "../icons/packed/services/php.svg?raw";
+import nodeIcon from "../icons/packed/services/node.svg?raw";
+import pythonIcon from "../icons/packed/services/python.svg?raw";
+import javaIcon from "../icons/packed/services/java.svg?raw";
 import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 import "./manager.css";
@@ -86,7 +86,7 @@ const STORAGE_KEY = "opsnest.servers";
 const AI_STORAGE_KEY = "opsnest.ai-model";
 const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
 const LANGUAGE_STORAGE_KEY = "opsnest.language";
-const APP_VERSION = "0.1.0-alpha.9";
+const APP_VERSION = "0.1.1-alpha.1";
 let customServiceRegistry: Record<string, DiscoveredService[]> = {};
 let customServiceServerRegistry: Record<string, Server> = {};
 let customServiceDeleteAction: ((serverId: string, serviceId: string) => void) | undefined;
@@ -1625,7 +1625,7 @@ function getSystemIconKey(profile?: ServerProfile, system?: string) {
   return "linux";
 }
 
-const ICON_CATALOG_RAW_BASE = "https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/public/icons";
+const ICON_CATALOG_RAW_BASE = "https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons";
 const iconMemoryCache = new Map<string, string | null>();
 const iconRequests = new Map<string, Promise<string | null>>();
 
@@ -1639,11 +1639,15 @@ function iconVersionKey(value: string | undefined) {
 }
 
 function iconCacheKey(directory: "services" | "systems", key: string) {
-  return `opsnest-icon:v1:${directory}:${key}`;
+  return `opsnest-icon:v2:${directory}:${key}`;
 }
 
 function validSvg(value: string | null) {
   return Boolean(value && /<svg(?:\s|>)/i.test(value));
+}
+
+function validIcon(value: string | null) {
+  return Boolean(value && (validSvg(value) || value.startsWith("data:image/")));
 }
 
 function readCachedIcon(directory: "services" | "systems", key: string) {
@@ -1651,7 +1655,7 @@ function readCachedIcon(directory: "services" | "systems", key: string) {
   if (iconMemoryCache.has(memoryKey)) return iconMemoryCache.get(memoryKey) ?? null;
   try {
     const cached = window.localStorage.getItem(iconCacheKey(directory, key));
-    if (validSvg(cached)) {
+    if (validIcon(cached)) {
       iconMemoryCache.set(memoryKey, cached);
       return cached;
     }
@@ -1659,6 +1663,19 @@ function readCachedIcon(directory: "services" | "systems", key: string) {
     // The cache is optional when the webview storage is unavailable.
   }
   return undefined;
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function iconDataUri(value: string, type: "svg" | "png") {
+  return type === "svg" ? svgDataUri(value) : `data:image/png;base64,${value}`;
 }
 
 async function fetchIconCatalog(directory: "services" | "systems", candidates: string[]) {
@@ -1673,21 +1690,38 @@ async function fetchIconCatalog(directory: "services" | "systems", candidates: s
       continue;
     }
     const request = (async () => {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 2800);
-      try {
-        const response = await fetch(`${ICON_CATALOG_RAW_BASE}/${directory}/${encodeURIComponent(candidate)}.svg`, { signal: controller.signal });
-        if (!response.ok) return null;
-        const svg = await response.text();
-        if (!validSvg(svg)) return null;
-        iconMemoryCache.set(key, svg);
-        try { window.localStorage.setItem(iconCacheKey(directory, candidate), svg); } catch { /* optional cache */ }
-        return svg;
-      } catch {
-        return null;
-      } finally {
-        window.clearTimeout(timeout);
+      const readRemoteFile = async (remote: { file: string; type: "svg" | "png" }) => {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 2800);
+        try {
+          const response = await fetch(`${ICON_CATALOG_RAW_BASE}/${remote.file.split("/").map(encodeURIComponent).join("/")}`, { signal: controller.signal });
+          if (!response.ok) return null;
+          const icon = remote.type === "svg"
+            ? await response.text()
+            : bytesToBase64(new Uint8Array(await response.arrayBuffer()));
+          const value = remote.type === "svg" ? icon : iconDataUri(icon, "png");
+          if (!validIcon(value)) return null;
+          iconMemoryCache.set(key, value);
+          try { window.localStorage.setItem(iconCacheKey(directory, candidate), value); } catch { /* optional cache */ }
+          return value;
+        } catch {
+          return null;
+        } finally {
+          window.clearTimeout(timeout);
+        }
+      };
+
+      // A new service works as soon as its normalized ID is uploaded.
+      const directFiles = [
+        { file: `${directory}/${candidate}.svg`, type: "svg" as const },
+        { file: `${directory}/${candidate}.png`, type: "png" as const },
+      ];
+      for (const remote of directFiles) {
+        const value = await readRemoteFile(remote);
+        if (value) return value;
       }
+
+      return null;
     })();
     iconRequests.set(key, request);
     const result = await request;
@@ -1712,16 +1746,18 @@ function svgDataUri(svg: string) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-function RemoteIcon({ directory, candidates, fallback, empty = "?", className = "" }: { directory: "services" | "systems"; candidates: string[]; fallback?: string; empty?: string; className?: string }) {
-  const cacheCandidate = candidates.map((candidate) => readCachedIcon(directory, candidate)).find((value): value is string => Boolean(value));
+function RemoteIcon({ directory, candidates, fallback, preferFallback = false, empty = "?", className = "" }: { directory: "services" | "systems"; candidates: string[]; fallback?: string; preferFallback?: boolean; empty?: string; className?: string }) {
+  const useBundled = preferFallback && Boolean(fallback);
+  const cacheCandidate = useBundled ? null : candidates.map((candidate) => readCachedIcon(directory, candidate)).find((value): value is string => Boolean(value));
   const [remoteSvg, setRemoteSvg] = useState<string | null>(cacheCandidate ?? null);
   useEffect(() => {
     let cancelled = false;
-    if (cacheCandidate) return () => { cancelled = true; };
+    if (useBundled || cacheCandidate) return () => { cancelled = true; };
     void fetchIconCatalog(directory, candidates).then((svg) => { if (!cancelled && svg) setRemoteSvg(svg); });
     return () => { cancelled = true; };
-  }, [directory, candidates.join("|")]);
-  if (remoteSvg) return <img className={className} src={svgDataUri(remoteSvg)} alt="" aria-hidden="true" />;
+  }, [directory, candidates.join("|"), useBundled, cacheCandidate]);
+  if (useBundled && fallback) return <span className={className} dangerouslySetInnerHTML={{ __html: fallback }} />;
+  if (remoteSvg) return <img className={className} src={remoteSvg.startsWith("data:image/") ? remoteSvg : svgDataUri(remoteSvg)} alt="" aria-hidden="true" />;
   if (fallback) return <span className={className} dangerouslySetInnerHTML={{ __html: fallback }} />;
   return <span className={className} aria-hidden="true">{empty}</span>;
 }
@@ -1730,7 +1766,7 @@ function SystemIcon({ profile, system }: { profile?: ServerProfile; system?: str
   const iconKey = getSystemIconKey(profile, system);
   const aliases = iconKey === "fnos" ? ["feiniu", "fnos"] : iconKey === "nas" ? ["truenas", "freenas"] : [];
   const candidates = iconCandidates(iconKey, profile?.osVersion ?? profile?.openwrt?.firmware, aliases);
-  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"}><RemoteIcon directory="systems" candidates={candidates} fallback={systemIconMarkup[iconKey]} className="system-icon-image" /></div>;
+  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"}><RemoteIcon directory="systems" candidates={candidates} fallback={systemIconMarkup[iconKey]} preferFallback className="system-icon-image" /></div>;
 }
 
 function ServerContextMenu({ text, editLabel, state, onConnect, onTerminal, onEdit }: { text: typeof zh; editLabel: string; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onEdit: () => void }) {
@@ -1822,7 +1858,7 @@ function ServiceIcon({ service, serverId, large = false }: { service: Pick<Disco
     setEditing(false);
   };
   return <span className={`service-entry-icon service-icon-${service.category} ${large ? "service-entry-icon-large" : ""}`}>
-    <RemoteIcon directory="services" candidates={candidates} fallback={icon} empty={service.category === "panel" ? "▣" : service.category === "database" ? "●" : "✦"} className="service-svg-icon" />
+    <RemoteIcon directory="services" candidates={candidates} fallback={icon} preferFallback={Boolean(icon)} empty={service.category === "panel" ? "▣" : service.category === "database" ? "●" : "✦"} className="service-svg-icon" />
     {canEdit && <>
       <button className="service-icon-edit" type="button" title="编辑入口" aria-label="编辑入口" onClick={(event) => { event.stopPropagation(); setEditing((value) => !value); }}>✎</button>
       {editing && <span className="service-edit-popover" onClick={(event) => event.stopPropagation()}>
