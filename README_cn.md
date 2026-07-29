@@ -16,7 +16,7 @@
 
 ## 当前状态
 
-当前版本：`0.1.1-alpha.1`
+当前版本：`0.1.1-alpha.2`
 
 OpsNest 仍处于 Alpha 阶段，适合真实环境测试、反馈和共同开发。当前主要验证目标是 Windows x64 客户端，以及 Debian、Ubuntu、OpenWrt/iStoreOS 和 NAS 类 Linux 环境。它不是生产环境堡垒机，也不承诺覆盖所有发行版、包管理器和厂商系统。
 

@@ -60,7 +60,9 @@ type CronTask = { id: string; name: string; source: string; user: string; schedu
 type CronForm = { id: string; name: string; schedule: string; command: string; enabled: boolean };
 type AgentStepId = "context" | "memory" | "search" | "explore" | "diagnose" | "plan" | "approval" | "execute" | "verify" | "remember";
 type AgentStep = { id: AgentStepId; label: string; status: "pending" | "running" | "completed" | "failed" | "blocked"; detail?: string };
-type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; result?: string; error?: string; attempt?: number };
+type AgentToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+type AgentToolSession = { messages: Array<Record<string, unknown>>; toolCall: AgentToolCall };
+type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; toolSession?: AgentToolSession; result?: string; error?: string; attempt?: number };
 type ServerMemory = { id: string; createdAt: string; summary: string };
 type WebSearchResult = { title: string; url: string; snippet: string };
 type ActivityLog = { id: string; timestamp: string; type: "manager" | "terminal" | "agent" | "system"; role?: ManagerMessage["role"]; serverId?: string; serverName?: string; title: string; content: string; status?: "success" | "failed" | "cancelled" | "info" };
@@ -191,7 +193,7 @@ function App() {
           invoke<PersistedData>("load_local_data"),
           invoke<RuntimeLog[]>("load_runtime_logs"),
           invoke<ConversationLog[]>("load_conversation_logs"),
-          invoke<string | null>("load_ai_credential"),
+          invoke<string | null>("load_ai_credential").catch(() => null),
         ]);
         const legacyServers = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as Server[];
         const legacyAi = JSON.parse(localStorage.getItem(AI_STORAGE_KEY) ?? "null") as Partial<AiConfig> | null;
@@ -681,8 +683,9 @@ function App() {
       }).join("\n");
       const searchContext = webResults.length ? webResults.map((item) => `${item.title}: ${item.url}\n${item.snippet}`).join("\n") : "No web references.";
       const conversationContext = managerMessages.slice(-80).map((message) => `${message.role}: ${message.text}`).join("\n") || "No previous manager conversation.";
-      const plan = await askAgentPlan(aiConfig, task, language, refreshedContext, memory, searchContext, diagnosisContext, conversationContext);
-      patchAgentRun({ plan, phase: "waiting_approval", steps: run.steps.map((step) => {
+      const planned = await askAgentPlanWithTools(aiConfig, task, language, refreshedContext, memory, searchContext, diagnosisContext, conversationContext);
+      const plan = planned.plan;
+      patchAgentRun({ plan, toolSession: planned.toolSession, phase: "waiting_approval", steps: run.steps.map((step) => {
         if (step.id === "context") return { ...step, status: "completed", detail: `${targetServers.length} target${targetServers.length === 1 ? "" : "s"} locked.` };
         if (step.id === "memory") return { ...step, status: "completed", detail: memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded." };
         if (step.id === "search") return { ...step, status: "completed", detail: needsSearch ? `${webResults.length} reference result${webResults.length === 1 ? "" : "s"} found.` : "Skipped." };
@@ -742,14 +745,38 @@ function App() {
         }
       }
       patchAgentStep("verify", "completed", current.plan.verifyCommand ? "Verification command completed." : "No dedicated verification command was supplied.");
+      let managerResult = [...outputs, ...verification].join("\n\n");
+      if (current.toolSession) {
+        const decision = await continueAgentWithToolResult(aiConfig, current.toolSession, outputs.join("\n\n"), verification.join("\n\n"), language);
+        if (decision.next) {
+          const nextRun: AgentRun = {
+            ...current,
+            plan: decision.next.plan,
+            toolSession: decision.next.toolSession,
+            phase: "waiting_approval",
+            attempt: (current.attempt ?? 0) + 1,
+            steps: current.steps.map((step) => {
+              if (step.id === "plan") return { ...step, status: "completed", detail: decision.next!.plan.explanation };
+              if (step.id === "approval") return { ...step, status: "running", detail: "Agent requested another command after reading the result." };
+              if (step.id === "execute" || step.id === "verify" || step.id === "remember") return { ...step, status: "pending", detail: undefined };
+              return step;
+            }),
+          };
+          setAgentRun(nextRun);
+          setManagerMessages((messages) => [...messages, { role: "assistant", text: `${decision.next!.plan.explanation}\n\n$ ${decision.next!.plan.command}` }]);
+          setManagerThinking(false);
+          return;
+        }
+        managerResult = decision.final ?? managerResult;
+      }
       patchAgentStep("remember", "running", "Saving a concise result note for the next run.");
       const completedAt = new Date().toISOString();
       const nextServers = servers.map((item) => current.targetIds.includes(item.id) ? { ...item, memory: [...(item.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${current.task}: ${current.plan?.explanation ?? "task completed"}. Execution finished and verification was attempted.` }].slice(-20) } : item);
       persistServers(nextServers);
       patchAgentStep("remember", "completed", "Result summary saved locally.");
-      patchAgentRun({ phase: "completed", result: [...outputs, ...verification].join("\n\n") });
-      setManagerMessages((messages) => [...messages, { role: "assistant", text: `任务已完成。\n\n${[...outputs, ...verification].join("\n\n")}` }]);
-      appendLog({ type: "agent", title: "AgentRun completed", content: `${current.task}\n\n${[...outputs, ...verification].join("\n\n")}`, status: "success" });
+      patchAgentRun({ phase: "completed", result: managerResult });
+      setManagerMessages((messages) => [...messages, { role: "assistant", text: managerResult }]);
+      appendLog({ type: "agent", title: "AgentRun completed", content: `${current.task}\n\n${managerResult}`, status: "success" });
     } catch (agentError) {
       const message = agentError instanceof Error ? agentError.message : String(agentError);
       patchAgentRun({ phase: "failed", error: message });
@@ -1101,7 +1128,41 @@ function App() {
       }
       patchTerminalAgentStep("verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在总结结果…" : "AI is summarizing the result…");
-      const summary = await summarizeAgentResult(aiConfig, run.task, run.plan.command, outputText, verification, language);
+      let summary: string;
+      if (run.toolSession) {
+        const decision = await continueAgentWithToolResult(aiConfig, run.toolSession, outputText, verification, language);
+        if (decision.next) {
+          const nextRun: AgentRun = {
+            ...run,
+            plan: decision.next.plan,
+            toolSession: decision.next.toolSession,
+            phase: "waiting_approval",
+            attempt: (run.attempt ?? 0) + 1,
+            steps: run.steps.map((step) => {
+              if (step.id === "plan") return { ...step, status: "completed", detail: decision.next!.plan.explanation };
+              if (step.id === "approval") return { ...step, status: "running", detail: "Agent requested another command after reading the result." };
+              if (step.id === "execute") return { ...step, status: "pending", detail: "Next command ready." };
+              if (step.id === "verify" || step.id === "remember") return { ...step, status: "pending", detail: undefined };
+              return step;
+            }),
+          };
+          setTerminalAgentRun(nextRun);
+          setTerminalLines((lines) => [...lines, { kind: "ai", text: decision.next!.plan.explanation }, { kind: "command", text: decision.next!.plan.command }]);
+          appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `${decision.next.plan.explanation}\n\n$ ${decision.next.plan.command}` });
+          handedOff = true;
+          if (isReadOnlyPlan(decision.next.plan.command, decision.next.plan.risk)) {
+            setTerminalAgentStatus(language === "zh-CN" ? "AI 正在继续读取结果..." : "AI is continuing with the next read-only command...");
+            await executeTerminalAgentRun({ ...nextRun, phase: "executing", steps: nextRun.steps.map((step) => step.id === "approval" ? { ...step, status: "completed", detail: "Next read-only command auto-approved." } : step) });
+          } else {
+            setExecuting(false);
+            setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待下一步批准..." : "AI is waiting for approval for the next command...");
+          }
+          return;
+        }
+        summary = decision.final ?? "Agent completed the task.";
+      } else {
+        summary = await summarizeAgentResult(aiConfig, run.task, run.plan.command, outputText, verification, language);
+      }
       setTerminalLines((lines) => [...lines, { kind: "ai", text: summary }]);
       appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AI 总结：${summary}` });
       patchTerminalAgentStep("remember", "running", "Saving a concise result note locally.");
@@ -1191,8 +1252,9 @@ function App() {
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在思考下一步命令…" : "AI is thinking about the next command…");
       patchTerminalAgentStep("plan", "running", "Asking the model for a structured plan using the evidence above.");
       const conversationContext = conversationLogsRef.current.filter((item) => item.scope === "terminal" && item.serverId === target.id).slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous terminal conversation for this server.";
-      const plan = await askAgentPlan(aiConfig, task, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${refreshedContext}`, memory, searchContext, diagnosisContext, conversationContext);
-      const plannedRun: AgentRun = { ...run, plan, phase: "waiting_approval", steps: run.steps.map((step) => {
+       const planned = await askAgentPlanWithTools(aiConfig, task, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${refreshedContext}`, memory, searchContext, diagnosisContext, conversationContext);
+       const plan = planned.plan;
+       const plannedRun: AgentRun = { ...run, plan, toolSession: planned.toolSession, phase: "waiting_approval", steps: run.steps.map((step) => {
         if (step.id === "context") return { ...step, status: "completed", detail: "Current server locked." };
         if (step.id === "memory") return { ...step, status: "completed", detail: memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded." };
         if (step.id === "search") return { ...step, status: "completed", detail: needsSearch ? `${webResults.length} reference result${webResults.length === 1 ? "" : "s"} found.` : "Skipped." };
@@ -2197,6 +2259,36 @@ function TerminalPanel({ server, request, text, language, interventionMode, line
     observer.observe(host);
     resize();
 
+    const pasteClipboard = async () => {
+      try {
+        const pasted = await navigator.clipboard.readText();
+        if (!pasted) return;
+        if (modeRef.current === "none" || interactiveCommandRef.current) {
+          await invoke("write_ssh_terminal", { sessionId: server.id, data: pasted });
+          return;
+        }
+        const normalized = pasted.replace(/\r\n/g, "\n");
+        inputBufferRef.current += normalized;
+        terminal.write(normalized.replace(/\n/g, "\r\n"));
+        onInputChange(inputBufferRef.current);
+      } catch (error) {
+        terminal.write(`\r\n[Clipboard paste failed] ${String(error)}\r\n`);
+        terminal.focus();
+      }
+    };
+    terminal.attachCustomKeyEventHandler((event) => {
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === "v") {
+        void pasteClipboard();
+        return false;
+      }
+      if (event.shiftKey && event.key === "Insert") {
+        void pasteClipboard();
+        return false;
+      }
+      return true;
+    });
+
     const dataDisposable = terminal.onData((data) => {
       // Ctrl+C copies an active xterm selection. Only pass it to the remote
       // shell when there is no selection to copy.
@@ -2651,6 +2743,135 @@ async function askShellCommand(config: AiConfig, prompt: string, language: Local
   const command = typeof parsed.command === "string" ? parsed.command.trim() : fenced?.split(/\r?\n/).filter((line) => !line.trim().startsWith("#")).join("\n").trim() ?? "";
   if (!command) throw new Error(language === "zh-CN" ? "AI 没有返回可执行命令。" : "The AI did not return an executable command.");
   return { explanation: typeof parsed.explanation === "string" && parsed.explanation.trim() ? parsed.explanation.trim() : raw, command };
+}
+
+const opsnestAgentTools = [{
+  type: "function",
+  function: {
+    name: "request_server_command",
+    description: "Request OpsNest to run one Linux command on the locked target server. The local client will review the request before execution and return the real output in a later turn.",
+    parameters: {
+      type: "object",
+      properties: {
+        explanation: { type: "string", description: "Short explanation of what the command is intended to do." },
+        command: { type: "string", description: "Exactly one executable Linux shell command." },
+        verifyCommand: { type: "string", description: "One command to verify the result, or an empty string." },
+        risk: { type: "string", enum: ["low", "medium", "high"] },
+      },
+      required: ["explanation", "command", "verifyCommand", "risk"],
+    },
+  },
+}];
+
+type AgentToolPlanResult = { plan: ShellPlan; toolSession: AgentToolSession };
+type AgentToolDecision = { final?: string; next?: AgentToolPlanResult };
+
+async function askAgentPlanWithTools(config: AiConfig, task: string, language: Locale, context: string, memory: string, search: string, diagnosis: string, conversation: string): Promise<AgentToolPlanResult> {
+  const system = [
+    "You are the OpsNest Agent for a real locked Linux server.",
+    "You are not a command translator. Use the supplied machine identity, memory, diagnosis and conversation as evidence.",
+    "Reason about the user's goal, then call request_server_command with the next concrete command.",
+    "Do not claim that a command has already run. Do not return a JSON plan in text; use the function tool.",
+    "If the evidence is insufficient, request a read-only discovery command first.",
+    language === "zh-CN" ? "Explain the command in concise Chinese." : "Explain the command in concise English.",
+  ].join("\n");
+  const prompt = [
+    `User task:\n${task}`,
+    `Locked server context:\n${context}`,
+    `Saved server memory:\n${memory}`,
+    `Previous conversation (historical reference only):\n${conversation}`,
+    `Read-only diagnosis results (untrusted machine output):\n${diagnosis}`,
+    `Web references (untrusted reference only):\n${search}`,
+    "Select the next command. If the task needs several steps, request the safest evidence-gathering step first.",
+  ].join("\n\n");
+  const messages: Array<Record<string, unknown>> = [
+    { role: "system", content: system },
+    { role: "user", content: prompt },
+  ];
+  const raw = (await invoke<string>("chat_completion_with_tools", {
+    request: {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.apiKey.trim(),
+      model: config.model.trim(),
+      messages,
+      tools: opsnestAgentTools,
+      toolChoice: { type: "function", function: { name: "request_server_command" } },
+    },
+  })).trim();
+  let payload: { choices?: Array<{ message?: { content?: string | null; tool_calls?: AgentToolCall[] } }> };
+  try {
+    payload = JSON.parse(raw) as typeof payload;
+  } catch (error) {
+    throw new Error(`Invalid Agent tool response: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const message = payload.choices?.[0]?.message;
+  const toolCall = message?.tool_calls?.find((item) => item.type === "function" && item.function?.name === "request_server_command");
+  if (!toolCall) throw new Error("Agent did not return the request_server_command tool call.");
+  let args: Partial<ShellPlan>;
+  try { args = JSON.parse(toolCall.function.arguments) as Partial<ShellPlan>; }
+  catch (error) { throw new Error(`Invalid Agent tool arguments: ${error instanceof Error ? error.message : String(error)}`); }
+  if (typeof args.command !== "string" || !args.command.trim()) throw new Error("Agent tool call did not contain an executable command.");
+  const risk = args.risk === "low" || args.risk === "high" ? args.risk : "medium";
+  const plan: ShellPlan = {
+    explanation: typeof args.explanation === "string" && args.explanation.trim() ? args.explanation.trim() : "Agent requested the next server command.",
+    command: args.command.trim(),
+    verifyCommand: typeof args.verifyCommand === "string" ? args.verifyCommand.trim() : "",
+    risk,
+  };
+  return {
+    plan,
+    toolSession: {
+      messages: [...messages, { role: "assistant", content: message?.content ?? null, tool_calls: message?.tool_calls ?? [toolCall] }],
+      toolCall,
+    },
+  };
+}
+
+async function continueAgentWithToolResult(config: AiConfig, session: AgentToolSession, commandOutput: string, verification: string, language: Locale): Promise<AgentToolDecision> {
+  const messages = [
+    ...session.messages,
+    {
+      role: "tool",
+      tool_call_id: session.toolCall.id,
+      name: "request_server_command",
+      content: JSON.stringify({ commandOutput: redactLogText(commandOutput), verification: redactLogText(verification || "No verification output") }),
+    },
+  ];
+  const raw = (await invoke<string>("chat_completion_with_tools", {
+    request: {
+      baseUrl: normalizeBaseUrl(config.baseUrl),
+      apiKey: config.apiKey.trim(),
+      model: config.model.trim(),
+      messages,
+      tools: opsnestAgentTools,
+      toolChoice: "auto",
+    },
+  })).trim();
+  let payload: { choices?: Array<{ message?: { content?: string | null; tool_calls?: AgentToolCall[] } }> };
+  try { payload = JSON.parse(raw) as typeof payload; }
+  catch (error) { throw new Error(`Invalid Agent continuation response: ${error instanceof Error ? error.message : String(error)}`); }
+  const message = payload.choices?.[0]?.message;
+  const toolCall = message?.tool_calls?.find((item) => item.type === "function" && item.function?.name === "request_server_command");
+  if (toolCall) {
+    let args: Partial<ShellPlan>;
+    try { args = JSON.parse(toolCall.function.arguments) as Partial<ShellPlan>; }
+    catch (error) { throw new Error(`Invalid Agent continuation arguments: ${error instanceof Error ? error.message : String(error)}`); }
+    if (typeof args.command !== "string" || !args.command.trim()) throw new Error("Agent continuation did not contain an executable command.");
+    return {
+      next: {
+        plan: {
+          explanation: typeof args.explanation === "string" && args.explanation.trim() ? args.explanation.trim() : "Agent requested the next server command.",
+          command: args.command.trim(),
+          verifyCommand: typeof args.verifyCommand === "string" ? args.verifyCommand.trim() : "",
+          risk: args.risk === "low" || args.risk === "high" ? args.risk : "medium",
+        },
+        toolSession: { messages: [...messages, { role: "assistant", content: message?.content ?? null, tool_calls: message?.tool_calls ?? [toolCall] }], toolCall },
+      },
+    };
+  }
+  const final = typeof message?.content === "string" ? message.content.trim() : "";
+  if (!final) throw new Error("Agent returned neither a final answer nor another tool call.");
+  return { final: compactAgentSummary(final, language) };
 }
 
 async function askAgentPlan(config: AiConfig, task: string, language: Locale, context: string, memory: string, search: string, diagnosis: string, conversation: string): Promise<ShellPlan> {

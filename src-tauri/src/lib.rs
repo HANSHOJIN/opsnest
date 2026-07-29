@@ -90,6 +90,7 @@ pub fn run() {
             open_external_url,
             resolve_service_url,
             ai::chat_completion,
+            ai::chat_completion_with_tools,
             web::search_web,
             ssh::test_ssh_connection,
             ssh::inspect_server,
