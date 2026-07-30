@@ -1,16 +1,21 @@
 # Changelog
 
+## 0.1.2-alpha.2
+
+- 合并反向隧道 SSH 支持：服务器连接配置、跳板机路由和 AI 总管隧道脚本生成。
+- 统一凭据解析，使终端、Cron、Docker、服务扫描和 AI Agent 操作支持隧道路由。
+- 修复 AI 审批任务影响持久 SSH Shell 的问题；安装、更新等 AI 任务使用独立 SSH 执行通道。
+- 修复反向隧道脚本的 SSH 端口参数，并补充 systemd、crontab、rc.local 等启动方式兼容。
+
 ## 0.1.2-alpha.1
 
 - 重构内部文件，拆分为模块化，便于开发。
 
 ## 0.1.1-alpha.2
 
-- AgentRun 改为通过 OpenAI-compatible Chat Completions Function Calling 请求服务器命令，并把真实命令输出回传给模型，以支持连续的多步骤任务。
-- 在持久 SSH Shell 中支持“定位目录 → 切换目录 → `pwd` 验证”这类依赖会话上下文的任务；工作目录会保留给后续命令。
-- 优化终端普通对话与服务器任务的分流；聊天请求不再默认作为 Shell 命令执行。
-- AI Key 读取失败不会再中断其他本地配置的加载，避免界面错误显示为“AI 未配置”。
-- 为 xterm 终端加入 `Ctrl+V` 与 `Shift+Insert` 剪贴板粘贴处理。
+- AgentRun 支持通过 OpenAI-compatible Chat Completions Function Calling 规划并执行多步服务器任务。
+- 持久 SSH Shell 保留当前目录等会话上下文，并改进自然语言与命令行分流。
+- 增加终端剪贴板粘贴支持。
 
 ## 0.1.1-alpha.1
 
@@ -18,4 +23,4 @@
 
 ## 0.1.0-alpha.9
 
-修复若干已知问题，完善图标加载与桌面版本显示。
+- 修复若干已知问题，完善图标加载与桌面版本显示。

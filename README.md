@@ -16,7 +16,7 @@ The screenshots use fictional demo servers and contain no private infrastructure
 
 ## Current status
 
-Current version: `0.1.2-alpha.1`
+Current version: `0.1.2-alpha.2`
 
 OpsNest is still Alpha software intended for real-environment testing, feedback, and collaborative development. The current validation targets are Windows x64 clients and Debian, Ubuntu, OpenWrt/iStoreOS, and NAS-like Linux systems. It is not a production bastion host and does not claim complete coverage of every distribution, package manager, or vendor system.
 
@@ -125,7 +125,7 @@ Installer output: `src-tauri/target/release/bundle/nsis/`
 
 ## Project structure
 
-The React interface and AgentRun flow live in `src/main.tsx`. SSH, model calls, web search, local storage, logs, and credentials are implemented under `src-tauri/src/`. Architecture notes, roadmap, and fictional demo screenshots are under `docs/`.
+The React entry point in `src/main.tsx` wires the application shell, routing, shared state, and Tauri events. User-facing functionality is organized under `src/features/` (servers, terminal, agent, manager, Docker, Cron, settings, activity, and icons), shared types and integrations live in `src/domain/` and `src/services/`, and reusable visual tokens live in `src/styles/`. SSH, model calls, web search, local storage, logs, and credentials are implemented under `src-tauri/src/`. Architecture notes, roadmap, and fictional demo screenshots are under `docs/`.
 
 ## Versioning
 
