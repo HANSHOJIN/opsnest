@@ -283,7 +283,11 @@ async fn run_command(
             ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
                 output.extend_from_slice(&data);
             }
-            ChannelMsg::ExitStatus { .. } | ChannelMsg::Close => break,
+            // Some SSH servers send the exit status before flushing the last
+            // stdout/stderr bytes. Keep draining until the channel closes so
+            // short commands such as `hermes --version` cannot lose output.
+            ChannelMsg::ExitStatus { .. } => {}
+            ChannelMsg::Close => break,
             _ => {}
         }
     }

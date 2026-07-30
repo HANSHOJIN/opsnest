@@ -7,6 +7,11 @@ import { displayServerHostname } from "../servers/profile";
 
 export type TerminalText = { terminalExit: string; terminalConnecting: string; connected: string };
 
+function terminalLineText(line: TerminalLine) {
+  const isApprovalPrompt = line.kind === "system" && /等待批准|Approval required/i.test(line.text);
+  return isApprovalPrompt ? `\x1b[1;4;38;5;221m${line.text}\x1b[0m` : line.text;
+}
+
 export function TerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: TerminalText; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -92,7 +97,7 @@ export function TerminalPanel({ server, request, text, language, interventionMod
 
     const writeLine = (line: TerminalLine) => {
       const prefix = line.kind === "command" ? "$ " : line.kind === "ai" ? "✦ " : line.kind === "system" ? "• " : "";
-      const value = line.text.replace(/\r?\n/g, "\r\n");
+      const value = terminalLineText(line).replace(/\r?\n/g, "\r\n");
       const colorStart = line.kind === "ai" ? "\x1b[38;5;114m" : "";
       const colorEnd = line.kind === "ai" ? "\x1b[0m" : "";
       terminal.write(`${colorStart}${prefix}${value}${colorEnd}${value.endsWith("\r\n") ? "" : "\r\n"}`);
@@ -245,7 +250,7 @@ export function TerminalPanel({ server, request, text, language, interventionMod
       if (line.kind === "command" && line.text.trim() === lastSubmittedRef.current) { lastSubmittedRef.current = ""; continue; }
       if (line.kind === "ai" && line.text.trim() === lastSubmittedRef.current) { lastSubmittedRef.current = ""; continue; }
       const prefix = line.kind === "command" ? "$ " : line.kind === "ai" ? "✦ " : line.kind === "system" ? "• " : "";
-      const value = line.text.replace(/\r?\n/g, "\r\n");
+      const value = terminalLineText(line).replace(/\r?\n/g, "\r\n");
       const colorStart = line.kind === "ai" ? "\x1b[38;5;114m" : "";
       const colorEnd = line.kind === "ai" ? "\x1b[0m" : "";
       terminal.write(`${colorStart}${prefix}${value}${colorEnd}${value.endsWith("\r\n") ? "" : "\r\n"}`);
