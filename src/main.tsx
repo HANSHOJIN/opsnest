@@ -23,12 +23,10 @@ import type {
   ActivityLog, AgentRun, AgentStep, AgentStepId, AgentToolCall, AgentToolSession, AiConfig, AiInterventionMode,
   AiProvider, AuthMethod, ContextMenuState, ConversationLog, CronForm, CronTask, DiagnosisResult, DiscoveredService,
   InteractiveCommand, Locale, ManagerMessage, ManagerServerDetails, ModelConnectionStatus, PersistedData,
-  RuntimeLog, Server, ServerForm, ServerMemory, ServerProfile, ServerStatus, ShellContext, ShellPlan, SshRequest, TerminalIntent,
+  RuntimeLog, Server, ServerForm, ServerMemory, ServerProfile, ServerStatus, ShellPlan, SshRequest, TerminalIntent,
   TerminalLine, TerminalMode, View, WebSearchResult,
 } from "./domain/types";
 import { desktopInvoke as invoke, listenDesktopEvent as listen } from "./services/desktop";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
 import dockerIcon from "../icons/packed/services/docker.svg?raw";
 import nginxIcon from "../icons/packed/services/nginx.svg?raw";
 import apacheIcon from "../icons/packed/services/apache.svg?raw";
