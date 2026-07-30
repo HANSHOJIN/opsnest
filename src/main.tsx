@@ -19,7 +19,7 @@ import { CronPanel } from "./features/cron/panel";
 import { TaskHistoryPanel } from "./features/activity/task-history";
 import { normalizeConversationLog } from "./features/activity/conversation";
 import { ManagerPanel } from "./features/manager/panel";
-import { extractManagerServerDetails, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest } from "./features/manager/requests";
+import { extractManagerServerDetails, generateTunnelScript, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest } from "./features/manager/requests";
 import { TerminalPanel } from "./features/terminal/panel";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
 import { restoreTerminalLines } from "./features/terminal/history";
@@ -906,6 +906,35 @@ function App() {
         setManagerMessages((messages) => [...messages, { role: "assistant", text: `${language === "zh-CN" ? "连接结果：" : "Connection results:"}\n${result}` }]);
       } catch (managerError) {
         setManagerMessages((messages) => [...messages, { role: "assistant", text: managerError instanceof Error ? managerError.message : text.connectionFailed }]);
+      } finally {
+        setManagerThinking(false);
+      }
+      return;
+    }
+    const tunnelRequest = /(?:反向隧道|反向代理|内网穿透|隧道|reverse.*tunnel|tunnel|内网.*连接|跳板)/i.test(input);
+    if (tunnelRequest && server) {
+      setManagerInput("");
+      setManagerMessages((messages) => [...messages, { role: "user", text: input }]);
+      setManagerThinking(true);
+      try {
+        const relayServers = servers.filter((item) => item.id !== editingServerId);
+        if (relayServers.length === 0) {
+          setManagerMessages((messages) => [...messages, { role: "assistant", text: language === "zh-CN" ? "没有可用的跳板机，请先添加一台有公网 IP 的服务器作为跳板。" : "No relay servers available. Add a server with a public IP first." }]);
+          return;
+        }
+        const relay = relayServers[0];
+        const tunnelPort = 22224 + relayServers.length;
+        const script = generateTunnelScript(
+          { name: server.name, host: server.host, port: server.port, username: server.username },
+          { host: relay.host, name: relay.name },
+          tunnelPort
+        );
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: `${language === "zh-CN"
+          ? "以下是配置反向隧道的步骤：\n\n1. 确认跳板机 " + relay.name + "（" + relay.host + "）已开启 GatewayPorts yes\n2. 登录内网主机（以 root 身份）\n3. 执行以下脚本：\n\n"
+          : "Steps to set up the reverse tunnel:\n\n1. Verify the relay server " + relay.name + " (" + relay.host + ") has GatewayPorts yes enabled\n2. Log into the internal host (as root)\n3. Run this script:\n\n"}\`\`\`bash\n${script}\n\`\`\`` }]);
+        setManagerSuggest(text.connectionTypeReverse);
+      } catch (tunnelError) {
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: tunnelError instanceof Error ? tunnelError.message : String(tunnelError) }]);
       } finally {
         setManagerThinking(false);
       }
