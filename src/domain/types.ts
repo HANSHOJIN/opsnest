@@ -1,3 +1,8 @@
+export type ConnectionType = "direct" | "reverse-tunnel";
+export type TunnelConfig = {
+  relayServerId: string;
+  remotePort: number;
+};
 export type AuthMethod = "password" | "privateKey";
 export type ServerStatus = "connected" | "saved" | "connecting" | "failed";
 export type View = "hosts" | "server" | "manager" | "settings" | "terminal" | "tasks" | "cron";
@@ -32,8 +37,8 @@ export type NasProfile = { kind: string; version: string; managementPort: string
 export type DockerContainer = { id: string; name: string; image: string; status: string; ports: string };
 export type ServerProfile = { osId?: string; osVersion?: string; osName: string; hostname: string; cpuCores: string; cpuModel?: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string; dockerItems?: DockerContainer[]; openwrt?: OpenWrtProfile; nas?: NasProfile };
 export type DiscoveredService = { id: string; name: string; category: string; status: string; version: string; port?: number | null; web: boolean; webPath?: string; webScheme?: "http" | "https" };
-export type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[]; services?: DiscoveredService[]; customServices?: DiscoveredService[]; servicesScannedAt?: string };
-export type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; sudoPassword: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean };
+export type Server = { id: string; name: string; host: string; port: number; username: string; connectionType: ConnectionType; tunnelConfig?: TunnelConfig; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[]; services?: DiscoveredService[]; customServices?: DiscoveredService[]; servicesScannedAt?: string };
+export type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; sudoPassword: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean; connectionType: ConnectionType; tunnelRelayServerId: string; tunnelRemotePort: string };
 export type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; sudoPassword?: string | null; privateKeyPath: string | null; passphrase: string | null; commandId?: string; sessionId?: string };
 export type AiConfig = { provider: AiProvider; apiKey: string; baseUrl: string; model: string; interventionMode: AiInterventionMode };
 export type PersistedData = { servers?: Server[]; aiConfig?: Partial<AiConfig> | null; aiConnectionStatus?: ModelConnectionStatus; language?: Locale; logs?: ActivityLog[] };
