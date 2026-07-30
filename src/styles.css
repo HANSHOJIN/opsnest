@@ -233,8 +233,12 @@ html[data-opsnest-network-scope="wan"] .router-status-group .network-badge-lan {
 .router-service-grid .custom-service-entry { min-height: 188px; border-style: dashed; }
 .custom-service-error { width: 100%; color: #b54848; font-size: 10px; }
 .docker-containers-panel { margin-top: 18px; }
+.docker-panel-actions { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; }
 .docker-expand-button { padding: 8px 12px; border: 1px solid #cfdcf0; border-radius: 8px; color: #3e65a4; background: rgba(255,255,255,.75); font-size: 12px; }
 .docker-expand-button:hover { border-color: #8ea9d3; background: #fff; }
+.docker-refresh-button { padding: 8px 12px; border: 1px solid #cfdcf0; border-radius: 8px; color: #5267e8; background: #fff; font-size: 12px; }
+.docker-refresh-button:hover:not(:disabled) { border-color: #5267e8; background: #f5f6ff; }
+.docker-refresh-button:disabled { cursor: wait; opacity: .65; }
 .docker-container-list { display: grid; gap: 9px; margin-top: 12px; padding: 12px; border: 1px solid #dbe6f1; border-radius: 14px; background: rgba(255,255,255,.66); }
 .docker-container-list-heading { display: flex; align-items: center; justify-content: space-between; padding: 2px 3px 6px; }
 .docker-container-list-heading div { display: grid; gap: 3px; }
@@ -269,3 +273,5 @@ html[data-opsnest-network-scope="wan"] .router-status-group .network-badge-lan {
 @media (max-width: 880px) { .router-service-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.router-metric-grid { grid-template-columns: repeat(2, 1fr); }.router-metric-grid > div:nth-child(odd) { border-right: 1px solid #e8e8f3; }.router-metric-grid > div:nth-child(-n+2) { border-bottom: 1px solid #e8e8f3; } }
 @media (max-width: 620px) { .server-detail-header, .server-detail-actions { align-items: flex-start; flex-direction: column; } .server-detail-header > .connected-badge, .router-status-group { margin-top: 0; } .router-status-group { flex-wrap: wrap; } .detail-metric-grid { grid-template-columns: repeat(2, 1fr); } .detail-metric-grid div:not(:nth-child(3n)) { border-right: 0; } .detail-metric-grid div:nth-child(odd) { border-right: 1px solid #edf0f4; } .detail-metric-grid div:nth-child(-n+3) { border-bottom: 0; } .detail-metric-grid div:nth-child(-n+2) { border-bottom: 1px solid #edf0f4; } .service-entry-grid, .detail-side-column, .router-service-grid, .router-bottom-grid { grid-template-columns: 1fr; }.router-overview-heading, .router-overview-footer { align-items: flex-start; flex-direction: column; }.router-kernel-pill { width: 100%; }.router-metric-grid { grid-template-columns: 1fr; }.router-metric-grid > div { border-right: 0 !important; border-bottom: 1px solid #e8e8f3; }.router-metric-grid > div:last-child { border-bottom: 0; } }
 .system-icon-image { width: 26px; height: 26px; display: block; object-fit: contain; }
+.terminal-session-active { position: relative; width: 100%; height: 100%; }
+.terminal-session-background { position: fixed; left: -200vw; top: 0; width: 100vw; height: 100vh; visibility: hidden; pointer-events: none; overflow: hidden; }

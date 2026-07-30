@@ -6,6 +6,11 @@ export function isLikelyShellCommand(input: string) {
   const trimmed = input.trim();
   const firstWord = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
   if (shellCommandNames.has(firstWord)) return true;
+  // Bash users commonly type directory changes as `cd..`, `cd.` or `cd/`.
+  // These are still raw shell input (even when the remote shell later reports
+  // that the exact spelling is invalid), so never send them through the AI
+  // task/chat pipeline where an older task could influence the result.
+  if (/^cd(?:\s|[.~\/])/i.test(trimmed)) return true;
   if (/^(sudo|doas)\s+\S+/.test(trimmed) || /^[.\/][\w./-]+/.test(trimmed) || /\|\s*[a-z][\w-]*|&&|;\s*[a-z][\w-]*/i.test(trimmed)) return true;
   // Unknown third-party CLI commands such as hermes update stay raw SSH commands.
   return /^[a-z_][\w.-]*\s+[\w./:@%+=~-]+(?:\s|$)/i.test(trimmed);

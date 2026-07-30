@@ -128,6 +128,10 @@ export function TerminalPanel({ server, request, text, language, interventionMod
         terminal.write("\r\n[SSH connection closed]");
         if (request && !reconnectAttempted && !cancelled) {
           reconnectAttempted = true;
+          // Normal command/chat mode uses a separate persistent shell. Drop
+          // that stale shell before reconnecting the visible PTY, otherwise
+          // the first command after reconnect is sent to a dead channel.
+          void invoke("close_ssh_shell", { sessionId: server.id }).catch(() => undefined);
           terminal.write("\r\n[reconnecting...]");
           window.setTimeout(() => {
             if (!cancelled) void invoke("open_ssh_terminal", { request: { ...request, sessionId: server.id }, sessionId: server.id }).catch((error) => terminal.write(`\r\n[SSH reconnect failed] ${String(error)}\r\n`));
@@ -213,7 +217,9 @@ export function TerminalPanel({ server, request, text, language, interventionMod
       unlisten?.();
       dataDisposable.dispose();
       observer.disconnect();
-      void invoke("close_interactive_ssh_terminal", { sessionId: server.id }).catch(() => undefined);
+      // Do not close the remote PTY when this panel becomes hidden. The main
+      // window keeps one mounted panel per opened server so sessions continue
+      // receiving output while the user works elsewhere.
       terminal.dispose();
       terminalRef.current = null;
     };

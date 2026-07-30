@@ -19,9 +19,14 @@ export function isHighRiskCommand(command: string) {
 }
 
 export function isReadOnlyPlan(command: string, risk?: ShellPlan["risk"]) {
+  const normalized = command.trim();
+  // Basic navigation and directory inspection are deterministic read-only
+  // operations. Do not let a model's overly cautious risk label add approval
+  // friction to an ordinary `ls`/`pwd`/`cd` request.
+  if (/^(?:ls|pwd|cd|tree|stat|readlink|realpath)(?:\s|$)/i.test(normalized)) return true;
   if (isHighRiskCommand(command)) return false;
   if (risk === "low") return true;
-  return /^(?:apt(?:-get)?\s+(?:list|show|policy|search)|dpkg\s+-l|rpm\s+-qa|dnf\s+(?:list|info)|yum\s+(?:list|info)|pacman\s+-Q|command\s+-v|which\s+|type\s+|systemctl\s+(?:status|is-active|is-enabled|list-units|list-sockets|list-timers)|docker\s+(?:ps|images|info|inspect|version)|ss\s|netstat\s|df\s|du\s|free\s|uname\s|uptime\b|hostname\b|whoami\b|id\b|ps\s|cat\s|grep\s|head\s|tail\s|find\s)/i.test(command.trim());
+  return /^(?:apt(?:-get)?\s+(?:list|show|policy|search)|dpkg\s+-l|rpm\s+-qa|dnf\s+(?:list|info)|yum\s+(?:list|info)|pacman\s+-Q|command\s+-v|which\s+|type\s+|systemctl\s+(?:status|is-active|is-enabled|list-units|list-sockets|list-timers)|docker\s+(?:ps|images|info|inspect|version)|ss\s|netstat\s|df\s|du\s|free\s|uname\s|uptime\b|hostname\b|whoami\b|id\b|ps\s|cat\s|grep\s|head\s|tail\s|find\s)/i.test(normalized);
 }
 
 export function isRecoverableAgentFailure(output: string) {

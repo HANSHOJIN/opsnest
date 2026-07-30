@@ -35,6 +35,26 @@ import { desktopInvoke as invoke, listenDesktopEvent as listen } from "./service
 import "@xterm/xterm/css/xterm.css";
 import "./styles/index.css";
 
+type TerminalSessionState = {
+  input: string;
+  lines: TerminalLine[];
+  agentStatus: string;
+  executing: boolean;
+  interactiveCommand: InteractiveCommand | null;
+  agentRun: AgentRun | null;
+  activeCommandId: string | null;
+};
+
+const emptyTerminalSession = (lines: TerminalLine[] = []): TerminalSessionState => ({
+  input: "",
+  lines,
+  agentStatus: "",
+  executing: false,
+  interactiveCommand: null,
+  agentRun: null,
+  activeCommandId: null,
+});
+
 const zh = {
   welcome: "欢迎回来", hosts: "我的服务器", cron: "定时任务", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
   addAiModel: "添加一个 AI 模型", aiModelIntro: "模型只负责理解你的描述和服务器状态，所有 SSH 操作仍由本地安全流程控制。", modelService: "模型服务", apiAddress: "API 地址", apiKey: "API Key", optional: "可选", modelName: "模型名称", modelPlaceholder: "例如：deepseek-chat", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "输入你的 API Key", ollamaKey: "本地 Ollama 不需要 Key", testConnection: "测试连接", testing: "正在测试…", saveModel: "保存模型", savedLocal: "已保存到本机", connectionFound: (count: number) => `连接成功，发现 ${count} 个模型`, connectionNoList: "连接成功，可以手动填写模型名称", keyLocalNote: "API Key 目前仅保存在当前电脑的本地配置中，不会上传到 OpsNest。建议使用权限受限、额度可控的 Key。", language: "语言", simplifiedChinese: "简体中文", english: "English", languageNote: "更改语言后，界面会立即更新。",
@@ -61,10 +81,10 @@ function App() {
   const [aiConfig, setAiConfig] = useState<AiConfig>(defaultAiConfig);
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("shell");
   const [terminalInput, setTerminalInput] = useState("");
-  const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
-  const [terminalAgentStatus, setTerminalAgentStatus] = useState("");
-  const [isExecuting, setExecuting] = useState(false);
-  const [interactiveCommand, setInteractiveCommand] = useState<InteractiveCommand | null>(null);
+  const [terminalLines, setTerminalLinesState] = useState<TerminalLine[]>([]);
+  const [terminalAgentStatus, setTerminalAgentStatusState] = useState("");
+  const [isExecuting, setExecutingState] = useState(false);
+  const [interactiveCommand, setInteractiveCommandState] = useState<InteractiveCommand | null>(null);
   const [managerInput, setManagerInput] = useState("");
   const [managerMessages, setManagerMessages] = useState<ManagerMessage[]>([]);
   const [logs, setLogs] = useState<ActivityLog[]>([]);
@@ -72,7 +92,8 @@ function App() {
   const [conversationLogs, setConversationLogs] = useState<ConversationLog[]>([]);
   const [isManagerThinking, setManagerThinking] = useState(false);
   const [agentRun, setAgentRun] = useState<AgentRun | null>(null);
-  const [terminalAgentRun, setTerminalAgentRun] = useState<AgentRun | null>(null);
+  const [terminalAgentRun, setTerminalAgentRunState] = useState<AgentRun | null>(null);
+  const [terminalSessions, setTerminalSessions] = useState<Record<string, TerminalSessionState>>({});
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [isWizardOpen, setWizardOpen] = useState(false);
   const [isConnecting, setConnecting] = useState(false);
@@ -90,6 +111,8 @@ function App() {
   const [cronForm, setCronForm] = useState<CronForm>({ id: "", name: "", schedule: "0 * * * *", command: "", enabled: true });
   const activeCredentials = useRef<Record<string, SshRequest>>({});
   const activeCommandId = useRef<string | null>(null);
+  const terminalSessionsRef = useRef<Record<string, TerminalSessionState>>({});
+  const serverRef = useRef<Server | null>(null);
   const logsRef = useRef<ActivityLog[]>([]);
   const runtimeLogsRef = useRef<RuntimeLog[]>([]);
   const conversationLogsRef = useRef<ConversationLog[]>([]);
@@ -98,6 +121,84 @@ function App() {
   const sessionIdRef = useRef(crypto.randomUUID());
   const terminalWriterRef = useRef<((text: string) => void) | null>(null);
   const interactiveCompletionRef = useRef<{ id: string; resolve: (output: string) => void; reject: (error: Error) => void } | null>(null);
+  const interactiveCompletionsRef = useRef<Record<string, { id: string; resolve: (output: string) => void; reject: (error: Error) => void }>>({});
+
+  useEffect(() => { serverRef.current = server; }, [server]);
+
+  const ensureTerminalSession = (target: Server): TerminalSessionState => {
+    const existing = terminalSessionsRef.current[target.id];
+    if (existing) return existing;
+    const created = emptyTerminalSession(restoreTerminalLines(target, conversationLogsRef.current, isLikelyShellCommand));
+    terminalSessionsRef.current = { ...terminalSessionsRef.current, [target.id]: created };
+    setTerminalSessions(terminalSessionsRef.current);
+    return created;
+  };
+
+  const updateTerminalSession = (serverId: string, patch: Partial<TerminalSessionState>) => {
+    const current = terminalSessionsRef.current[serverId] ?? emptyTerminalSession();
+    const next = { ...current, ...patch };
+    terminalSessionsRef.current = { ...terminalSessionsRef.current, [serverId]: next };
+    setTerminalSessions(terminalSessionsRef.current);
+    if (serverRef.current?.id === serverId) {
+      if (patch.input !== undefined) setTerminalInput(patch.input);
+      if (patch.lines !== undefined) setTerminalLinesState(patch.lines);
+      if (patch.agentStatus !== undefined) setTerminalAgentStatusState(patch.agentStatus);
+      if (patch.executing !== undefined) setExecutingState(patch.executing);
+      if (patch.interactiveCommand !== undefined) setInteractiveCommandState(patch.interactiveCommand);
+      if (patch.agentRun !== undefined) setTerminalAgentRunState(patch.agentRun);
+      if (patch.activeCommandId !== undefined) activeCommandId.current = patch.activeCommandId;
+    }
+  };
+
+  const setTerminalLines = (value: TerminalLine[] | ((lines: TerminalLine[]) => TerminalLine[])) => {
+    const id = serverRef.current?.id;
+    if (!id) { setTerminalLinesState(value); return; }
+    const current = terminalSessionsRef.current[id] ?? emptyTerminalSession();
+    updateTerminalSession(id, { lines: typeof value === "function" ? value(current.lines) : value });
+  };
+  const setTerminalAgentStatus = (value: string) => {
+    const id = serverRef.current?.id;
+    if (!id) { setTerminalAgentStatusState(value); return; }
+    updateTerminalSession(id, { agentStatus: value });
+  };
+  const setExecuting = (value: boolean) => {
+    const id = serverRef.current?.id;
+    if (!id) { setExecutingState(value); return; }
+    updateTerminalSession(id, { executing: value });
+  };
+  const setInteractiveCommand = (value: InteractiveCommand | null) => {
+    const id = serverRef.current?.id;
+    if (!id) { setInteractiveCommandState(value); return; }
+    updateTerminalSession(id, { interactiveCommand: value });
+  };
+  const setTerminalAgentRun = (value: AgentRun | null | ((run: AgentRun | null) => AgentRun | null)) => {
+    const id = serverRef.current?.id;
+    if (!id) { setTerminalAgentRunState(value); return; }
+    const current = terminalSessionsRef.current[id]?.agentRun ?? null;
+    updateTerminalSession(id, { agentRun: typeof value === "function" ? value(current) : value });
+  };
+
+  const appendTerminalLinesFor = (serverId: string, ...newLines: TerminalLine[]) => {
+    const current = terminalSessionsRef.current[serverId] ?? emptyTerminalSession();
+    const nextLines = [...current.lines];
+    for (const line of newLines) {
+      const last = nextLines[nextLines.length - 1];
+      if (last?.kind === line.kind && last.text === line.text) continue;
+      nextLines.push(line);
+    }
+    updateTerminalSession(serverId, { lines: nextLines });
+  };
+
+  const syncTerminalSessionToView = (target: Server) => {
+    const state = ensureTerminalSession(target);
+    setTerminalInput(state.input);
+    setTerminalLines(state.lines);
+    setTerminalAgentStatus(state.agentStatus);
+    setExecuting(state.executing);
+    setInteractiveCommand(state.interactiveCommand);
+    setTerminalAgentRun(state.agentRun);
+    activeCommandId.current = state.activeCommandId;
+  };
 
   const appendRuntimeLog = (entry: Omit<RuntimeLog, "id" | "timestamp">) => {
     const nextEntry: RuntimeLog = { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), message: redactLogText(entry.message), details: entry.details ? redactLogText(entry.details) : undefined };
@@ -234,13 +335,6 @@ function App() {
   }, [servers]);
 
   useEffect(() => {
-    if (error === text.taskComing) {
-      setError("");
-      setView("tasks");
-    }
-  }, [error, text.taskComing]);
-
-  useEffect(() => {
     const root = document.documentElement;
     if (view === "server" && server) root.dataset.opsnestNetworkScope = getNetworkScope(server.host);
     else delete root.dataset.opsnestNetworkScope;
@@ -283,7 +377,8 @@ function App() {
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, sudoPassword: form.sudoPassword.trim() || null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
     if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { void connectSavedServer(selected, true); return; }
-    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus(""); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current, isLikelyShellCommand)); setView("terminal"); setError("");
+    ensureTerminalSession(selected);
+    setServer(selected); setTerminalMode("shell"); syncTerminalSessionToView(selected); setView("terminal"); setError("");
   };
 
   const discoverServerServices = async (target: Server): Promise<DiscoveredService[]> => {
@@ -371,8 +466,8 @@ function App() {
       setServers((current) => current.map((item) => item.id === selected.id ? connectedServer : item));
       persistData(servers.map((item) => item.id === selected.id ? connectedServer : item));
       if (openTerminalAfter) {
-        setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus("");
-        setTerminalLines(restoreTerminalLines(connectedServer, conversationLogsRef.current, isLikelyShellCommand)); setView("terminal"); setError("");
+        ensureTerminalSession(connectedServer);
+        setTerminalMode("shell"); syncTerminalSessionToView(connectedServer); setView("terminal"); setError("");
       }
     } catch {
       const failedServer = { ...selected, status: "failed" as ServerStatus };
@@ -420,32 +515,6 @@ function App() {
     setServer((current) => current ? updated.find((item) => item.id === current.id) ?? current : current);
     persistData(updated);
     return results.join("\n");
-  };
-
-  const executeAllFromManager = async (command: string) => {
-    const results: string[] = [];
-    for (const target of servers) {
-      let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
-      if (!request) {
-        try {
-          request = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
-          if (request) activeCredentials.current[target.id] = request;
-        } catch {
-          request = null;
-        }
-      }
-      if (!request) {
-        results.push(`${target.name}: ${language === "zh-CN" ? "没有保存的登录凭据" : "no saved credentials"}`);
-        continue;
-      }
-      try {
-        const output = await invoke<string>("execute_ssh_command", { request, command });
-        results.push(`${target.name}:\n${output || "(no output)"}`);
-      } catch (commandError) {
-        results.push(`${target.name}: ${commandError instanceof Error ? commandError.message : String(commandError)}`);
-      }
-    }
-    return results.join("\n\n");
   };
 
   const getCredential = async (target: Server) => {
@@ -817,39 +886,7 @@ function App() {
       }
       return;
     }
-    const executeAllRequest = /所有.*(?:执行|运行|查看|检查|获取|显示)|(?:执行|运行|查看|检查).*(?:所有|每台)/i.test(input);
-    // All operational requests now go through AgentRun approval and verification.
-    if (false && executeAllRequest) {
-      if (!aiConfig.baseUrl.trim() || !aiConfig.model.trim() || (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim())) { setView("settings"); setError(text.configureAi); return; }
-      setManagerInput("");
-      setManagerMessages((messages) => [...messages, { role: "user", text: input }]);
-      setManagerThinking(true);
-      try {
-        const plan = await askShellCommand(aiConfig, `在所有已保存的 Linux 服务器上完成：${input}`, language);
-        const result = await executeAllFromManager(plan.command);
-        setManagerMessages((messages) => [...messages, { role: "assistant", text: `${plan.explanation}\n\n$ ${plan.command}\n\n${result}` }]);
-      } catch (managerError) {
-        setManagerMessages((messages) => [...messages, { role: "assistant", text: managerError instanceof Error ? managerError.message : text.aiFailed }]);
-      } finally {
-        setManagerThinking(false);
-      }
-      return;
-    }
-    return startAgentRun(input);
-    if (!aiConfig.baseUrl.trim() || !aiConfig.model.trim() || (providerPresets[aiConfig.provider].keyRequired && !aiConfig.apiKey.trim())) { setView("settings"); setError(text.configureAi); return; }
-    const context = servers.length ? servers.map((item) => {
-      const profile = item.profile ? `OS=${item.profile.osName}, hostname=${item.profile.hostname}, CPU=${item.profile.cpuCores}, memory=${item.profile.memory}, disk=${item.profile.disk}, Docker=${item.profile.dockerInstalled ? `${item.profile.dockerContainers} running` : "not installed"}` : `OS=${item.system}, profile not scanned`;
-      return `${item.name} (${item.username}@${item.host}:${item.port}) [${item.status}] ${profile}`;
-    }).join("\n") : text.managerNoServers;
-    setManagerInput("");
-    setManagerMessages((messages) => [...messages, { role: "user", text: input }]);
-    setManagerThinking(true);
-    try {
-      const prompt = language === "zh-CN" ? `你是服务器总管。用户希望管理多台服务器。请根据下面的服务器清单回答，并明确指出涉及哪些服务器、建议先做什么以及风险。只做分析和计划，不要声称已执行命令。\n\n服务器清单：\n${context}\n\n用户请求：${input}` : `You are a server manager for multiple saved servers. Based on the inventory below, explain which servers are involved, what should happen first, and the risks. Provide analysis and a plan only; do not claim that commands were executed.\n\nServer inventory:\n${context}\n\nUser request:\n${input}`;
-      const response = await askModel(aiConfig, prompt, language);
-      setManagerMessages((messages) => [...messages, { role: "assistant", text: response }]);
-    } catch (managerError) { setManagerMessages((messages) => [...messages, { role: "assistant", text: managerError instanceof Error ? `${text.aiFailed} ${managerError.message}` : text.aiFailed }]); }
-    finally { setManagerThinking(false); }
+    await startAgentRun(input);
   };
 
   const stopCurrentCommand = async () => {
@@ -873,52 +910,15 @@ function App() {
     } catch (stopError) {
       setTerminalLines((lines) => [...lines, { kind: "system", text: stopError instanceof Error ? stopError.message : String(stopError) }]);
     }
-    /*
-    if (interactiveCommand) {
-      try {
-        await invoke("write_ssh_terminal", { sessionId: server?.id, data: "\u0003" });
-        setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "姝ｅ湪鍋滄浜ゆ敹涓殑浜ゆ互鍛戒护鈥︹€? : "Interrupting the interactive command鈥? }]);
-      } catch (stopError) {
-        setTerminalLines((lines) => [...lines, { kind: "system", text: stopError instanceof Error ? stopError.message : String(stopError) }]);
-      }
-      return;
-    }
-    const commandId = activeCommandId.current;
-    if (!commandId) {
-      setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "当前没有正在执行的命令。" : "There is no running command." }]);
-      return;
-    }
-    try {
-      await invoke("stop_ssh_command", { commandId });
-      setTerminalLines((lines) => [...lines, { kind: "system", text: language === "zh-CN" ? "正在停止当前命令…" : "Stopping the current command…" }]);
-    } catch (stopError) {
-      setTerminalLines((lines) => [...lines, { kind: "system", text: stopError instanceof Error ? stopError.message : String(stopError) }]);
-    }
   };
 
   const exitTerminal = () => {
-    const pendingInteractive = interactiveCompletionRef.current;
-    if (pendingInteractive) {
-      pendingInteractive.reject(new Error(language === "zh-CN" ? "交互式命令已随终端关闭。" : "The interactive command was interrupted because the terminal closed."));
-      interactiveCompletionRef.current = null;
-    }
-    setInteractiveCommand(null);
-    if (server) void invoke("close_ssh_shell", { sessionId: server.id }).catch(() => undefined);
-    if (server) void invoke("close_interactive_ssh_terminal", { sessionId: server.id }).catch(() => undefined);
-    terminalWriterRef.current = null;
-    activeCommandId.current = null;
-    setTerminalAgentRun(null);
-    setExecuting(false);
-    setView("hosts");
-    }
-    */
-  };
-
-  const exitTerminal = () => {
-    const pendingInteractive = interactiveCompletionRef.current;
+    const closingServerId = server?.id;
+    const pendingInteractive = closingServerId ? interactiveCompletionsRef.current[closingServerId] : interactiveCompletionRef.current;
     if (pendingInteractive) {
       pendingInteractive.reject(new Error("The interactive command was interrupted because the terminal closed."));
-      interactiveCompletionRef.current = null;
+      if (closingServerId) delete interactiveCompletionsRef.current[closingServerId];
+      else interactiveCompletionRef.current = null;
     }
     setInteractiveCommand(null);
     if (server) void invoke("close_ssh_shell", { sessionId: server.id }).catch(() => undefined);
@@ -927,21 +927,29 @@ function App() {
     activeCommandId.current = null;
     setTerminalAgentRun(null);
     setExecuting(false);
+    if (closingServerId) {
+      const next = { ...terminalSessionsRef.current };
+      delete next[closingServerId];
+      terminalSessionsRef.current = next;
+      setTerminalSessions(next);
+    }
     setView("hosts");
   };
 
-  const runInteractiveCommand = (command: string): Promise<string> => {
+  const runInteractiveCommandFor = (serverId: string, command: string): Promise<string> => {
     const id = crypto.randomUUID();
     const promise = new Promise<string>((resolve, reject) => {
-      interactiveCompletionRef.current = { id, resolve, reject };
+      interactiveCompletionsRef.current[serverId] = { id, resolve, reject };
     });
-    setInteractiveCommand({ id, command });
-    setTerminalAgentStatus("Switching to the interactive terminal…");
+    updateTerminalSession(serverId, { interactiveCommand: { id, command }, agentStatus: "Switching to the interactive terminal..." });
     /*
-    setTerminalAgentStatus(language === "zh-CN" ? "姝ｅ湪鍒囨崲鍒颁氦浜掑紡缁堢鈥︹€? : "Switching to the interactive terminal鈥?);
+    updateTerminalSession(serverId, { interactiveCommand: { id, command }, agentStatus: "Switching to the interactive terminal鈥? });
+    setTerminalAgentStatus("Switching to the interactive terminal…");
     */
     return promise;
   };
+
+  const runInteractiveCommand = (command: string): Promise<string> => server?.id ? runInteractiveCommandFor(server.id, command) : Promise.reject(new Error("No server selected."));
 
   const completeInteractiveCommand = (id: string, output: string) => {
     const pending = interactiveCompletionRef.current;
@@ -959,12 +967,46 @@ function App() {
     pending.reject(new Error(message));
   };
 
+  const completeInteractiveCommandFor = (serverId: string, id: string, output: string) => {
+    const pending = interactiveCompletionsRef.current[serverId];
+    if (!pending || pending.id !== id) return;
+    delete interactiveCompletionsRef.current[serverId];
+    updateTerminalSession(serverId, { interactiveCommand: null });
+    pending.resolve(output);
+  };
+
+  const failInteractiveCommandFor = (serverId: string, id: string, message: string) => {
+    const pending = interactiveCompletionsRef.current[serverId];
+    if (!pending || pending.id !== id) return;
+    delete interactiveCompletionsRef.current[serverId];
+    updateTerminalSession(serverId, { interactiveCommand: null });
+    pending.reject(new Error(message));
+  };
+
   const patchTerminalAgentRun = (patch: Partial<AgentRun>) => {
     setTerminalAgentRun((current) => current ? { ...current, ...patch } : current);
+    if (serverRef.current) {
+      const current = terminalSessionsRef.current[serverRef.current.id]?.agentRun;
+      if (current) updateTerminalSession(serverRef.current.id, { agentRun: { ...current, ...patch } });
+    }
   };
 
   const patchTerminalAgentStep = (id: AgentStepId, status: AgentStep["status"], detail?: string) => {
     setTerminalAgentRun((current) => current ? { ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) } : current);
+    if (serverRef.current) {
+      const current = terminalSessionsRef.current[serverRef.current.id]?.agentRun;
+      if (current) updateTerminalSession(serverRef.current.id, { agentRun: { ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) } });
+    }
+  };
+
+  const patchTerminalAgentRunFor = (serverId: string, patch: Partial<AgentRun>) => {
+    const current = terminalSessionsRef.current[serverId]?.agentRun;
+    if (current) updateTerminalSession(serverId, { agentRun: { ...current, ...patch } });
+  };
+
+  const patchTerminalAgentStepFor = (serverId: string, id: AgentStepId, status: AgentStep["status"], detail?: string) => {
+    const current = terminalSessionsRef.current[serverId]?.agentRun;
+    if (current) updateTerminalSession(serverId, { agentRun: { ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) } });
   };
 
   const appendTerminalLines = (...newLines: TerminalLine[]) => {
@@ -980,26 +1022,56 @@ function App() {
   };
 
   const executeTerminalAgentRun = async (run: AgentRun) => {
-    if (!run.plan || !server) return;
-    const target = server;
+    const target = servers.find((item) => item.id === run.targetIds[0]) ?? (server?.id === run.targetIds[0] ? server : null);
+    if (!run.plan || !target) return;
+    // These setters are deliberately scoped to the target server. An AgentRun
+    // may continue while another terminal is focused.
+    const setTerminalAgentStatus = (value: string) => updateTerminalSession(target.id, { agentStatus: value });
+    const setExecuting = (value: boolean) => updateTerminalSession(target.id, { executing: value });
+    const setTerminalLines = (value: TerminalLine[] | ((lines: TerminalLine[]) => TerminalLine[])) => {
+      const current = terminalSessionsRef.current[target.id] ?? emptyTerminalSession();
+      updateTerminalSession(target.id, { lines: typeof value === "function" ? value(current.lines) : value });
+    };
+    const setTerminalAgentRun = (value: AgentRun | null | ((run: AgentRun | null) => AgentRun | null)) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun ?? null;
+      updateTerminalSession(target.id, { agentRun: typeof value === "function" ? value(current) : value });
+    };
+    const patchTerminalAgentRun = (patch: Partial<AgentRun>) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun;
+      if (current) setTerminalAgentRun({ ...current, ...patch });
+    };
+    const patchTerminalAgentStep = (id: AgentStepId, status: AgentStep["status"], detail?: string) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun;
+      if (current) setTerminalAgentRun({ ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) });
+    };
+    const appendTerminalLines = (...newLines: TerminalLine[]) => setTerminalLines((lines) => {
+      const next = [...lines];
+      for (const line of newLines) {
+        const last = next[next.length - 1];
+        if (last?.kind === line.kind && last.text === line.text) continue;
+        next.push(line);
+      }
+      return next;
+    });
+    const runInteractiveCommand = (command: string) => runInteractiveCommandFor(target.id, command);
     const request = await getCredential(target);
     if (!request) {
-      patchTerminalAgentRun({ phase: "failed", error: text.noCredentials });
-      patchTerminalAgentStep("execute", "failed", text.noCredentials);
-      setExecuting(false);
+      patchTerminalAgentRunFor(target.id, { phase: "failed", error: text.noCredentials });
+      patchTerminalAgentStepFor(target.id, "execute", "failed", text.noCredentials);
+      updateTerminalSession(target.id, { executing: false });
       return;
     }
-    const commandRequest = { ...request, commandId: activeCommandId.current ?? undefined, sessionId: target.id };
+    const commandRequest = { ...request, commandId: terminalSessionsRef.current[target.id]?.activeCommandId ?? activeCommandId.current ?? undefined, sessionId: target.id };
     if (isHighRiskCommand(run.plan.command)) {
-      patchTerminalAgentRun({ phase: "blocked", error: "This command is blocked by the local safety policy." });
-      patchTerminalAgentStep("approval", "blocked", "High-risk command requires a dedicated safety flow.");
-      setExecuting(false);
+      patchTerminalAgentRunFor(target.id, { phase: "blocked", error: "This command is blocked by the local safety policy." });
+      patchTerminalAgentStepFor(target.id, "approval", "blocked", "High-risk command requires a dedicated safety flow.");
+      updateTerminalSession(target.id, { executing: false });
       return;
     }
-    patchTerminalAgentRun({ phase: "executing" });
-    setTerminalAgentStatus(language === "zh-CN" ? "AI 正在输入并执行命令…" : "AI is entering and executing the command…");
-    patchTerminalAgentStep("approval", "completed", "Approved by the local read-only policy or by the user.");
-    patchTerminalAgentStep("execute", "running", "Executing through the local SSH gateway.");
+    patchTerminalAgentRunFor(target.id, { phase: "executing" });
+    updateTerminalSession(target.id, { agentStatus: language === "zh-CN" ? "AI 正在输入并执行命令…" : "AI is entering and executing the command…" });
+    patchTerminalAgentStepFor(target.id, "approval", "completed", "Approved by the local read-only policy or by the user.");
+    patchTerminalAgentStepFor(target.id, "execute", "running", "Executing through the local SSH gateway.");
     let handedOff = false;
     try {
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待命令结果…" : "AI is waiting for the command result…");
@@ -1007,8 +1079,8 @@ function App() {
       const output = interactive
         ? await runInteractiveCommand(run.plan.command)
         : await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.command });
-      const outputText = output || "(no output)";
-      if (!interactive) appendTerminalLines({ kind: "command", text: run.plan!.command }, { kind: "output", text: outputText });
+      const outputText = output.trim() ? output : "";
+      if (!interactive && outputText) appendTerminalLines({ kind: "command", text: run.plan!.command }, { kind: "output", text: outputText });
       appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan.command}\n\n${outputText}` });
       appendLog({ type: "terminal", title: "AgentRun output", serverId: target.id, serverName: target.name, content: `${run.task}\n\n$ ${run.plan.command}\n\n${outputText}`, status: "success" });
 
@@ -1054,7 +1126,7 @@ function App() {
       let verification = "";
       if (run.plan.verifyCommand?.trim()) {
         verification = await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.verifyCommand });
-        appendTerminalLines({ kind: "command", text: run.plan!.verifyCommand! }, { kind: "output", text: verification || "(no output)" });
+        if (verification.trim()) appendTerminalLines({ kind: "command", text: run.plan!.verifyCommand! }, { kind: "output", text: verification });
         appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan!.verifyCommand}\n\n${verification || "(no output)"}` });
       }
       patchTerminalAgentStep("verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
@@ -1101,7 +1173,7 @@ function App() {
       const nextServer = { ...target, memory: [...(target.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${run.task}: ${summary}` }].slice(-20) };
       const nextServers = servers.map((item) => item.id === target.id ? nextServer : item);
       persistServers(nextServers);
-      setServer(nextServer);
+      if (serverRef.current?.id === target.id) setServer(nextServer);
       patchTerminalAgentStep("remember", "completed", "Result summary saved locally.");
       patchTerminalAgentRun({ phase: "completed", result: summary });
       appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AgentRun completed.\n\n${summary}` });
@@ -1116,22 +1188,51 @@ function App() {
       appendLog({ type: "agent", title: "Terminal AgentRun failed", serverId: target.id, serverName: target.name, content: `${run.task}\n${message}`, status: "failed" });
     } finally {
       if (!handedOff) {
-        activeCommandId.current = null;
+        updateTerminalSession(target.id, { activeCommandId: null });
         setExecuting(false);
       }
     }
   };
 
-  const startTerminalAgentRun = async (task: string, request: SshRequest) => {
+  const startTerminalAgentRun = async (task: string, request: SshRequest, targetOverride?: Server) => {
     const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
-    if (!modelConfigured || !server) {
+    const target = targetOverride ?? server;
+    if (!modelConfigured || !target) {
       const message = !modelConfigured ? text.terminalAiNeedModel : text.connectionFailed;
-      setTerminalLines((lines) => [...lines, { kind: "system", text: message }]);
-      activeCommandId.current = null;
-      setExecuting(false);
+      setTerminalLinesState((lines) => [...lines, { kind: "system", text: message }]);
+      if (target) updateTerminalSession(target.id, { activeCommandId: null });
+      setExecutingState(false);
       return;
     }
-    const target = server;
+    // Keep every planning/execution update attached to this server even when
+    // the user switches to another terminal before the model responds.
+    const setTerminalAgentStatus = (value: string) => updateTerminalSession(target.id, { agentStatus: value });
+    const setExecuting = (value: boolean) => updateTerminalSession(target.id, { executing: value });
+    const setTerminalLines = (value: TerminalLine[] | ((lines: TerminalLine[]) => TerminalLine[])) => {
+      const current = terminalSessionsRef.current[target.id] ?? emptyTerminalSession();
+      updateTerminalSession(target.id, { lines: typeof value === "function" ? value(current.lines) : value });
+    };
+    const setTerminalAgentRun = (value: AgentRun | null | ((run: AgentRun | null) => AgentRun | null)) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun ?? null;
+      updateTerminalSession(target.id, { agentRun: typeof value === "function" ? value(current) : value });
+    };
+    const patchTerminalAgentRun = (patch: Partial<AgentRun>) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun;
+      if (current) setTerminalAgentRun({ ...current, ...patch });
+    };
+    const patchTerminalAgentStep = (id: AgentStepId, status: AgentStep["status"], detail?: string) => {
+      const current = terminalSessionsRef.current[target.id]?.agentRun;
+      if (current) setTerminalAgentRun({ ...current, steps: current.steps.map((step) => step.id === id ? { ...step, status, detail } : step) });
+    };
+    const appendTerminalLines = (...newLines: TerminalLine[]) => setTerminalLines((lines) => {
+      const next = [...lines];
+      for (const line of newLines) {
+        const last = next[next.length - 1];
+        if (last?.kind === line.kind && last.text === line.text) continue;
+        next.push(line);
+      }
+      return next;
+    });
     const steps: AgentStep[] = ["context", "memory", "search", "explore", "diagnose", "plan", "approval", "execute", "verify", "remember"].map((id) => ({ id: id as AgentStepId, label: id, status: "pending" }));
     const run: AgentRun = { id: crypto.randomUUID(), task, targetIds: [target.id], steps, phase: "running" };
     setTerminalAgentRun(run);
@@ -1165,7 +1266,7 @@ function App() {
         exploredServer = { ...target, profile, system: profile.osName, status: "connected" };
         const nextServers = servers.map((item) => item.id === target.id ? exploredServer : item);
         persistServers(nextServers);
-        setServer(exploredServer);
+        if (serverRef.current?.id === target.id) setServer(exploredServer);
       } catch (exploreError) {
         appendRuntimeLog({ level: "warn", event: "agent.explore.failed", message: "Environment exploration failed; continuing with saved profile.", details: exploreError instanceof Error ? exploreError.message : String(exploreError) });
       }
@@ -1216,7 +1317,7 @@ function App() {
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${message}` }]);
       appendRuntimeLog({ level: "error", event: "agent.terminal.failed", message: "Terminal AgentRun failed.", details: `${target.name} · ${message}` });
       appendLog({ type: "agent", title: "Terminal AgentRun failed", serverId: target.id, serverName: target.name, content: `${task}\n${message}`, status: "failed" });
-      activeCommandId.current = null;
+      updateTerminalSession(target.id, { activeCommandId: null });
       setExecuting(false);
     }
   };
@@ -1239,7 +1340,24 @@ function App() {
 
   const submitTerminalInput = async (rawInput?: string) => {
     const input = (rawInput ?? terminalInput).trim();
-    if (!server) return;
+    const selectedServer = serverRef.current;
+    if (!selectedServer) return;
+    // Everything below belongs to the server selected when the user pressed
+    // Enter. The user may switch focus while classification, planning, or SSH
+    // execution is still in flight.
+    const server = selectedServer;
+    const setTerminalInput = (value: string) => updateTerminalSession(selectedServer.id, { input: value });
+    const setTerminalLines = (value: TerminalLine[] | ((lines: TerminalLine[]) => TerminalLine[])) => {
+      const current = terminalSessionsRef.current[selectedServer.id] ?? emptyTerminalSession();
+      updateTerminalSession(selectedServer.id, { lines: typeof value === "function" ? value(current.lines) : value });
+    };
+    const setTerminalAgentStatus = (value: string) => updateTerminalSession(selectedServer.id, { agentStatus: value });
+    const setExecuting = (value: boolean) => updateTerminalSession(selectedServer.id, { executing: value });
+    const setTerminalAgentRun = (value: AgentRun | null | ((run: AgentRun | null) => AgentRun | null)) => {
+      const current = terminalSessionsRef.current[selectedServer.id]?.agentRun ?? null;
+      updateTerminalSession(selectedServer.id, { agentRun: typeof value === "function" ? value(current) : value });
+    };
+    const runInteractiveCommand = (command: string) => runInteractiveCommandFor(selectedServer.id, command);
     if (/^\/?stop$/i.test(input)) {
       setTerminalInput("");
       await stopCurrentCommand();
@@ -1256,7 +1374,7 @@ function App() {
       return;
     }
     if (!input || isExecuting) return;
-    const request = activeCredentials.current[server.id];
+    const request = await getCredential(server);
     if (!request) { setError(text.noCredentials); return; }
     const detectedAsCommand = isLikelyShellCommand(input);
     const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
@@ -1308,8 +1426,9 @@ function App() {
       if (intent === "task") {
         const commandId = crypto.randomUUID();
         activeCommandId.current = commandId;
+        updateTerminalSession(server.id, { activeCommandId: commandId });
         const commandRequest = { ...request, commandId, sessionId: server.id };
-        await startTerminalAgentRun(input, commandRequest);
+        await startTerminalAgentRun(input, commandRequest, selectedServer);
         return;
       }
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在回复…" : "AI is replying…");
@@ -1333,6 +1452,7 @@ function App() {
 
     const commandId = crypto.randomUUID();
     activeCommandId.current = commandId;
+    updateTerminalSession(server.id, { activeCommandId: commandId });
     const commandRequest = { ...request, commandId, sessionId: server.id };
     appendLog({ type: "terminal", title: "SSH command", serverId: server.id, serverName: server.name, content: input, status: "info" });
     appendConversationLog({ scope: "terminal", role: "user", serverId: server.id, serverName: server.name, content: input });
@@ -1344,7 +1464,7 @@ function App() {
     setError("");
     if (aiConfig.interventionMode !== "none" && modelConfigured && (aiConfig.interventionMode === "always" || !detectedAsCommand)) {
       setExecuting(true);
-      await startTerminalAgentRun(input, commandRequest);
+      await startTerminalAgentRun(input, commandRequest, selectedServer);
       return;
     }
     setExecuting(true);
@@ -1353,15 +1473,16 @@ function App() {
       const output = interactive
         ? await runInteractiveCommand(input)
         : await invoke<string>("execute_ssh_command", { request: commandRequest, command: input });
-      appendConversationLog({ scope: "terminal", role: "tool", serverId: server.id, serverName: server.name, content: `$ ${input}\n\n${output || "(no output)"}` });
-      appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: output || "(no output)", status: "success" });
-      if (!interactive) setTerminalLines((lines) => [...lines, { kind: "output", text: output || "(no output)" }]);
+      const outputText = output.trim() ? output : "";
+      appendConversationLog({ scope: "terminal", role: "tool", serverId: server.id, serverName: server.name, content: `$ ${input}\n\n${outputText}` });
+      appendLog({ type: "terminal", title: "SSH output", serverId: server.id, serverName: server.name, content: outputText, status: "success" });
+      if (!interactive && outputText) setTerminalLines((lines) => [...lines, { kind: "output", text: outputText }]);
     } catch (commandError) {
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` }]);
       appendRuntimeLog({ level: "error", event: "ssh.command.failed", message: "SSH command failed.", details: `${server.name} · ${commandError instanceof Error ? commandError.message : String(commandError)}` });
       appendConversationLog({ scope: "terminal", role: "system", serverId: server.id, serverName: server.name, content: `${text.terminalCommandFailed}${commandError instanceof Error ? commandError.message : String(commandError)}` });
       appendLog({ type: "terminal", title: "SSH command failed", serverId: server.id, serverName: server.name, content: commandError instanceof Error ? commandError.message : String(commandError), status: "failed" });
-    } finally { activeCommandId.current = null; setExecuting(false); setTerminalAgentStatus(""); }
+    } finally { activeCommandId.current = null; updateTerminalSession(server.id, { activeCommandId: null, executing: false, agentStatus: "" }); }
   };
 
   const connect = async () => {
@@ -1413,7 +1534,7 @@ function App() {
 
   const scanServer = async () => {
     if (!server || server.status !== "connected") { setError(text.reconnect); return; }
-    const request = activeCredentials.current[server.id];
+    const request = await getCredential(server);
     if (!request) { setError(text.noCredentials); return; }
     setScanning(true); setError("");
     try {
@@ -1510,14 +1631,21 @@ function App() {
   return <main className={view === "terminal" ? "shell terminal-shell" : view === "hosts" ? "shell hosts-dashboard-mode" : "shell"}>
     <aside className="sidebar">
       <div className="brand"><img className="brand-icon" src="/opsnest-icon.png" alt="" /><span>OpsNest</span></div>
-       <nav aria-label="Navigation"><button className={view === "hosts" || view === "server" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>{text.cron}</button><button onClick={() => setError(text.taskComing)}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
+       <nav aria-label="Navigation"><button className={view === "hosts" || view === "server" ? "active" : ""} onClick={() => setView("hosts")} onDoubleClick={openManager}>{text.hosts}</button>{servers.length > 0 && <div className="host-list">{servers.map((item) => <button className={`host-item ${server?.id === item.id ? "selected" : ""}`} key={item.id} onClick={() => selectServer(item)}><span className={`host-dot ${item.status === "connected" ? "online" : item.status}`}></span><span className="host-item-text"><strong>{item.name}</strong><small>{item.host} · {getServerStatusLabel(item.status, language, text)}</small></span><span className={`latency-badge ${getLatencyClass(item.latency)}`}>{formatLatency(item.latency, language)}</span></button>)}</div>}<button className={view === "cron" ? "active" : ""} onClick={openCron}>{text.cron}</button><button className={view === "tasks" ? "active" : ""} onClick={() => setView("tasks")}>{text.tasks}</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}>{text.settings}</button></nav>
       <button className="add-host" onClick={openWizard}>＋ {text.addServer}</button>
        <div className="sidebar-footer"><div className="sidebar-note">v{APP_VERSION}</div></div>
     </aside>
      <section className="content">
       {view === "tasks" && <TaskHistoryPanel logs={logs} runtimeLogs={runtimeLogs} conversationLogs={conversationLogs} language={language} onClear={clearLogs} onClearRuntime={clearRuntimeLogs} onClearConversations={clearConversationLogs} onExit={() => setView("hosts")} />}
       {view === "cron" && <CronPanel tasks={cronTasks} servers={servers} selectedServerId={cronServerId} loading={isCronLoading} editorOpen={isCronEditorOpen} form={cronForm} language={language} error={error} onServerChange={selectCronServer} onRefresh={() => { const target = servers.find((item) => item.id === cronServerId); if (target) void loadCronTasks(target); }} onNew={() => openCronEditor()} onEdit={openCronEditor} onToggle={toggleCronTask} onDelete={deleteCronTask} onFormChange={setCronForm} onSave={saveCronTask} onCloseEditor={() => setCronEditorOpen(false)} onExit={() => setView("hosts")} />}
-       {view === "terminal" && server && <TerminalPanel server={server} request={activeCredentials.current[server.id] ?? null} text={text} language={language} interventionMode={aiConfig.interventionMode} lines={terminalLines} executing={isExecuting} agentStatus={terminalAgentStatus} interactiveCommand={interactiveCommand} onInputChange={setTerminalInput} onSubmit={submitTerminalInput} onStop={stopCurrentCommand} onExit={exitTerminal} onInteractiveComplete={completeInteractiveCommand} onInteractiveError={failInteractiveCommand} />}
+       {Object.entries(terminalSessions).map(([sessionId, session]) => {
+        const panelServer = servers.find((item) => item.id === sessionId) ?? (server?.id === sessionId ? server : null);
+        if (!panelServer) return null;
+        const visible = view === "terminal" && server?.id === sessionId;
+        return <div className={visible ? "terminal-session-active" : "terminal-session-background"} key={sessionId}>
+          <TerminalPanel server={panelServer} request={activeCredentials.current[sessionId] ?? null} text={text} language={language} interventionMode={aiConfig.interventionMode} lines={session.lines} executing={session.executing} agentStatus={session.agentStatus} interactiveCommand={session.interactiveCommand} onInputChange={(value) => updateTerminalSession(sessionId, { input: value })} onSubmit={(rawInput) => { if (serverRef.current?.id === sessionId) void submitTerminalInput(rawInput); }} onStop={() => { if (serverRef.current?.id === sessionId) void stopCurrentCommand(); }} onExit={() => { if (serverRef.current?.id === sessionId) exitTerminal(); }} onInteractiveComplete={(id, output) => completeInteractiveCommandFor(sessionId, id, output)} onInteractiveError={(id, message) => failInteractiveCommandFor(sessionId, id, message)} />
+        </div>;
+       })}
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
       {contextMenu && <ServerContextMenu connectLabel={text.contextConnect} terminalLabel={text.contextTerminal} editLabel={language === "zh-CN" ? "编辑" : "Edit"} state={contextMenu} onConnect={() => { void connectSavedServer(contextMenu.server); }} onTerminal={() => { setContextMenu(null); openTerminal(contextMenu.server); }} onEdit={() => editServer(contextMenu.server)} />}
       {view === "hosts" && <ServerDashboard servers={servers} text={text} language={language} modelStatusClass={modelStatusClass} modelStatusLabel={modelStatusLabel} onAdd={openWizard} onOpen={openTerminal} onConnect={(item) => { void connectSavedServer(item); }} onEdit={editServer} />}

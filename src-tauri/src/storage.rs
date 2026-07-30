@@ -143,7 +143,8 @@ pub fn load_server_credential(server_id: String) -> Result<Option<Value>, String
     let entry = credential_entry(&server_id)?;
     let secret = match entry.get_password() {
         Ok(secret) => secret,
-        Err(_) => return Ok(None),
+        Err(keyring::Error::NoEntry) => return Ok(None),
+        Err(error) => return Err(error.to_string()),
     };
     serde_json::from_str(&secret)
         .map(Some)

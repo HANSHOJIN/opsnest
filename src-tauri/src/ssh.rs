@@ -180,7 +180,11 @@ async fn connect_session(
         // that quiet period; use SSH keepalives to detect a real disconnect.
         inactivity_timeout: None,
         keepalive_interval: Some(Duration::from_secs(10)),
-        keepalive_max: 3,
+        // Some Dropbear/OpenWrt SSH servers do not acknowledge every
+        // keepalive request. A small finite limit makes a healthy idle shell
+        // look disconnected after a few minutes. Zero means unlimited missed
+        // keepalives; real socket failure is still reported by russh.
+        keepalive_max: 0,
         ..Default::default()
     };
     let handler = OpsNestHandler {
@@ -465,7 +469,16 @@ async fn create_interactive_shell(
     request: &SshTestRequest,
     session_id: &str,
 ) -> Result<(), String> {
-    close_interactive_shell(session_id).await?;
+    // A terminal panel can be remounted while the app is still open (for
+    // example after switching views). Reuse the existing per-server PTY so a
+    // view change never destroys the remote shell or its working directory.
+    if interactive_shells()
+        .lock()
+        .map_err(|_| "无法读取交互式 SSH 会话表".to_string())?
+        .contains_key(session_id)
+    {
+        return Ok(());
+    }
     let session = connect_session(request).await?;
     let channel = session
         .channel_open_session()

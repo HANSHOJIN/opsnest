@@ -15,11 +15,18 @@ function getHostPort(container: DockerContainer) {
   return mappings[0]?.host ?? "";
 }
 
-export function DockerContainersPanel({ server, containers, language }: { server: Server; containers: DockerContainer[]; language: Locale }) {
+export function DockerContainersPanel({ server, containers, language, onRefresh, refreshing = false }: { server: Server; containers: DockerContainer[]; language: Locale; onRefresh?: () => void; refreshing?: boolean }) {
   const [expanded, setExpanded] = useState(containers.length > 0);
   const zhMode = language === "zh-CN";
+  const refresh = () => {
+    setExpanded(true);
+    onRefresh?.();
+  };
   return <div className="docker-containers-panel">
-    <button className="docker-expand-button" onClick={() => setExpanded((value) => !value)}>{expanded ? (zhMode ? "收起容器" : "Collapse containers") : (zhMode ? "展开全部容器（" : "Show all containers (") + containers.length + (zhMode ? "）" : ")")}</button>
+    <div className="docker-panel-actions">
+      <button className="docker-expand-button" onClick={() => setExpanded((value) => !value)}>{expanded ? (zhMode ? "收起容器" : "Collapse containers") : (zhMode ? "展开全部容器（" : "Show all containers (") + containers.length + (zhMode ? "）" : ")")}</button>
+      {onRefresh && <button className="docker-refresh-button" onClick={refresh} disabled={refreshing}>{refreshing ? (zhMode ? "读取中…" : "Reading…") : (zhMode ? "刷新容器" : "Refresh containers")}</button>}
+    </div>
     {expanded && <div className="docker-container-list">{containers.length ? <>
       <div className="docker-container-list-heading"><div><strong>{zhMode ? "容器" : "Containers"}</strong><span>{zhMode ? "服务器上的全部 Docker 容器" : "All Docker containers on this server"}</span></div><b>{containers.length}</b></div>
       {containers.map((container) => {
