@@ -1,5 +1,14 @@
 import type { Server, ServerProfile } from "../../domain/types";
 
+export function isPlaceholderHostname(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return !normalized || ["unknown", "unknown hostname", "未知", "未知主机"].includes(normalized);
+}
+
+export function displayServerHostname(server: Server) {
+  return isPlaceholderHostname(server.profile?.hostname) ? server.host : server.profile!.hostname.trim();
+}
+
 export function hasUsefulServerProfileValue(
   profile: ServerProfile | undefined,
   isUnknownValue: (value: string | undefined) => boolean,

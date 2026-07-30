@@ -8,7 +8,7 @@ import { iconCandidates, normalizeIconKey, RemoteIcon } from "./features/icons/c
 import { ServiceIcon, setActiveServiceIconServer, setDiscoveredServiceUpdateAction } from "./features/icons/services";
 import { SystemIcon } from "./features/icons/systems";
 import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
-import { buildMachineIdentityValue, hasUsefulServerProfileValue, normalizeServerProfileValue } from "./features/servers/profile";
+import { buildMachineIdentityValue, displayServerHostname, hasUsefulServerProfileValue, isPlaceholderHostname, normalizeServerProfileValue } from "./features/servers/profile";
 import { getServiceUrl, openServiceUrl } from "./features/services/url";
 import { configureCustomServiceShortcuts, CustomServiceCard } from "./features/services/custom-shortcuts";
 import { DockerContainersPanel } from "./features/docker/containers-panel";
@@ -2072,11 +2072,6 @@ function normalizeConversationLog(log: ConversationLog): ConversationLog {
   return { ...log, sessionName, serverName: sessionName };
 }
 
-function isPlaceholderHostname(value: string | undefined) {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  return !normalized || ["unknown", "unknown hostname", "未知", "未知主机"].includes(normalized);
-}
-
 function isUnknownProfileValue(value: string | undefined) {
   const normalized = value?.trim().toLowerCase() ?? "";
   return !normalized || ["unknown", "未知", "未知主机", "unknown hostname", "unavailable", "—", "-"].includes(normalized);
@@ -2092,10 +2087,6 @@ function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): S
 
 function buildMachineIdentity(server: Server) {
   return buildMachineIdentityValue(server);
-}
-
-function displayServerHostname(server: Server) {
-  return isPlaceholderHostname(server.profile?.hostname) ? server.host : server.profile!.hostname.trim();
 }
 
 function normalizeBaseUrl(value: string) { return value.trim().replace(/\/+$/, ""); }
