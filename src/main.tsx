@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
 import { isNasProfile, isOpenWrtProfile } from "./features/servers/detail-routing";
+import { isHighRiskCommand, isReadOnlyPlan, isRecoverableAgentFailure, normalizeBaseUrl, redactLogText } from "./features/agent/runtime-utils";
 import { ServerContextMenu } from "./features/servers/context-menu";
 import { getServerStatusLabel, ServerDashboard } from "./features/servers/dashboard";
 import { iconCandidates, normalizeIconKey, RemoteIcon } from "./features/icons/catalog";
@@ -2051,16 +2052,6 @@ function LegacyTerminalPanel({ server, request, text, language, interventionMode
 }
 */
 
-function redactLogText(value: string) {
-  return value
-    .replace(/(password|passwd|api[_-]?key|authorization|bearer|token|secret|密码|口令)\s*[:=：]?\s*[^\s,;，；]+/gi, "$1=***")
-    .replace(/\b(?:sk|gsk|xai)-[A-Za-z0-9_-]{12,}\b/g, "***")
-    .replace(/\bghp_[A-Za-z0-9]{20,}\b/g, "***")
-    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "***")
-    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, "***")
-    .slice(0, 12000);
-}
-
 function normalizeConversationLog(log: ConversationLog): ConversationLog {
   if (log.scope !== "terminal") return { ...log, sessionName: log.sessionName ?? "服务器总管" };
   const sessionName = log.sessionName ?? (log.serverName?.startsWith("SSH 终端 - ") ? log.serverName : `SSH 终端 - ${log.serverName ?? "未知服务器"}`);
@@ -2083,8 +2074,6 @@ function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): S
 function buildMachineIdentity(server: Server) {
   return buildMachineIdentityValue(server);
 }
-
-function normalizeBaseUrl(value: string) { return value.trim().replace(/\/+$/, ""); }
 
 function isManagerAddServerRequest(input: string) {
   return /(?:添加|新增|新建|保存).*(?:服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);
@@ -2116,20 +2105,6 @@ function isServiceShortcutRequest(input: string) {
 function isExplicitServerTask(input: string) {
   return /(?:查看|检查|列出|列举|显示|获取|统计|查询|安装|卸载|升级|更新|删除|创建|导出|下载|上传|运行|执行|重启|停止|启动|修复|诊断|排查|部署|备份|清理|搜索|监控|连接).*(?:服务器|系统|服务|软件|应用|容器|Docker|Nginx|日志|文件|磁盘|内存|进程|端口|版本|网络|配置|任务|cron|主机)/i.test(input)
     || /(?:为什么|怎么).*(?:打不开|失败|异常|断开|close|error|报错|占满|卡顿|变慢)/i.test(input);
-}
-
-function isHighRiskCommand(command: string) {
-  return /\brm\s+-rf\b|\bmkfs(?:\.|\s)|\bdd\s+if=|\bdrop\s+(?:database|table)|\bshutdown\b|\breboot\b|\bpoweroff\b|\biptables\b|\bufw\s+delete|:\s*>\s*\/|\bchmod\s+777\b/i.test(command);
-}
-
-function isReadOnlyPlan(command: string, risk?: ShellPlan["risk"]) {
-  if (isHighRiskCommand(command)) return false;
-  if (risk === "low") return true;
-  return /^(?:apt(?:-get)?\s+(?:list|show|policy|search)|dpkg\s+-l|rpm\s+-qa|dnf\s+(?:list|info)|yum\s+(?:list|info)|pacman\s+-Q|command\s+-v|which\s+|type\s+|systemctl\s+(?:status|is-active|is-enabled|list-units|list-sockets|list-timers)|docker\s+(?:ps|images|info|inspect|version)|ss\s|netstat\s|df\s|du\s|free\s|uname\s|uptime\b|hostname\b|whoami\b|id\b|ps\s|cat\s|grep\s|head\s|tail\s|find\s)/i.test(command.trim());
-}
-
-function isRecoverableAgentFailure(output: string) {
-  return /command not found|not found|no such file or directory|unknown command|cannot execute/i.test(output);
 }
 
 async function listModels(config: AiConfig) {
