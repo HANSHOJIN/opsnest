@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
 import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
+import { buildMachineIdentityValue, hasUsefulServerProfileValue, normalizeServerProfileValue } from "./features/servers/profile";
+import { getServiceUrl, openServiceUrl } from "./features/services/url";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
 import { restoreTerminalLines } from "./features/terminal/history";
 import type {
@@ -2331,72 +2333,19 @@ function isUnknownProfileValue(value: string | undefined) {
 }
 
 function hasUsefulServerProfile(profile?: ServerProfile) {
-  if (!profile) return false;
-  const osName = profile.osName.trim().toLowerCase();
-  const osVersion = profile.osVersion?.trim().toLowerCase() ?? "";
-  const hasResources = [profile.cpuCores, profile.cpuModel, profile.memory, profile.disk]
-    .some((value) => !isUnknownProfileValue(value));
-  const hasContainerData = profile.dockerInstalled || Boolean(profile.dockerItems?.length);
-  const hasSpecificIdentity = Boolean(osVersion && !isUnknownProfileValue(osVersion))
-    || (osName !== "linux" && !isUnknownProfileValue(osName));
-  return hasResources || hasContainerData || hasSpecificIdentity;
+  return hasUsefulServerProfileValue(profile, isUnknownProfileValue);
 }
 
 function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): ServerProfile {
-  const systemIdentity = `${profile.osId ?? ""} ${profile.osName ?? ""}`.toLowerCase();
-  const isOpenWrt = /openwrt|istoreos|immortalwrt/.test(systemIdentity);
-  return {
-    ...profile,
-    openwrt: isOpenWrt ? profile.openwrt : undefined,
-    hostname: isPlaceholderHostname(profile.hostname) ? fallbackHost : profile.hostname.trim(),
-  };
+  return normalizeServerProfileValue(profile, fallbackHost, isPlaceholderHostname);
 }
 
 function buildMachineIdentity(server: Server) {
-  const profile = server.profile;
-  const systemIdentity = `${server.system} ${profile?.osId ?? ""} ${profile?.osName ?? ""}`.toLowerCase();
-  const isRouter = /openwrt|istoreos|immortalwrt/.test(systemIdentity);
-  const role = isRouter ? "router / gateway" : "Linux server";
-  const facts = profile
-    ? `OS=${profile.osName}; hostname=${profile.hostname}; CPU=${profile.cpuModel ? `${profile.cpuModel}, ` : ""}${profile.cpuCores}; memory=${profile.memory}; disk=${profile.disk}; Docker=${profile.dockerInstalled ? `${profile.dockerContainers} running` : "not installed"}`
-    : `OS=${server.system}; profile not scanned`;
-  const routerFacts = isRouter
-    ? `Router profile: iStoreOS/OpenWrt family; role=${role}; configuration model=UCI; firewall model=firewall4/nftables when available; network concepts=WAN, LAN, DHCP, NAT and port forwarding. ${profile?.openwrt ? `firmware=${profile.openwrt.firmware}; kernel=${profile.openwrt.kernel}; WAN=${profile.openwrt.wanIp}; LAN=${profile.openwrt.lanIp}; LAN clients=${profile.openwrt.lanClients}` : "Router details still need to be explored."}`
-    : `Machine role=${role}; do not assume router-specific configuration unless evidence confirms it.`;
-  const nasFacts = profile?.nas ? `NAS profile: ${profile.nas.kind}; management port=${profile.nas.managementPort}; use NAS application, Docker and storage context when interpreting requests.` : "";
-  const services = [...(server.services ?? []), ...(server.customServices ?? [])]
-    .map((service) => `${service.name}${service.port ? `:${service.port}` : ""}`)
-    .join(", ");
-  return `Machine identity: ${server.name} (${server.username}@${server.host}:${server.port})\n${facts}\n${routerFacts}\n${nasFacts}\nDiscovered services: ${services || "not scanned"}`;
+  return buildMachineIdentityValue(server);
 }
 
 function displayServerHostname(server: Server) {
   return isPlaceholderHostname(server.profile?.hostname) ? server.host : server.profile!.hostname.trim();
-}
-
-function getServiceUrl(host: string, service: DiscoveredService) {
-  if (!service.web || !service.port) return "";
-  const path = service.webPath?.trim() ?? "";
-  const normalizedPath = path ? (path.startsWith("/") ? path : `/${path}`) : "";
-  const scheme = service.webScheme ?? "http";
-  return `${scheme}://${host}:${service.port}${normalizedPath}`;
-}
-
-function openServiceUrl(url: string) {
-  const fallback = () => void invoke("open_external_url", { url }).catch(() => window.open(url, "_blank", "noopener,noreferrer"));
-  try {
-    const parsed = new URL(url);
-    const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-    if (!parsed.hostname || !Number.isInteger(port) || port < 1 || port > 65535) return fallback();
-    void invoke<string>("resolve_service_url", { host: parsed.hostname, port, preferredScheme: null })
-      .then((baseUrl) => {
-        const suffix = `${parsed.pathname === "/" ? "" : parsed.pathname}${parsed.search}${parsed.hash}`;
-        return invoke("open_external_url", { url: `${baseUrl.replace(/\/$/, "")}${suffix}` });
-      })
-      .catch(fallback);
-  } catch {
-    fallback();
-  }
 }
 
 function CustomServiceShortcutCard({ serverId, service, language, onDelete }: { serverId: string; service: DiscoveredService; language: Locale; onDelete?: (serverId: string, serviceId: string) => void }) {
