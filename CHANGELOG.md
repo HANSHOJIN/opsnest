@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2-alpha.1
+
+- 重构内部文件，拆分为模块化，便于开发。
+
 ## 0.1.1-alpha.2
 
 - AgentRun 改为通过 OpenAI-compatible Chat Completions Function Calling 请求服务器命令，并把真实命令输出回传给模型，以支持连续的多步骤任务。

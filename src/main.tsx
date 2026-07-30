@@ -1,7 +1,16 @@
 import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
+import { initialServerForm } from "./features/servers/defaults";
+import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
+import type {
+  ActivityLog, AgentRun, AgentStep, AgentStepId, AgentToolCall, AgentToolSession, AiConfig, AiInterventionMode,
+  AiProvider, AuthMethod, ContextMenuState, ConversationLog, CronForm, CronTask, DiagnosisResult, DiscoveredService,
+  DockerContainer, InteractiveCommand, Locale, ManagerMessage, ManagerServerDetails, ModelConnectionStatus, PersistedData,
+  RuntimeLog, Server, ServerForm, ServerMemory, ServerProfile, ServerStatus, ShellContext, ShellPlan, SshRequest, TerminalIntent,
+  TerminalLine, TerminalMode, View, WebSearchResult,
+} from "./domain/types";
+import { desktopInvoke as invoke, listenDesktopEvent as listen } from "./services/desktop";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import debianIcon from "../icons/packed/systems/debian.svg?raw";
@@ -40,69 +49,12 @@ import nodeIcon from "../icons/packed/services/node.svg?raw";
 import pythonIcon from "../icons/packed/services/python.svg?raw";
 import javaIcon from "../icons/packed/services/java.svg?raw";
 import "@xterm/xterm/css/xterm.css";
-import "./styles.css";
-import "./manager.css";
-
-type AuthMethod = "password" | "privateKey";
-type ServerStatus = "connected" | "saved" | "connecting" | "failed";
-type View = "hosts" | "server" | "manager" | "settings" | "terminal" | "tasks" | "cron";
-type TerminalMode = "shell" | "ai";
-type TerminalIntent = "chat" | "task";
-type TerminalLine = { kind: "system" | "command" | "output" | "ai"; text: string };
-type ShellContext = { cwd: string; virtualEnv: string };
-type InteractiveCommand = { id: string; command: string };
-type ManagerMessage = { role: "user" | "assistant" | "system"; text: string };
-type ConversationLog = { id: string; timestamp: string; sessionId: string; sessionName?: string; scope: "manager" | "terminal"; role: "user" | "assistant" | "system" | "tool"; serverId?: string; serverName?: string; content: string };
-type RuntimeLog = { id: string; timestamp: string; level: "info" | "warn" | "error"; event: string; message: string; details?: string };
-type ShellPlan = { explanation: string; command: string; verifyCommand?: string; risk?: "low" | "medium" | "high" };
-type DiagnosisResult = { label: string; command: string; output: string; success: boolean };
-type CronTask = { id: string; name: string; source: string; user: string; schedule: string; command: string; enabled: boolean; editable: boolean; detail: string };
-type CronForm = { id: string; name: string; schedule: string; command: string; enabled: boolean };
-type AgentStepId = "context" | "memory" | "search" | "explore" | "diagnose" | "plan" | "approval" | "execute" | "verify" | "remember";
-type AgentStep = { id: AgentStepId; label: string; status: "pending" | "running" | "completed" | "failed" | "blocked"; detail?: string };
-type AgentToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
-type AgentToolSession = { messages: Array<Record<string, unknown>>; toolCall: AgentToolCall };
-type AgentRun = { id: string; task: string; targetIds: string[]; steps: AgentStep[]; phase: "running" | "waiting_approval" | "executing" | "completed" | "failed" | "blocked"; plan?: ShellPlan; toolSession?: AgentToolSession; result?: string; error?: string; attempt?: number };
-type ServerMemory = { id: string; createdAt: string; summary: string };
-type WebSearchResult = { title: string; url: string; snippet: string };
-type ActivityLog = { id: string; timestamp: string; type: "manager" | "terminal" | "agent" | "system"; role?: ManagerMessage["role"]; serverId?: string; serverName?: string; title: string; content: string; status?: "success" | "failed" | "cancelled" | "info" };
-type ContextMenuState = { server: Server; x: number; y: number } | null;
-type Locale = "zh-CN" | "en-US";
-type AiProvider = "openai" | "deepseek" | "openrouter" | "ollama" | "custom";
-type AiInterventionMode = "always" | "smart" | "none";
-type ModelConnectionStatus = "unknown" | "connected" | "failed";
-type ManagerServerDetails = { name?: string; host?: string; port?: number; username?: string; password?: string; privateKeyPath?: string };
-
-type OpenWrtProfile = { model: string; firmware: string; kernel: string; wanIp: string; lanIp: string; lanClients: string; wifiClients: string };
-type NasProfile = { kind: string; version: string; managementPort: string };
-type DockerContainer = { id: string; name: string; image: string; status: string; ports: string };
-type ServerProfile = { osId?: string; osVersion?: string; osName: string; hostname: string; cpuCores: string; cpuModel?: string; memory: string; disk: string; dockerInstalled: boolean; dockerContainers: string; dockerItems?: DockerContainer[]; openwrt?: OpenWrtProfile; nas?: NasProfile };
-type DiscoveredService = { id: string; name: string; category: string; status: string; version: string; port?: number | null; web: boolean; webPath?: string; webScheme?: "http" | "https" };
-type Server = { id: string; name: string; host: string; port: number; username: string; system: string; status: ServerStatus; latency?: number; note?: string; profile?: ServerProfile; aiSummary?: string; memory?: ServerMemory[]; services?: DiscoveredService[]; customServices?: DiscoveredService[]; servicesScannedAt?: string };
-type ServerForm = { name: string; host: string; port: string; username: string; note: string; authMethod: AuthMethod; password: string; sudoPassword: string; privateKeyPath: string; passphrase: string; rememberCredentials: boolean };
-type SshRequest = { host: string; port: number; username: string; authMethod: AuthMethod; password: string | null; sudoPassword?: string | null; privateKeyPath: string | null; passphrase: string | null; commandId?: string; sessionId?: string };
-type AiConfig = { provider: AiProvider; apiKey: string; baseUrl: string; model: string; interventionMode: AiInterventionMode };
-type PersistedData = { servers?: Server[]; aiConfig?: Partial<AiConfig> | null; aiConnectionStatus?: ModelConnectionStatus; language?: Locale; logs?: ActivityLog[] };
-
-const STORAGE_KEY = "opsnest.servers";
-const AI_STORAGE_KEY = "opsnest.ai-model";
-const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
-const LANGUAGE_STORAGE_KEY = "opsnest.language";
-const APP_VERSION = "0.1.1-alpha.2";
+import "./styles/index.css";
 let customServiceRegistry: Record<string, DiscoveredService[]> = {};
 let customServiceServerRegistry: Record<string, Server> = {};
 let customServiceDeleteAction: ((serverId: string, serviceId: string) => void) | undefined;
 let discoveredServiceUpdateAction: ((serverId: string, serviceId: string, port: number, webPath: string) => void) | undefined;
 let activeServiceServerId = "";
-const initialForm: ServerForm = { name: "", host: "", port: "22", username: "root", note: "", authMethod: "password", password: "", sudoPassword: "", privateKeyPath: "", passphrase: "", rememberCredentials: true };
-const defaultAiConfig: AiConfig = { provider: "deepseek", apiKey: "", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", interventionMode: "smart" };
-const providerPresets: Record<AiProvider, { label: string; baseUrl: string; model: string; keyRequired: boolean }> = {
-  openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", model: "gpt-4o-mini", keyRequired: true },
-  deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", keyRequired: true },
-  openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini", keyRequired: true },
-  ollama: { label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:7b", keyRequired: false },
-  custom: { label: "Custom endpoint", baseUrl: "", model: "", keyRequired: true },
-};
 
 const zh = {
   welcome: "欢迎回来", hosts: "我的服务器", cron: "定时任务", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
@@ -125,7 +77,7 @@ function App() {
   const [view, setView] = useState<View>("hosts");
   const [servers, setServers] = useState<Server[]>([]);
   const [server, setServer] = useState<Server | null>(null);
-  const [form, setForm] = useState<ServerForm>(initialForm);
+  const [form, setForm] = useState<ServerForm>(initialServerForm);
   const [editingServerId, setEditingServerId] = useState<string | null>(null);
   const [aiConfig, setAiConfig] = useState<AiConfig>(defaultAiConfig);
   const [terminalMode, setTerminalMode] = useState<TerminalMode>("shell");
@@ -336,7 +288,7 @@ function App() {
   const changeLanguage = (next: Locale) => { setLanguage(next); localStorage.setItem(LANGUAGE_STORAGE_KEY, next); persistData(servers, aiConfig, next, modelConnection); };
   const openWizard = () => {
     setEditingServerId(null);
-    const savedForm = server?.status === "saved" ? { ...initialForm, name: server.name, host: server.host, port: String(server.port), username: server.username, note: server.note ?? "" } : initialForm;
+    const savedForm = server?.status === "saved" ? { ...initialServerForm, name: server.name, host: server.host, port: String(server.port), username: server.username, note: server.note ?? "" } : initialServerForm;
     setForm(savedForm); setError(""); setWizardOpen(true);
   };
   const editServer = async (selected: Server) => {
@@ -346,7 +298,7 @@ function App() {
       try { credential = await invoke<SshRequest | null>("load_server_credential", { serverId: selected.id }); } catch { credential = null; }
       if (credential) activeCredentials.current[selected.id] = credential;
     }
-    setForm({ ...initialForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username, note: selected.note ?? "", authMethod: credential?.authMethod ?? "password", password: credential?.password ?? "", sudoPassword: credential?.sudoPassword ?? "", privateKeyPath: credential?.privateKeyPath ?? "", passphrase: credential?.passphrase ?? "" });
+    setForm({ ...initialServerForm, name: selected.name, host: selected.host, port: String(selected.port), username: selected.username, note: selected.note ?? "", authMethod: credential?.authMethod ?? "password", password: credential?.password ?? "", sudoPassword: credential?.sudoPassword ?? "", privateKeyPath: credential?.privateKeyPath ?? "", passphrase: credential?.passphrase ?? "" });
     setWizardOpen(true);
   };
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, sudoPassword: form.sudoPassword.trim() || null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
