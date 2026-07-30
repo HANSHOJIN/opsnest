@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
 import { iconCandidates, normalizeIconKey, RemoteIcon } from "./features/icons/catalog";
+import { SystemIcon } from "./features/icons/systems";
 import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
 import { buildMachineIdentityValue, hasUsefulServerProfileValue, normalizeServerProfileValue } from "./features/servers/profile";
 import { getServiceUrl, openServiceUrl } from "./features/services/url";
@@ -18,20 +19,6 @@ import type {
 import { desktopInvoke as invoke, listenDesktopEvent as listen } from "./services/desktop";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import debianIcon from "../icons/packed/systems/debian.svg?raw";
-import ubuntuIcon from "../icons/packed/systems/ubuntu.svg?raw";
-import openwrtIcon from "../icons/packed/systems/openwrt.svg?raw";
-import alpineIcon from "../icons/packed/systems/alpine.svg?raw";
-import archIcon from "../icons/packed/systems/arch.svg?raw";
-import fedoraIcon from "../icons/packed/systems/fedora.svg?raw";
-import centosIcon from "../icons/packed/systems/centos.svg?raw";
-import rockyIcon from "../icons/packed/systems/rocky.svg?raw";
-import almaIcon from "../icons/packed/systems/alma.svg?raw";
-import nixosIcon from "../icons/packed/systems/nixos.svg?raw";
-import kaliIcon from "../icons/packed/systems/kali.svg?raw";
-import gentooIcon from "../icons/packed/systems/gentoo.svg?raw";
-import linuxIcon from "../icons/packed/systems/linux.svg?raw";
-import freenasIcon from "../icons/packed/systems/freenas.svg?raw";
 import dockerIcon from "../icons/packed/services/docker.svg?raw";
 import nginxIcon from "../icons/packed/services/nginx.svg?raw";
 import apacheIcon from "../icons/packed/services/apache.svg?raw";
@@ -43,7 +30,6 @@ import alistIcon from "../icons/packed/services/alist.svg?raw";
 import openListImage from "../icons/packed/services/openlist.png";
 import homeBoxImage from "../icons/packed/services/homebox.png";
 import luckyImage from "../icons/packed/services/lucky.png";
-import fnosImage from "../icons/packed/systems/fnos.png";
 import mysqlIcon from "../icons/packed/services/mysql.svg?raw";
 import mariadbIcon from "../icons/packed/services/mariadb.svg?raw";
 import postgresqlIcon from "../icons/packed/services/postgresql.svg?raw";
@@ -1564,50 +1550,6 @@ function getServerStatusLabel(status: ServerStatus, language: Locale, text: type
   return status === "connected" ? text.connected : text.notConnected;
 }
 
-
-const systemIconMarkup: Record<string, string> = {
-  debian: debianIcon,
-  ubuntu: ubuntuIcon,
-  openwrt: openwrtIcon,
-  fnos: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${fnosImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
-  nas: freenasIcon,
-  alpine: alpineIcon,
-  arch: archIcon,
-  fedora: fedoraIcon,
-  centos: centosIcon,
-  rocky: rockyIcon,
-  alma: almaIcon,
-  nixos: nixosIcon,
-  kali: kaliIcon,
-  gentoo: gentooIcon,
-  linux: linuxIcon,
-};
-
-function getSystemIconKey(profile?: ServerProfile, system?: string) {
-  const value = `${profile?.osId ?? ""} ${profile?.osName ?? ""} ${profile?.hostname ?? ""} ${system ?? ""}`.toLowerCase();
-  if (profile?.nas?.kind === "fnos" || /fnos|fnnas|feiniu|飞牛/.test(value)) return "fnos";
-  if (/truenas|freenas|synology|qnap|openmediavault/.test(value)) return "nas";
-  if (/istoreos|immortalwrt|openwrt/.test(value)) return "openwrt";
-  if (/debian/.test(value)) return "debian";
-  if (/ubuntu|kubuntu|lubuntu/.test(value)) return "ubuntu";
-  if (/alpine/.test(value)) return "alpine";
-  if (/arch/.test(value)) return "arch";
-  if (/fedora/.test(value)) return "fedora";
-  if (/centos/.test(value)) return "centos";
-  if (/rocky/.test(value)) return "rocky";
-  if (/alma/.test(value)) return "alma";
-  if (/nixos/.test(value)) return "nixos";
-  if (/kali/.test(value)) return "kali";
-  if (/gentoo/.test(value)) return "gentoo";
-  return "linux";
-}
-
-function SystemIcon({ profile, system }: { profile?: ServerProfile; system?: string }) {
-  const iconKey = getSystemIconKey(profile, system);
-  const aliases = iconKey === "fnos" ? ["feiniu", "fnos"] : iconKey === "nas" ? ["truenas", "freenas"] : [];
-  const candidates = iconCandidates(iconKey, profile?.osVersion ?? profile?.openwrt?.firmware, aliases);
-  return <div className={`server-orb system-orb system-${iconKey}`} aria-label={profile?.osName ?? system ?? "Linux"}><RemoteIcon directory="systems" candidates={candidates} fallback={systemIconMarkup[iconKey]} preferFallback className="system-icon-image" /></div>;
-}
 
 function ServerContextMenu({ text, editLabel, state, onConnect, onTerminal, onEdit }: { text: typeof zh; editLabel: string; state: { server: Server; x: number; y: number }; onConnect: () => void; onTerminal: () => void; onEdit: () => void }) {
   return <div className="server-context-menu" style={{ left: state.x, top: state.y }} onClick={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}><strong>{state.server.name}</strong><button onClick={onConnect}>↻ {text.contextConnect}</button><button onClick={onTerminal}>〉 {text.contextTerminal}</button><button onClick={onEdit}>✎ {editLabel}</button></div>;
