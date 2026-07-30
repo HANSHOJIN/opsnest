@@ -1772,6 +1772,10 @@ function ServerDetailViewV2({ server, text, language, onBack, onOpen, onConnect,
   </section>;
 }
 
+/*
+ * TerminalPanel moved to features/terminal/panel.tsx in 0.1.2-alpha.1.
+ * The original implementation is intentionally retained here temporarily as a
+ * non-executable migration reference while terminal parity is verified.
 function LegacyTerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: typeof zh; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -1801,7 +1805,7 @@ function LegacyTerminalPanel({ server, request, text, language, interventionMode
     try {
       const context = await invoke<string>("execute_ssh_command", {
         request: { ...request, sessionId: server.id },
-        command: "printf '__OPSNEST_CONTEXT__%s\\t%s\\n' \"$PWD\" \"${VIRTUAL_ENV_PROMPT:-${VIRTUAL_ENV##*/}}\"",
+        command: "legacy terminal migration reference",
       });
       const line = context.split(/\r?\n/).find((item) => item.includes("__OPSNEST_CONTEXT__"));
       if (!line) return null;
@@ -2056,6 +2060,7 @@ function LegacyTerminalPanel({ server, request, text, language, interventionMode
     <div className="terminal-xterm-host" ref={hostRef} aria-label="SSH terminal" />
   </section>;
 }
+*/
 
 function redactLogText(value: string) {
   return value
