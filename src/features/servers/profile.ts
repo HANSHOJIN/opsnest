@@ -5,6 +5,11 @@ export function isPlaceholderHostname(value: string | undefined) {
   return !normalized || ["unknown", "unknown hostname", "未知", "未知主机"].includes(normalized);
 }
 
+export function isUnknownProfileValue(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return !normalized || ["unknown", "未知", "未知主机", "unknown hostname", "unavailable", "—", "-"].includes(normalized);
+}
+
 export function displayServerHostname(server: Server) {
   return isPlaceholderHostname(server.profile?.hostname) ? server.host : server.profile!.hostname.trim();
 }
@@ -25,6 +30,10 @@ export function hasUsefulServerProfileValue(
   return hasResources || hasContainerData || hasSpecificIdentity;
 }
 
+export function hasUsefulServerProfile(profile?: ServerProfile) {
+  return hasUsefulServerProfileValue(profile, isUnknownProfileValue);
+}
+
 export function normalizeServerProfileValue(
   profile: ServerProfile,
   fallbackHost: string,
@@ -38,6 +47,10 @@ export function normalizeServerProfileValue(
     openwrt: isOpenWrt ? profile.openwrt : undefined,
     hostname: isPlaceholderHostname(profile.hostname) ? fallbackHost : profile.hostname.trim(),
   };
+}
+
+export function normalizeServerProfile(profile: ServerProfile, fallbackHost: string) {
+  return normalizeServerProfileValue(profile, fallbackHost, isPlaceholderHostname);
 }
 
 export function buildMachineIdentityValue(server: Server) {
@@ -57,4 +70,8 @@ export function buildMachineIdentityValue(server: Server) {
     .join(", ");
 
   return `Machine identity: ${server.name} (${server.username}@${server.host}:${server.port})\n${facts}\n${routerFacts}\n${nasFacts}\nDiscovered services: ${services || "not scanned"}`;
+}
+
+export function buildMachineIdentity(server: Server) {
+  return buildMachineIdentityValue(server);
 }

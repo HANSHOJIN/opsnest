@@ -10,12 +10,13 @@ import { iconCandidates, normalizeIconKey, RemoteIcon } from "./features/icons/c
 import { ServiceIcon, setActiveServiceIconServer, setDiscoveredServiceUpdateAction } from "./features/icons/services";
 import { SystemIcon } from "./features/icons/systems";
 import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
-import { buildMachineIdentityValue, displayServerHostname, hasUsefulServerProfileValue, isPlaceholderHostname, normalizeServerProfileValue } from "./features/servers/profile";
+import { buildMachineIdentity, displayServerHostname, hasUsefulServerProfile, normalizeServerProfile } from "./features/servers/profile";
 import { getServiceUrl, openServiceUrl } from "./features/services/url";
 import { configureCustomServiceShortcuts, CustomServiceCard } from "./features/services/custom-shortcuts";
 import { DockerContainersPanel } from "./features/docker/containers-panel";
 import { CronPanel } from "./features/cron/panel";
 import { TaskHistoryPanel } from "./features/activity/task-history";
+import { normalizeConversationLog } from "./features/activity/conversation";
 import { ManagerPanel } from "./features/manager/panel";
 import { extractManagerServerDetails, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest } from "./features/manager/requests";
 import { TerminalPanel } from "./features/terminal/panel";
@@ -2065,29 +2066,6 @@ function LegacyTerminalPanel({ server, request, text, language, interventionMode
   </section>;
 }
 */
-
-function normalizeConversationLog(log: ConversationLog): ConversationLog {
-  if (log.scope !== "terminal") return { ...log, sessionName: log.sessionName ?? "服务器总管" };
-  const sessionName = log.sessionName ?? (log.serverName?.startsWith("SSH 终端 - ") ? log.serverName : `SSH 终端 - ${log.serverName ?? "未知服务器"}`);
-  return { ...log, sessionName, serverName: sessionName };
-}
-
-function isUnknownProfileValue(value: string | undefined) {
-  const normalized = value?.trim().toLowerCase() ?? "";
-  return !normalized || ["unknown", "未知", "未知主机", "unknown hostname", "unavailable", "—", "-"].includes(normalized);
-}
-
-function hasUsefulServerProfile(profile?: ServerProfile) {
-  return hasUsefulServerProfileValue(profile, isUnknownProfileValue);
-}
-
-function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): ServerProfile {
-  return normalizeServerProfileValue(profile, fallbackHost, isPlaceholderHostname);
-}
-
-function buildMachineIdentity(server: Server) {
-  return buildMachineIdentityValue(server);
-}
 
 function isExplicitServerTask(input: string) {
   return /(?:查看|检查|列出|列举|显示|获取|统计|查询|安装|卸载|升级|更新|删除|创建|导出|下载|上传|运行|执行|重启|停止|启动|修复|诊断|排查|部署|备份|清理|搜索|监控|连接).*(?:服务器|系统|服务|软件|应用|容器|Docker|Nginx|日志|文件|磁盘|内存|进程|端口|版本|网络|配置|任务|cron|主机)/i.test(input)
