@@ -53,17 +53,17 @@ echo "=== 4. 创建隧道服务/脚本 ==="
 SERVICE_FILE="/etc/systemd/system/reverse-tunnel.service"
 STARTUP_SCRIPT="/usr/local/bin/reverse-tunnel.sh"
 
-# 生成独立的隧道启动脚本（所有环境通用）
-cat > \${STARTUP_SCRIPT} << 'SHEOF'
+# 生成独立的隧道启动脚本（内嵌实际值，不依赖环境变量）
+cat > \${STARTUP_SCRIPT} << SCRIPTEOFP
 #!/bin/sh
 exec /usr/bin/autossh -M 0 \
   -o "ServerAliveInterval=30" \
   -o "ServerAliveCountMax=3" \
   -o "StrictHostKeyChecking=no" \
   -o "ExitOnForwardFailure=yes" \
-  -N -R 0.0.0.0:"$REMOTE_PORT":localhost:"$LOCAL_SSH_PORT" \
-  "$RELAY_USER"@"$TUNNEL_HOST" -p "$TUNNEL_PORT"
-SHEOF
+  -N -R 0.0.0.0:${remotePort}:localhost:${sshPort} \
+  ${relayUser}@${relay.host} -p ${relaySshPort}
+SCRIPTEOFP
 chmod +x \${STARTUP_SCRIPT}
 
 if [ -d /etc/systemd/system ]; then

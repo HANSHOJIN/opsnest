@@ -403,15 +403,7 @@ function App() {
     if (discoveringServerId === target.id) return target.services ?? [];
     setDiscoveringServerId(target.id);
     try {
-    let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
-    if (!request) {
-      try {
-        request = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
-        if (request) activeCredentials.current[target.id] = request;
-      } catch {
-        request = null;
-      }
-    }
+    const request = await getCredential(target);
     if (!request) {
       setError(text.noCredentials);
       throw new Error(text.noCredentials);
