@@ -1061,7 +1061,13 @@ function App() {
       updateTerminalSession(target.id, { executing: false });
       return;
     }
-    const commandRequest = { ...request, commandId: terminalSessionsRef.current[target.id]?.activeCommandId ?? activeCommandId.current ?? undefined, sessionId: target.id };
+    const commandId = terminalSessionsRef.current[target.id]?.activeCommandId ?? activeCommandId.current ?? undefined;
+    // Keep the user's real terminal on its persistent shell so `cd`, virtual
+    // environments and interactive input continue to work. AI-approved task
+    // commands use a separate exec channel: installers and updaters may
+    // reload or terminate the login shell, and must not take the visible
+    // terminal session down with them.
+    const commandRequest = { ...request, commandId, sessionId: undefined };
     if (isHighRiskCommand(run.plan.command)) {
       patchTerminalAgentRunFor(target.id, { phase: "blocked", error: "This command is blocked by the local safety policy." });
       patchTerminalAgentStepFor(target.id, "approval", "blocked", "High-risk command requires a dedicated safety flow.");
