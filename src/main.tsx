@@ -4,6 +4,7 @@ import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE
 import { initialServerForm } from "./features/servers/defaults";
 import { isNasProfile, isOpenWrtProfile } from "./features/servers/detail-routing";
 import { displayRouterValue, getDockerService, getRouterServiceStatusLabel, getServiceCategoryLabel, getServiceStatusLabel, getVisibleWebServices } from "./features/servers/detail-helpers";
+import type { ServerDetailProps } from "./features/servers/detail-contract";
 import { isExplicitServerTask } from "./features/agent/intent";
 import { isHighRiskCommand, isReadOnlyPlan, isRecoverableAgentFailure, normalizeBaseUrl, redactLogText } from "./features/agent/runtime-utils";
 import { ServerContextMenu } from "./features/servers/context-menu";
@@ -1658,7 +1659,7 @@ function LegacyServiceIconV2({ service, serverId, large = false }: { service: Pi
 
 */
 
-function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: ServerDetailProps) {
   setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1677,7 +1678,7 @@ function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onCon
   </section>;
 }
 
-function NasServerView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function NasServerView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: ServerDetailProps) {
   setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile ? { ...server.profile } : undefined;
@@ -1725,7 +1726,7 @@ function OpenWrtRouterViewLegacy({ server, text, language, onBack, onOpen, onCon
 
 */
 
-function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
+function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: ServerDetailProps) {
   setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile;
