@@ -62,7 +62,7 @@ exec /usr/bin/autossh -M 0 \
   -o "StrictHostKeyChecking=no" \
   -o "ExitOnForwardFailure=yes" \
   -N -R 0.0.0.0:${remotePort}:localhost:${sshPort} \
-  ${relayUser}@${relay.host} -p ${relaySshPort}
+  -p ${relaySshPort} ${relayUser}@${relay.host}
 SCRIPTEOFP
 chmod +x \${STARTUP_SCRIPT}
 
