@@ -1552,6 +1552,9 @@ function App() {
   </main>;
 }
 
+/*
+ * Legacy server detail variants retained only as a migration reference.
+ * Active Linux, NAS, and OpenWrt views begin below with ServerDetailViewDynamic.
 function ServerDetailView({ server, text, language, onBack, onOpen, onConnect, onEdit, onManager, onCron }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onEdit: () => void; onManager: () => void; onCron: () => void }) {
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1649,6 +1652,8 @@ function LegacyServiceIconV2({ service, serverId, large = false }: { service: Pi
     </>}
   </span>;
 }
+
+*/
 
 function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
   setActiveServiceIconServer(server.id);
