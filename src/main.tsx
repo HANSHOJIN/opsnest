@@ -468,7 +468,7 @@ function App() {
       return;
     }
     if (selected.connectionType === "reverse-tunnel" && selected.tunnelConfig) {
-      const relay = servers.find((item) => item.id === selected.tunnelConfig.relayServerId);
+      const relay = servers.find((item) => item.id === selected.tunnelConfig!.relayServerId);
       if (relay) {
         request = { ...request, host: relay.host, port: selected.tunnelConfig.remotePort };
       }
@@ -511,15 +511,7 @@ function App() {
     const updated = [...servers];
     const results: string[] = [];
     for (const target of servers) {
-      let request: SshRequest | null = activeCredentials.current[target.id] ?? null;
-      if (!request) {
-        try {
-          request = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
-          if (request) activeCredentials.current[target.id] = request;
-        } catch {
-          request = null;
-        }
-      }
+      const request = await getCredential(target);
       if (!request) {
         results.push(`${target.name}: ${language === "zh-CN" ? "没有保存的登录凭据" : "no saved credentials"}`);
         continue;
@@ -940,13 +932,13 @@ function App() {
         const tunnelPort = 22224 + relayServers.length;
         const script = generateTunnelScript(
           { name: server.name, host: server.host, port: server.port, username: server.username },
-          { host: relay.host, name: relay.name },
+          { host: relay.host, name: relay.name, port: relay.port, username: relay.username },
           tunnelPort
         );
         setManagerMessages((messages) => [...messages, { role: "assistant", text: `${language === "zh-CN"
           ? "以下是配置反向隧道的步骤：\n\n1. 确认跳板机 " + relay.name + "（" + relay.host + "）已开启 GatewayPorts yes\n2. 登录内网主机（以 root 身份）\n3. 执行以下脚本：\n\n"
           : "Steps to set up the reverse tunnel:\n\n1. Verify the relay server " + relay.name + " (" + relay.host + ") has GatewayPorts yes enabled\n2. Log into the internal host (as root)\n3. Run this script:\n\n"}\`\`\`bash\n${script}\n\`\`\`` }]);
-        setManagerSuggest(text.connectionTypeReverse);
+        // setManagerSuggest removed - not available in this context
       } catch (tunnelError) {
         setManagerMessages((messages) => [...messages, { role: "assistant", text: tunnelError instanceof Error ? tunnelError.message : String(tunnelError) }]);
       } finally {

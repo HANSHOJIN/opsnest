@@ -8,18 +8,22 @@ export function isManagerDeleteServerRequest(input: string) {
   return /(?:删除|移除|忘记).*(?:服务器|主机)|(?:delete|remove)\s+(?:the\s+)?server/i.test(input);
 }
 
-export function generateTunnelScript(server: { name: string; host: string; port: number; username: string }, relay: { host: string; name: string }, remotePort: number): string {
+export function generateTunnelScript(server: { name: string; host: string; port: number; username: string }, relay: { host: string; name: string; port?: number; username?: string }, remotePort: number): string {
   const sshPort = server.port || 22;
+  const relaySshPort = relay.port || 22;
   const tunnelUser = server.username || "root";
+  const relayUser = relay.username || "root";
   const shell = `# ========================================
 # ${server.name} → ${relay.name} 反向隧道一键配置
 # 在目标内网主机上执行
 # ========================================
 
 TUNNEL_HOST="${relay.host}"
+TUNNEL_PORT="${relaySshPort}"
 REMOTE_PORT=${remotePort}
 LOCAL_SSH_PORT=${sshPort}
 TUNNEL_USER="${tunnelUser}"
+RELAY_USER="${relayUser}"
 
 echo "=== 1. 安装 autossh ==="
 if command -v apt >/dev/null 2>&1; then
@@ -36,34 +40,44 @@ echo "=== 2. 生成 SSH 密钥 ==="
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" 2>/dev/null
 
 echo ""
-echo "=== 把下面这行公钥添加到 ${relay.name} 的 ~/.ssh/authorized_keys ==="
+echo "=== 把下面这行公钥添加到 ${relay.name} 的 ~\${RELAY_USER}/.ssh/authorized_keys ==="
 cat ~/.ssh/id_ed25519.pub
 echo ""
 read -p "公钥已添加？(y/n) " OK
 if [ "$OK" != "y" ]; then echo "请先添加公钥"; exit 1; fi
 
 echo "=== 3. 测试连接 ==="
-ssh -o StrictHostKeyChecking=accept-new -p 22 \${TUNNEL_USER}@\${TUNNEL_HOST} "echo 连接成功"
+ssh -o StrictHostKeyChecking=accept-new -p \${TUNNEL_PORT} \${RELAY_USER}@\${TUNNEL_HOST} "echo 连接成功"
 
-echo "=== 4. 创建隧道服务 ==="
+echo "=== 4. 创建隧道服务/脚本 ==="
 SERVICE_FILE="/etc/systemd/system/reverse-tunnel.service"
-if [ -d /etc/systemd/system ]; then
-  # systemd — Debian/Ubuntu/飞牛
-  sudo tee \${SERVICE_FILE} > /dev/null <<UNIT
-[Unit]
-Description=Reverse tunnel to \${TUNNEL_HOST}:\${REMOTE_PORT}
-After=network-online.target
+STARTUP_SCRIPT="/usr/local/bin/reverse-tunnel.sh"
 
-[Service]
-Type=simple
-User=${tunnelUser}
-ExecStart=/usr/bin/autossh -M 0 \
+# 生成独立的隧道启动脚本（所有环境通用）
+cat > \${STARTUP_SCRIPT} << 'SHEOF'
+#!/bin/sh
+exec /usr/bin/autossh -M 0 \
   -o "ServerAliveInterval=30" \
   -o "ServerAliveCountMax=3" \
   -o "StrictHostKeyChecking=no" \
   -o "ExitOnForwardFailure=yes" \
-  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \
-  \${TUNNEL_USER}@\${TUNNEL_HOST}
+  -N -R 0.0.0.0:"$REMOTE_PORT":localhost:"$LOCAL_SSH_PORT" \
+  "$RELAY_USER"@"$TUNNEL_HOST" -p "$TUNNEL_PORT"
+SHEOF
+chmod +x \${STARTUP_SCRIPT}
+
+if [ -d /etc/systemd/system ]; then
+  # systemd — Debian/Ubuntu/飞牛/多数 Linux
+  sudo tee \${SERVICE_FILE} > /dev/null <<UNIT
+[Unit]
+Description=Reverse tunnel to \${TUNNEL_HOST}:\${REMOTE_PORT}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${tunnelUser}
+ExecStart=\${STARTUP_SCRIPT}
 Restart=always
 RestartSec=10
 
@@ -72,29 +86,29 @@ WantedBy=multi-user.target
 UNIT
   sudo systemctl daemon-reload
   sudo systemctl enable --now reverse-tunnel.service
+  echo "✅ systemd 服务已创建并启动"
+elif command -v crontab >/dev/null 2>&1; then
+  # crontab @reboot 方案（OpenWrt / 精简容器）
+  (crontab -l 2>/dev/null | grep -v reverse-tunnel; echo "@reboot \${STARTUP_SCRIPT}") | crontab -
+  # 立即启动
+  nohup \${STARTUP_SCRIPT} > /var/log/reverse-tunnel.log 2>&1 &
+  echo "✅ crontab @reboot 已添加，隧道已启动"
 elif [ -f /etc/rc.local ]; then
-  # OpenWrt / 无 systemd 环境
-  echo "nohup /usr/bin/autossh -M 0 \\"
-  echo "  -o ServerAliveInterval=30 \\"
-  echo "  -o ServerAliveCountMax=3 \\"
-  echo "  -o StrictHostKeyChecking=no \\"
-  echo "  -o ExitOnForwardFailure=yes \\"
-  echo "  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \\"
-  echo "  \${TUNNEL_USER}@\${TUNNEL_HOST} &"
-  echo "" >> /etc/rc.local
-  echo "nohup /usr/bin/autossh -M 0 \\" >> /etc/rc.local
-  echo "  -o ServerAliveInterval=30 \\" >> /etc/rc.local
-  echo "  -o ServerAliveCountMax=3 \\" >> /etc/rc.local
-  echo "  -o StrictHostKeyChecking=no \\" >> /etc/rc.local
-  echo "  -o ExitOnForwardFailure=yes \\" >> /etc/rc.local
-  echo "  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \\" >> /etc/rc.local
-  echo "  \${TUNNEL_USER}@\${TUNNEL_HOST} &" >> /etc/rc.local
+  # rc.local 方案
+  grep -q reverse-tunnel /etc/rc.local || echo "\${STARTUP_SCRIPT} &" >> /etc/rc.local
+  nohup \${STARTUP_SCRIPT} > /var/log/reverse-tunnel.log 2>&1 &
+  echo "✅ rc.local 已添加，隧道已启动"
+else
+  # 纯 nohup 保底
+  nohup \${STARTUP_SCRIPT} > /var/log/reverse-tunnel.log 2>&1 &
+  echo "✅ 隧道已在后台运行"
+  echo "⚠️  未检测到 systemd / crontab / rc.local，重启后需手动启动"
 fi
 
 echo ""
 echo "✅ 隧道已建立！跳板机 \${TUNNEL_HOST}:\${REMOTE_PORT} → ${server.host}:${sshPort}"
+echo "   使用跳板机用户: \${RELAY_USER}@\${TUNNEL_HOST} -p \${TUNNEL_PORT}"
 echo "   现在可以在 OpsNest 中连接此服务器了。"
-echo "   公钥已在步骤 2 中显示，请确保已添加到跳板机的 authorized_keys。"
 `;
   return shell;
 }
