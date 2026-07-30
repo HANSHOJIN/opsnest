@@ -15,6 +15,7 @@ import { DockerContainersPanel } from "./features/docker/containers-panel";
 import { CronPanel } from "./features/cron/panel";
 import { TaskHistoryPanel } from "./features/activity/task-history";
 import { ManagerPanel } from "./features/manager/panel";
+import { TerminalPanel } from "./features/terminal/panel";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
 import { restoreTerminalLines } from "./features/terminal/history";
 import { isInteractiveShellCommand, isLikelyShellCommand } from "./features/terminal/command-classification";
@@ -1771,7 +1772,7 @@ function ServerDetailViewV2({ server, text, language, onBack, onOpen, onConnect,
   </section>;
 }
 
-function TerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: typeof zh; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
+function LegacyTerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: typeof zh; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const lineCountRef = useRef(0);
