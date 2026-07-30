@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
 import { isNasProfile, isOpenWrtProfile } from "./features/servers/detail-routing";
+import { displayRouterValue, getDockerService, getRouterServiceStatusLabel, getServiceCategoryLabel, getServiceStatusLabel, getVisibleWebServices } from "./features/servers/detail-helpers";
 import { isExplicitServerTask } from "./features/agent/intent";
 import { isHighRiskCommand, isReadOnlyPlan, isRecoverableAgentFailure, normalizeBaseUrl, redactLogText } from "./features/agent/runtime-utils";
 import { ServerContextMenu } from "./features/servers/context-menu";
@@ -1663,11 +1664,11 @@ function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onCon
   const profile = server.profile;
   const connected = server.status === "connected";
   const services = server.services ?? [];
-  const visibleServices = services.filter((service) => service.id.toLowerCase() !== "docker" && !service.id.startsWith("custom-") && service.web && service.port);
-  const dockerService = services.find((service) => service.id.toLowerCase() === "docker");
+  const visibleServices = getVisibleWebServices(services);
+  const dockerService = getDockerService(services);
   const dockerInstalled = Boolean(profile?.dockerInstalled || dockerService);
-  const categoryLabel = (category: string) => ({ panel: zhMode ? "管理面板" : "Panel", container: "Container", web: "Web server", runtime: "Runtime", database: "Database" }[category] ?? category);
-  const statusLabel = (status: string) => status === "running" ? (zhMode ? "运行中" : "Running") : status === "installed" ? (zhMode ? "已安装" : "Installed") : (zhMode ? "已发现" : "Detected");
+  const categoryLabel = (category: string) => getServiceCategoryLabel(category, zhMode);
+  const statusLabel = (status: string) => getServiceStatusLabel(status, zhMode);
   return <section className="server-detail-view">
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{zhMode ? "单机详情" : "Server details"}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></header>
     <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>
@@ -1683,11 +1684,11 @@ function NasServerView({ server, text, language, onBack, onOpen, onConnect, onSc
   const connected = server.status === "connected";
   const allServices = [...(server.services ?? []), ...(server.customServices ?? [])];
   const services = allServices.filter((service) => service.web && service.port);
-  const dockerService = allServices.find((service) => service.id.toLowerCase() === "docker");
+  const dockerService = getDockerService(allServices);
   const dockerInstalled = Boolean(profile?.dockerInstalled || dockerService);
   if (profile && dockerInstalled) profile.dockerInstalled = true;
   const displayName = profile?.nas?.kind === "fnos" ? "Feiniu fnOS" : "NAS";
-  const statusLabel = (status: string) => status === "running" ? (zhMode ? "运行中" : "Running") : status === "installed" ? (zhMode ? "已安装" : "Installed") : (zhMode ? "已发现" : "Detected");
+  const statusLabel = (status: string) => getServiceStatusLabel(status, zhMode);
   return <section className="server-detail-view nas-detail-view">{isDiscovering && <div className="discovery-progress-banner">{zhMode ? "正在发现服务…" : "Discovering services…"}</div>}
     <header className="server-detail-header"><div><button className="back-link" onClick={onBack}>← {zhMode ? "返回我的服务器" : "Back to my servers"}</button><p className="eyebrow">{displayName}</p><div className="server-detail-title"><SystemIcon profile={profile} system={server.system} /><div><h1>{server.name}</h1><p>{server.username}@{server.host}:{server.port}</p></div></div></div><span className={`connected-badge ${server.status}-badge`}>● {getServerStatusLabel(server.status, language, text)}</span></header>
     <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>
@@ -1731,15 +1732,12 @@ function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, 
   const router = profile?.openwrt;
   const connected = server.status === "connected";
   const allServices = server.services ?? [];
-  const dockerService = allServices.find((service) => service.id.toLowerCase() === "docker");
+  const dockerService = getDockerService(allServices);
   const dockerInstalled = Boolean(profile?.dockerInstalled || dockerService);
   const services = [...allServices.filter((service) => service.id.toLowerCase() !== "docker" && service.web && service.port), ...(server.customServices ?? [])];
   const visibleServices = services.filter((service) => !service.id.startsWith("custom-"));
-  const displayValue = (value: string | undefined, fallback: string) => {
-    const normalized = value?.trim().toLowerCase() ?? "";
-    return value && normalized !== "unknown" && !normalized.includes("default string") && !normalized.includes("to be filled by o.e.m") && normalized !== "system product name" ? value : fallback;
-  };
-  const statusLabel = (status: string) => status === "running" ? (zhMode ? "运行中" : "Running") : (zhMode ? "已安装" : "Installed");
+  const displayValue = displayRouterValue;
+  const statusLabel = (status: string) => getRouterServiceStatusLabel(status, zhMode);
   const cpuSummary = [profile?.cpuCores, profile?.cpuModel].filter((value) => value && value !== "未知" && value !== "unknown").join(" · ") || "—";
   const overviewFooter = zhMode ? `系统：${profile?.osName ?? server.system} · CPU：${cpuSummary} · 内存：${profile?.memory ?? "—"} · 磁盘：${profile?.disk ?? "—"}` : `System: ${profile?.osName ?? server.system} · CPU: ${cpuSummary} · Memory: ${profile?.memory ?? "—"} · Disk: ${profile?.disk ?? "—"}`;
   return <section className="server-detail-view router-detail-view">
