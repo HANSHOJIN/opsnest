@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
 import { iconCandidates, normalizeIconKey, RemoteIcon } from "./features/icons/catalog";
+import { ServiceIcon, setActiveServiceIconServer, setDiscoveredServiceUpdateAction } from "./features/icons/services";
 import { SystemIcon } from "./features/icons/systems";
 import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
 import { buildMachineIdentityValue, hasUsefulServerProfileValue, normalizeServerProfileValue } from "./features/servers/profile";
@@ -44,6 +45,8 @@ import "./styles/index.css";
 let customServiceRegistry: Record<string, DiscoveredService[]> = {};
 let customServiceServerRegistry: Record<string, Server> = {};
 let customServiceDeleteAction: ((serverId: string, serviceId: string) => void) | undefined;
+// Kept temporarily for the unused legacy renderer below. The active renderer
+// is now owned by features/icons/services.tsx.
 let discoveredServiceUpdateAction: ((serverId: string, serviceId: string, port: number, webPath: string) => void) | undefined;
 let activeServiceServerId = "";
 
@@ -1516,7 +1519,7 @@ function App() {
   customServiceRegistry = Object.fromEntries(servers.map((item) => [item.id, item.customServices ?? []]));
   customServiceServerRegistry = Object.fromEntries(servers.map((item) => [item.id, item]));
   customServiceDeleteAction = deleteCustomService;
-  discoveredServiceUpdateAction = updateDiscoveredService;
+  setDiscoveredServiceUpdateAction(updateDiscoveredService);
   const modelConfiguredForStatus = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
   const modelStatusClass = !modelConfiguredForStatus ? "ai-status-unconfigured" : modelConnection === "connected" ? "ai-status-connected" : modelConnection === "failed" ? "ai-status-failed" : "ai-status-unknown";
   const modelStatusLabel = !modelConfiguredForStatus ? text.aiStatusNotConfigured : modelConnection === "connected" ? text.aiStatusConnected : modelConnection === "failed" ? text.aiStatusFailed : text.aiStatusNotTested;
@@ -1618,7 +1621,7 @@ function LegacyServiceIcon({ service, serverId, large = false }: { service: Pick
   </span>;
 }
 
-function ServiceIcon({ service, serverId, large = false }: { service: Pick<DiscoveredService, "id" | "category"> & Partial<Pick<DiscoveredService, "name" | "version" | "port" | "web" | "webPath">>; serverId?: string; large?: boolean }) {
+function LegacyServiceIconV2({ service, serverId, large = false }: { service: Pick<DiscoveredService, "id" | "category"> & Partial<Pick<DiscoveredService, "name" | "version" | "port" | "web" | "webPath">>; serverId?: string; large?: boolean }) {
   const [editing, setEditing] = useState(false);
   const [editPort, setEditPort] = useState(service.port ? String(service.port) : "");
   const [editPath, setEditPath] = useState(service.webPath ?? "");
@@ -1654,7 +1657,7 @@ function ServiceIcon({ service, serverId, large = false }: { service: Pick<Disco
 }
 
 function ServerDetailViewDynamic({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
-  activeServiceServerId = server.id;
+  setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile;
   const connected = server.status === "connected";
@@ -1683,7 +1686,7 @@ function isNasProfile(profile?: ServerProfile, label = "") {
 }
 
 function NasServerView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
-  activeServiceServerId = server.id;
+  setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile ? { ...server.profile } : undefined;
   const connected = server.status === "connected";
@@ -1727,7 +1730,7 @@ function OpenWrtRouterViewLegacy({ server, text, language, onBack, onOpen, onCon
 }
 
 function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
-  activeServiceServerId = server.id;
+  setActiveServiceIconServer(server.id);
   const zhMode = language === "zh-CN";
   const profile = server.profile;
   const router = profile?.openwrt;
