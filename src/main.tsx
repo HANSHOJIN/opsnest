@@ -112,6 +112,7 @@ function App() {
   const activeCredentials = useRef<Record<string, SshRequest>>({});
   const activeCommandId = useRef<string | null>(null);
   const terminalSessionsRef = useRef<Record<string, TerminalSessionState>>({});
+  const serversRef = useRef<Server[]>([]);
   const serverRef = useRef<Server | null>(null);
   const logsRef = useRef<ActivityLog[]>([]);
   const runtimeLogsRef = useRef<RuntimeLog[]>([]);
@@ -123,6 +124,7 @@ function App() {
   const interactiveCompletionRef = useRef<{ id: string; resolve: (output: string) => void; reject: (error: Error) => void } | null>(null);
   const interactiveCompletionsRef = useRef<Record<string, { id: string; resolve: (output: string) => void; reject: (error: Error) => void }>>({});
 
+  useEffect(() => { serversRef.current = servers; }, [servers]);
   useEffect(() => { serverRef.current = server; }, [server]);
 
   const ensureTerminalSession = (target: Server): TerminalSessionState => {
@@ -346,7 +348,7 @@ function App() {
     const data = { servers: nextServers.map(({ status: _status, latency: _latency, ...item }) => item), aiConfig: safeAiConfig, aiConnectionStatus: nextModelConnection, language: nextLanguage, logs: nextLogs.slice(-500) };
     void invoke("save_local_data", { data }).catch((saveError) => { appendRuntimeLog({ level: "error", event: "storage.save.failed", message: "Native local data save failed; using browser fallback.", details: saveError instanceof Error ? saveError.message : String(saveError) }); localStorage.setItem(STORAGE_KEY, JSON.stringify(data.servers)); localStorage.setItem(AI_STORAGE_KEY, JSON.stringify(safeAiConfig)); localStorage.setItem(AI_CONNECTION_STATUS_KEY, nextModelConnection); localStorage.setItem(LANGUAGE_STORAGE_KEY, nextLanguage); localStorage.setItem("opsnest.logs", JSON.stringify(data.logs)); });
   };
-  const persistServers = (next: Server[]) => { setServers(next); persistData(next); };
+  const persistServers = (next: Server[]) => { serversRef.current = next; setServers(next); persistData(next); };
   const appendLog = (entry: Omit<ActivityLog, "id" | "timestamp">) => {
     const next = [...logsRef.current, { ...entry, id: crypto.randomUUID(), timestamp: new Date().toISOString(), content: redactLogText(entry.content) }].slice(-500);
     logsRef.current = next;
@@ -1074,7 +1076,7 @@ function App() {
   };
 
   const executeTerminalAgentRun = async (run: AgentRun) => {
-    const target = servers.find((item) => item.id === run.targetIds[0]) ?? (server?.id === run.targetIds[0] ? server : null);
+    const target = serversRef.current.find((item) => item.id === run.targetIds[0]) ?? (serverRef.current?.id === run.targetIds[0] ? serverRef.current : null);
     if (!run.plan || !target) return;
     // These setters are deliberately scoped to the target server. An AgentRun
     // may continue while another terminal is focused.
@@ -1113,7 +1115,9 @@ function App() {
       updateTerminalSession(target.id, { executing: false });
       return;
     }
-    const commandId = terminalSessionsRef.current[target.id]?.activeCommandId ?? activeCommandId.current ?? undefined;
+    // A background AgentRun must never inherit the focused terminal's command
+    // id. That id belongs to the target session only.
+    const commandId = terminalSessionsRef.current[target.id]?.activeCommandId ?? undefined;
     // Keep the user's real terminal on its persistent shell so `cd`, virtual
     // environments and interactive input continue to work. AI-approved task
     // commands use a separate exec channel: installers and updaters may
@@ -1135,7 +1139,7 @@ function App() {
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待命令结果…" : "AI is waiting for the command result…");
       const interactive = isInteractiveShellCommand(run.plan.command);
       const output = interactive
-        ? await runInteractiveCommand(run.plan.command)
+        ? await runInteractiveCommandFor(target.id, run.plan.command)
         : await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.command });
       const outputText = output.trim() ? output : "";
       if (!interactive && outputText) appendTerminalLines({ kind: "command", text: run.plan!.command }, { kind: "output", text: outputText });
@@ -1143,8 +1147,8 @@ function App() {
       appendLog({ type: "terminal", title: "AgentRun output", serverId: target.id, serverName: target.name, content: `${run.task}\n\n$ ${run.plan.command}\n\n${outputText}`, status: "success" });
 
       if (isRecoverableAgentFailure(outputText) && (run.attempt ?? 0) < 2) {
-        patchTerminalAgentStep("execute", "failed", "The command returned an error; the Agent is diagnosing it instead of stopping.");
-        patchTerminalAgentStep("diagnose", "running", "Reading the failed command and checking the actual environment.");
+        patchTerminalAgentStepFor(target.id, "execute", "failed", "The command returned an error; the Agent is diagnosing it instead of stopping.");
+        patchTerminalAgentStepFor(target.id, "diagnose", "running", "Reading the failed command and checking the actual environment.");
         setTerminalLines((lines) => [...lines, { kind: "ai", text: language === "zh-CN" ? "命令没有成功，AI 正在读取错误并继续排查…" : "The command did not succeed. AI is reading the error and continuing the diagnosis…" }]);
         setTerminalAgentStatus(language === "zh-CN" ? "AI 正在分析错误并重新规划…" : "AI is analyzing the error and replanning…");
         const recoveryContext = buildMachineIdentity(target);
@@ -1152,7 +1156,7 @@ function App() {
         const recoveryConversation = conversationLogsRef.current.filter((item) => item.scope === "terminal" && item.serverId === target.id).slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous terminal conversation for this server.";
         const recoveryPlan = await askAgentRecoveryPlan(aiConfig, run.task, run.plan.command, outputText, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${recoveryContext}`, recoveryMemory, recoveryConversation);
         if (recoveryPlan.command.trim() === run.plan.command.trim()) throw new Error(language === "zh-CN" ? "Agent 重复了刚才失败的命令，已停止自动重试。" : "The Agent repeated the failed command, so automatic retry was stopped.");
-        patchTerminalAgentStep("diagnose", "completed", "The failed result was passed back to the Agent.");
+        patchTerminalAgentStepFor(target.id, "diagnose", "completed", "The failed result was passed back to the Agent.");
         const retryRun: AgentRun = { ...run, attempt: (run.attempt ?? 0) + 1, plan: recoveryPlan, phase: "waiting_approval", steps: run.steps.map((step) => {
           if (step.id === "diagnose") return { ...step, status: "completed", detail: "The failed result was passed back to the Agent." };
           if (step.id === "plan") return { ...step, status: "completed", detail: recoveryPlan.explanation };
@@ -1178,16 +1182,16 @@ function App() {
         return;
       }
 
-      patchTerminalAgentStep("execute", "completed", "Command completed.");
+      patchTerminalAgentStepFor(target.id, "execute", "completed", "Command completed.");
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在验证结果…" : "AI is verifying the result…");
-      patchTerminalAgentStep("verify", "running", "Checking the requested result.");
+      patchTerminalAgentStepFor(target.id, "verify", "running", "Checking the requested result.");
       let verification = "";
       if (run.plan.verifyCommand?.trim()) {
         verification = await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.verifyCommand });
         if (verification.trim()) appendTerminalLines({ kind: "command", text: run.plan!.verifyCommand! }, { kind: "output", text: verification });
         appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan!.verifyCommand}\n\n${verification || "(no output)"}` });
       }
-      patchTerminalAgentStep("verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
+      patchTerminalAgentStepFor(target.id, "verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在总结结果…" : "AI is summarizing the result…");
       let summary: string;
       if (run.toolSession) {
@@ -1226,20 +1230,24 @@ function App() {
       }
       setTerminalLines((lines) => [...lines, { kind: "ai", text: summary }]);
       appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AI 总结：${summary}` });
-      patchTerminalAgentStep("remember", "running", "Saving a concise result note locally.");
+      patchTerminalAgentStepFor(target.id, "remember", "running", "Saving a concise result note locally.");
       const completedAt = new Date().toISOString();
-      const nextServer = { ...target, memory: [...(target.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${run.task}: ${summary}` }].slice(-20) };
-      const nextServers = servers.map((item) => item.id === target.id ? nextServer : item);
+      // Read the latest server list at completion time. Two background runs
+      // can finish in either order; using the render-time `servers` snapshot
+      // would let the later completion erase the earlier one's memory/profile.
+      const currentTarget = serversRef.current.find((item) => item.id === target.id) ?? target;
+      const nextServer = { ...currentTarget, memory: [...(currentTarget.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${run.task}: ${summary}` }].slice(-20) };
+      const nextServers = serversRef.current.map((item) => item.id === target.id ? nextServer : item);
       persistServers(nextServers);
       if (serverRef.current?.id === target.id) setServer(nextServer);
-      patchTerminalAgentStep("remember", "completed", "Result summary saved locally.");
-      patchTerminalAgentRun({ phase: "completed", result: summary });
+      patchTerminalAgentStepFor(target.id, "remember", "completed", "Result summary saved locally.");
+      patchTerminalAgentRunFor(target.id, { phase: "completed", result: summary });
       appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: `AgentRun completed.\n\n${summary}` });
       setTerminalAgentStatus(language === "zh-CN" ? "AI 已完成并保存记忆" : "AI completed and saved memory");
     } catch (agentError) {
       const message = agentError instanceof Error ? agentError.message : String(agentError);
-      patchTerminalAgentRun({ phase: "failed", error: message });
-      patchTerminalAgentStep("execute", "failed", message);
+      patchTerminalAgentRunFor(target.id, { phase: "failed", error: message });
+      patchTerminalAgentStepFor(target.id, "execute", "failed", message);
       setTerminalAgentStatus(language === "zh-CN" ? "AI 处理失败" : "AI task failed");
       setTerminalLines((lines) => [...lines, { kind: "output", text: `${text.terminalCommandFailed}${message}` }]);
       appendRuntimeLog({ level: "error", event: "agent.terminal.failed", message: "Terminal AgentRun failed.", details: `${target.name} · ${message}` });
@@ -1322,7 +1330,7 @@ function App() {
       try {
         const profile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), target.host);
         exploredServer = { ...target, profile, system: profile.osName, status: "connected" };
-        const nextServers = servers.map((item) => item.id === target.id ? exploredServer : item);
+        const nextServers = serversRef.current.map((item) => item.id === target.id ? exploredServer : item);
         persistServers(nextServers);
         if (serverRef.current?.id === target.id) setServer(exploredServer);
       } catch (exploreError) {
@@ -1382,18 +1390,25 @@ function App() {
 
   const approveTerminalAgentRun = async () => {
     if (!terminalAgentRun || terminalAgentRun.phase !== "waiting_approval") return;
-    setExecuting(true);
-    await executeTerminalAgentRun(terminalAgentRun);
+    const run = terminalAgentRun;
+    const targetId = run.targetIds[0];
+    updateTerminalSession(targetId, { executing: true });
+    await executeTerminalAgentRun(run);
   };
 
   const rejectTerminalAgentRun = () => {
     if (!terminalAgentRun) return;
-    patchTerminalAgentRun({ phase: "blocked", error: "Cancelled by user." });
-    patchTerminalAgentStep("approval", "blocked", "User cancelled execution.");
-    setExecuting(false);
-    activeCommandId.current = null;
-    setTerminalLines((lines) => [...lines, { kind: "system", text: "AgentRun cancelled. No server changes were made." }]);
-    appendLog({ type: "agent", title: "Terminal AgentRun cancelled", serverId: server?.id, serverName: server?.name, content: terminalAgentRun.task, status: "cancelled" });
+    const run = terminalAgentRun;
+    const targetId = run.targetIds[0];
+    const target = serversRef.current.find((item) => item.id === targetId);
+    patchTerminalAgentRunFor(targetId, { phase: "blocked", error: "Cancelled by user." });
+    patchTerminalAgentStepFor(targetId, "approval", "blocked", "User cancelled execution.");
+    updateTerminalSession(targetId, {
+      executing: false,
+      activeCommandId: null,
+      lines: [...(terminalSessionsRef.current[targetId]?.lines ?? []), { kind: "system", text: "AgentRun cancelled. No server changes were made." }],
+    });
+    appendLog({ type: "agent", title: "Terminal AgentRun cancelled", serverId: targetId, serverName: target?.name, content: run.task, status: "cancelled" });
   };
 
   const submitTerminalInput = async (rawInput?: string) => {
