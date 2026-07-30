@@ -17,6 +17,7 @@ import { DockerContainersPanel } from "./features/docker/containers-panel";
 import { CronPanel } from "./features/cron/panel";
 import { TaskHistoryPanel } from "./features/activity/task-history";
 import { ManagerPanel } from "./features/manager/panel";
+import { extractManagerServerDetails, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest } from "./features/manager/requests";
 import { TerminalPanel } from "./features/terminal/panel";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
 import { restoreTerminalLines } from "./features/terminal/history";
@@ -24,7 +25,7 @@ import { isInteractiveShellCommand, isLikelyShellCommand } from "./features/term
 import type {
   ActivityLog, AgentRun, AgentStep, AgentStepId, AgentToolCall, AgentToolSession, AiConfig, AiInterventionMode,
   AiProvider, AuthMethod, ContextMenuState, ConversationLog, CronForm, CronTask, DiagnosisResult, DiscoveredService,
-  InteractiveCommand, Locale, ManagerMessage, ManagerServerDetails, ModelConnectionStatus, PersistedData,
+  InteractiveCommand, Locale, ManagerMessage, ModelConnectionStatus, PersistedData,
   RuntimeLog, Server, ServerForm, ServerMemory, ServerProfile, ServerStatus, ShellPlan, SshRequest, TerminalIntent,
   TerminalLine, TerminalMode, View, WebSearchResult,
 } from "./domain/types";
@@ -2073,33 +2074,6 @@ function normalizeServerProfile(profile: ServerProfile, fallbackHost: string): S
 
 function buildMachineIdentity(server: Server) {
   return buildMachineIdentityValue(server);
-}
-
-function isManagerAddServerRequest(input: string) {
-  return /(?:添加|新增|新建|保存).*(?:服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);
-}
-
-function isManagerDeleteServerRequest(input: string) {
-  return /(?:删除|移除|忘记).*(?:服务器|主机)|(?:delete|remove)\s+(?:the\s+)?server/i.test(input);
-}
-
-function extractManagerServerDetails(input: string): ManagerServerDetails {
-  const field = (labels: string) => input.match(new RegExp(`(?:${labels})\\s*[:=：]?\\s*([^\\n\\r,，;；]+)`, "i"))?.[1]?.trim();
-  const host = input.match(/(?:服务器地址|主机地址|地址|IP|host)\s*[:=：]?\s*([a-z0-9.-]+\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})/i)?.[1]?.trim();
-  const portText = field("SSH\\s*端口|端口|port");
-  const port = portText && /^\d{1,5}$/.test(portText) ? Number(portText) : undefined;
-  return {
-    name: field("服务器名称|主机名称|名称|名字|name"),
-    host,
-    port,
-    username: field("用户名|用户|user(?:name)?"),
-    password: field("密码|口令|password|passwd"),
-    privateKeyPath: field("私钥|私钥路径|key|private\\s*key"),
-  };
-}
-
-function isServiceShortcutRequest(input: string) {
-  return /(?:添加|加入|放到|放入|设置).*(?:快捷入口|首页|服务入口)|(?:扫描|发现|识别).*(?:服务|面板|软件)/i.test(input);
 }
 
 function isExplicitServerTask(input: string) {
