@@ -2,7 +2,9 @@ import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AI_CONNECTION_STATUS_KEY, AI_STORAGE_KEY, APP_VERSION, LANGUAGE_STORAGE_KEY, STORAGE_KEY } from "./app/constants";
 import { initialServerForm } from "./features/servers/defaults";
+import { formatLatency, getLatencyClass, getNetworkScope } from "./features/servers/presentation";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
+import { restoreTerminalLines } from "./features/terminal/history";
 import type {
   ActivityLog, AgentRun, AgentStep, AgentStepId, AgentToolCall, AgentToolSession, AiConfig, AiInterventionMode,
   AiProvider, AuthMethod, ContextMenuState, ConversationLog, CronForm, CronTask, DiagnosisResult, DiscoveredService,
@@ -304,7 +306,7 @@ function App() {
   const requestForForm = (): SshRequest => ({ host: form.host.trim(), port: Number(form.port), username: form.username.trim(), authMethod: form.authMethod, password: form.authMethod === "password" ? form.password : null, sudoPassword: form.sudoPassword.trim() || null, privateKeyPath: form.authMethod === "privateKey" ? form.privateKeyPath.trim() : null, passphrase: form.passphrase || null });
   const openTerminal = (selected: Server) => {
     if (selected.status !== "connected" || !activeCredentials.current[selected.id]) { void connectSavedServer(selected, true); return; }
-    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus(""); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current)); setView("terminal"); setError("");
+    setServer(selected); setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus(""); setTerminalLines(restoreTerminalLines(selected, conversationLogsRef.current, isLikelyShellCommand)); setView("terminal"); setError("");
   };
 
   const discoverServerServices = async (target: Server): Promise<DiscoveredService[]> => {
@@ -393,7 +395,7 @@ function App() {
       persistData(servers.map((item) => item.id === selected.id ? connectedServer : item));
       if (openTerminalAfter) {
         setTerminalMode("shell"); setTerminalInput(""); setTerminalAgentRun(null); setTerminalAgentStatus("");
-        setTerminalLines(restoreTerminalLines(connectedServer, conversationLogsRef.current)); setView("terminal"); setError("");
+        setTerminalLines(restoreTerminalLines(connectedServer, conversationLogsRef.current, isLikelyShellCommand)); setView("terminal"); setError("");
       }
     } catch {
       const failedServer = { ...selected, status: "failed" as ServerStatus };
@@ -1553,54 +1555,12 @@ function App() {
   </main>;
 }
 
-function restoreTerminalLines(server: Server, conversations: ConversationLog[]): TerminalLine[] {
-  const lines: TerminalLine[] = [{ kind: "system", text: `${server.username}@${server.host}:${server.port} · SSH` }];
-  conversations
-    .filter((item) => item.scope === "terminal" && item.serverId === server.id)
-    .forEach((item) => {
-      if (!item.content.trim()) return;
-      if (item.role === "tool") {
-        const sections = item.content.split(/\n\n/);
-        const command = sections.shift()?.trim() ?? "";
-        if (command.startsWith("$ ")) lines.push({ kind: "command", text: command.slice(2) });
-        const output = sections.join("\n\n").trim();
-        if (output) lines.push({ kind: "output", text: output });
-        return;
-      }
-      lines.push({ kind: item.role === "assistant" ? "ai" : item.role === "user" ? (isLikelyShellCommand(item.content) ? "command" : "ai") : "system", text: item.content });
-    });
-  return lines;
-}
-
 function getServerStatusLabel(status: ServerStatus, language: Locale, text: typeof zh) {
   if (status === "connecting") return language === "zh-CN" ? "连接中" : "Connecting";
   if (status === "failed") return language === "zh-CN" ? "连接失败" : "Connection failed";
   return status === "connected" ? text.connected : text.notConnected;
 }
 
-function formatLatency(latency: number | undefined, language: Locale) {
-  if (latency === undefined) return "—";
-  return `${latency}ms`;
-}
-
-function getLatencyClass(latency: number | undefined) {
-  if (latency === undefined) return "empty";
-  if (latency <= 100) return "good";
-  if (latency <= 200) return "warn";
-  return "bad";
-}
-
-function getNetworkScope(host: string): "lan" | "wan" {
-  const value = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  if (value === "localhost" || value === "::1" || /\.(local|lan|internal|home)$/.test(value)) return "lan";
-  if (value.includes(":")) return /^(fc|fd|fe80:)/.test(value) ? "lan" : "wan";
-  const octets = value.split(".").map(Number);
-  if (octets.length === 4 && octets.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
-    const [first, second] = octets;
-    if (first === 10 || first === 127 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168) || (first === 169 && second === 254)) return "lan";
-  }
-  return "wan";
-}
 
 const systemIconMarkup: Record<string, string> = {
   debian: debianIcon,
