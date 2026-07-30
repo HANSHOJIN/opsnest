@@ -541,12 +541,26 @@ function App() {
     return results.join("\n");
   };
 
+  // Resolve a reverse-tunnel server's SSH request to point at the relay.
+  // Idempotent: if the request already targets the relay, returns unchanged.
+  const resolveTunnelForRequest = (target: Server, request: SshRequest): SshRequest => {
+    if (target.connectionType !== "reverse-tunnel" || !target.tunnelConfig) return request;
+    const relay = servers.find((item) => item.id === target.tunnelConfig!.relayServerId);
+    if (!relay) return request;
+    // Already resolved (host matches relay, port matches tunnel remote port)
+    if (request.host === relay.host && request.port === target.tunnelConfig.remotePort) return request;
+    return { ...request, host: relay.host, port: target.tunnelConfig.remotePort };
+  };
   const getCredential = async (target: Server) => {
     const cached = activeCredentials.current[target.id];
-    if (cached) return cached;
+    if (cached) return resolveTunnelForRequest(target, cached);
     try {
       const stored = await invoke<SshRequest | null>("load_server_credential", { serverId: target.id });
-      if (stored) activeCredentials.current[target.id] = stored;
+      if (stored) {
+        const resolved = resolveTunnelForRequest(target, stored);
+        activeCredentials.current[target.id] = resolved;
+        return resolved;
+      }
       return stored;
     } catch {
       return null;
@@ -846,8 +860,8 @@ function App() {
       await invoke("save_server_credential", { serverId: id, credential: request });
       let profile: ServerProfile | undefined;
       try { profile = normalizeServerProfile(await invoke<ServerProfile>("inspect_server", { request }), host); } catch (inspectError) { appendRuntimeLog({ level: "warn", event: "manager.server.inspect.failed", message: "Server added but profile inspection failed.", details: inspectError instanceof Error ? inspectError.message : String(inspectError) }); }
-      const connectionType = selected.connectionType || "direct";
-      const nextServer: Server = { id, name, host, port, username, connectionType, tunnelConfig: selected.tunnelConfig, system: profile?.osName ?? result.system, status: "connected", latency: result.latencyMs, profile };
+      const connectionType = "direct" as const;
+      const nextServer: Server = { id, name, host, port, username, connectionType, system: profile?.osName ?? result.system, status: "connected", latency: result.latencyMs, profile };
       const nextServers = [nextServer, ...servers.filter((item) => item.id !== id)];
       persistServers(nextServers);
       setServer(nextServer);

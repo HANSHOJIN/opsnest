@@ -9,16 +9,28 @@ export function isManagerDeleteServerRequest(input: string) {
 }
 
 export function generateTunnelScript(server: { name: string; host: string; port: number; username: string }, relay: { host: string; name: string }, remotePort: number): string {
+  const sshPort = server.port || 22;
+  const tunnelUser = server.username || "root";
   const shell = `# ========================================
 # ${server.name} → ${relay.name} 反向隧道一键配置
-# 在目标内网主机上以 root 执行
+# 在目标内网主机上执行
 # ========================================
 
 TUNNEL_HOST="${relay.host}"
-REMOTE_PORT="${remotePort}"
+REMOTE_PORT=${remotePort}
+LOCAL_SSH_PORT=${sshPort}
+TUNNEL_USER="${tunnelUser}"
 
 echo "=== 1. 安装 autossh ==="
-apt update -qq && apt install -y -qq autossh
+if command -v apt >/dev/null 2>&1; then
+  apt update -qq && apt install -y -qq autossh
+elif command -v opkg >/dev/null 2>&1; then
+  opkg update && opkg install autossh
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y autossh
+else
+  echo "无法识别包管理器，请手动安装 autossh"
+fi
 
 echo "=== 2. 生成 SSH 密钥 ==="
 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N "" 2>/dev/null
@@ -31,37 +43,58 @@ read -p "公钥已添加？(y/n) " OK
 if [ "$OK" != "y" ]; then echo "请先添加公钥"; exit 1; fi
 
 echo "=== 3. 测试连接 ==="
-ssh -o StrictHostKeyChecking=accept-new root@${TUNNEL_HOST} "echo 连接成功"
+ssh -o StrictHostKeyChecking=accept-new -p 22 \${TUNNEL_USER}@\${TUNNEL_HOST} "echo 连接成功"
 
 echo "=== 4. 创建隧道服务 ==="
-cat > /etc/systemd/system/reverse-tunnel.service <<UNIT
+SERVICE_FILE="/etc/systemd/system/reverse-tunnel.service"
+if [ -d /etc/systemd/system ]; then
+  # systemd — Debian/Ubuntu/飞牛
+  sudo tee \${SERVICE_FILE} > /dev/null <<UNIT
 [Unit]
-Description=Reverse tunnel to ${TUNNEL_HOST}:${REMOTE_PORT}
+Description=Reverse tunnel to \${TUNNEL_HOST}:\${REMOTE_PORT}
 After=network-online.target
 
 [Service]
 Type=simple
-User=root
+User=${tunnelUser}
 ExecStart=/usr/bin/autossh -M 0 \
   -o "ServerAliveInterval=30" \
   -o "ServerAliveCountMax=3" \
   -o "StrictHostKeyChecking=no" \
   -o "ExitOnForwardFailure=yes" \
-  -N -R 0.0.0.0:${REMOTE_PORT}:localhost:22 \
-  root@${TUNNEL_HOST}
+  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \
+  \${TUNNEL_USER}@\${TUNNEL_HOST}
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 UNIT
-
-systemctl daemon-reload
-systemctl enable --now reverse-tunnel.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now reverse-tunnel.service
+elif [ -f /etc/rc.local ]; then
+  # OpenWrt / 无 systemd 环境
+  echo "nohup /usr/bin/autossh -M 0 \\"
+  echo "  -o ServerAliveInterval=30 \\"
+  echo "  -o ServerAliveCountMax=3 \\"
+  echo "  -o StrictHostKeyChecking=no \\"
+  echo "  -o ExitOnForwardFailure=yes \\"
+  echo "  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \\"
+  echo "  \${TUNNEL_USER}@\${TUNNEL_HOST} &"
+  echo "" >> /etc/rc.local
+  echo "nohup /usr/bin/autossh -M 0 \\" >> /etc/rc.local
+  echo "  -o ServerAliveInterval=30 \\" >> /etc/rc.local
+  echo "  -o ServerAliveCountMax=3 \\" >> /etc/rc.local
+  echo "  -o StrictHostKeyChecking=no \\" >> /etc/rc.local
+  echo "  -o ExitOnForwardFailure=yes \\" >> /etc/rc.local
+  echo "  -N -R 0.0.0.0:\${REMOTE_PORT}:localhost:\${LOCAL_SSH_PORT} \\" >> /etc/rc.local
+  echo "  \${TUNNEL_USER}@\${TUNNEL_HOST} &" >> /etc/rc.local
+fi
 
 echo ""
-echo "✅ 隧道已建立！跳板机 ${TUNNEL_HOST}:${REMOTE_PORT} → ${server.host}:${server.port}"
+echo "✅ 隧道已建立！跳板机 \${TUNNEL_HOST}:\${REMOTE_PORT} → ${server.host}:${sshPort}"
 echo "   现在可以在 OpsNest 中连接此服务器了。"
+echo "   公钥已在步骤 2 中显示，请确保已添加到跳板机的 authorized_keys。"
 `;
   return shell;
 }
