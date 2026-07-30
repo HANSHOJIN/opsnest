@@ -1696,6 +1696,8 @@ function NasServerView({ server, text, language, onBack, onOpen, onConnect, onSc
   </section>;
 }
 
+/* Legacy OpenWrt detail variant retained as a migration reference. */
+/*
 function OpenWrtRouterViewLegacy({ server, text, language, onBack, onOpen, onConnect, onDiscover, onEdit, onManager, onCron }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onDiscover: () => void; onEdit: () => void; onManager: () => void; onCron: () => void }) {
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1717,6 +1719,8 @@ function OpenWrtRouterViewLegacy({ server, text, language, onBack, onOpen, onCon
     <div className="router-bottom-grid"><button className="quick-action" onClick={onOpen}><span>〉</span><div><strong>{zhMode ? "原生 SSH 终端" : "Native SSH terminal"}</strong><small>{zhMode ? "进入路由器命令行" : "Open the router shell"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "让 AI 管理路由器" : "Ask AI to manage the router"}</strong><small>{zhMode ? "分析网络和内置服务" : "Analyze network and built-in services"}</small></div></button></div>
   </section>;
 }
+
+*/
 
 function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, onScan, isScanning, onDiscover, isDiscovering, onEdit, onManager, onCron, onAddCustomService, onDeleteCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onScan: () => void; isScanning: boolean; onDiscover: () => void; isDiscovering: boolean; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService: (serverId: string, name: string, port: number) => void; onDeleteCustomService: (serverId: string, serviceId: string) => void }) {
   setActiveServiceIconServer(server.id);
@@ -1745,6 +1749,8 @@ function OpenWrtRouterView({ server, text, language, onBack, onOpen, onConnect, 
   </section>;
 }
 
+/* Legacy generic detail variant retained as a migration reference. */
+/*
 function ServerDetailViewV2({ server, text, language, onBack, onOpen, onConnect, onDiscover, onEdit, onManager, onCron, onAddCustomService }: { server: Server; text: typeof zh; language: Locale; onBack: () => void; onOpen: () => void; onConnect: () => void; onDiscover: () => void; onEdit: () => void; onManager: () => void; onCron: () => void; onAddCustomService?: (serverId: string, name: string, port: number) => void }) {
   const zhMode = language === "zh-CN";
   const profile = server.profile;
@@ -1767,6 +1773,8 @@ function ServerDetailViewV2({ server, text, language, onBack, onOpen, onConnect,
     <div className="detail-columns"><section className="detail-section"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "服务与入口" : "Services and entry points"}</p><h2>{zhMode ? "服务器上有什么" : "What is installed"}</h2></div><button className="text-button" onClick={onDiscover} disabled={!connected}>{zhMode ? "重新发现" : "Discover again"}</button></div><div className="service-entry-grid"><article className="service-entry service-entry-active"><div className="service-entry-icon">⌁</div><div className="service-entry-body"><div><h3>SSH</h3><span>{zhMode ? "原生终端会话" : "Native terminal session"}</span></div><b>{connected ? (zhMode ? "可用" : "Available") : (zhMode ? "未连接" : "Offline")}</b></div><button className="service-entry-button" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开" : "Open") : (zhMode ? "连接" : "Connect")}</button></article>{visibleServices.map((service) => { const url = getServiceUrl(server.host, service); return <article className={`service-entry ${service.status === "running" ? "service-entry-active" : ""}`} key={service.id}><ServiceIcon service={service} serverId={server.id} /><div className="service-entry-body"><div><h3>{service.name}</h3><span>{categoryLabel(service.category)}{service.port ? ` · :${service.port}` : ""}{service.version ? ` · ${service.version}` : ""}</span></div><b>{statusLabel(service.status)}</b></div><button className="service-entry-button" onClick={() => url ? openServiceUrl(url) : onOpen()}>{url ? (zhMode ? "打开" : "Open") : (zhMode ? "终端" : "Terminal")}</button></article>})}<CustomServiceCard serverId={server.id} language={language} onAdd={onAddCustomService} />{!visibleServices.length && !dockerInstalled && <div className="service-discovery-empty"><strong>{zhMode ? "尚未发现服务入口" : "No service entry points yet"}</strong><span>{zhMode ? "告诉 AI 把新装的面板加入首页，或点击重新发现。" : "Ask AI to add a new panel to the home page, or run discovery now."}</span><button className="secondary" onClick={onDiscover} disabled={!connected}>{zhMode ? "立即发现" : "Discover now"}</button></div>}</div></section><aside className="detail-side-column"><section className="detail-section quick-panel"><div className="detail-section-heading"><div><p className="eyebrow">{zhMode ? "快捷入口" : "Quick access"}</p><h2>{zhMode ? "常用操作" : "Common actions"}</h2></div></div><button className="quick-action" onClick={onOpen}><span>⌁</span><div><strong>{zhMode ? "打开 SSH 终端" : "Open SSH terminal"}</strong><small>{zhMode ? "进入这台服务器的原生会话" : "Open the native session"}</small></div></button><button className="quick-action" onClick={onManager}><span>✦</span><div><strong>{zhMode ? "询问 AI 助手" : "Ask AI assistant"}</strong><small>{zhMode ? "让 AI 了解并分析这台服务器" : "Ask AI to understand this server"}</small></div></button><button className="quick-action" onClick={onCron}><span>▦</span><div><strong>{zhMode ? "查看定时任务" : "View scheduled tasks"}</strong><small>{zhMode ? "管理服务器上的 Cron" : "Manage server-side Cron"}</small></div></button></section><section className="detail-section detail-note"><p className="eyebrow">{zhMode ? "已保存" : "Saved locally"}</p><strong>{services.length ? (zhMode ? `已发现 ${services.length} 个服务入口` : `${services.length} service entries discovered`) : (zhMode ? "等待发现服务入口" : "Waiting for service discovery")}</strong><p>{server.servicesScannedAt ? new Date(server.servicesScannedAt).toLocaleString(language === "zh-CN" ? "zh-CN" : "en-US") : (zhMode ? "连接服务器后即可开始发现。" : "Connect to start discovery.")}</p></section></aside></div>
   </section>;
 }
+
+*/
 
 /*
  * TerminalPanel moved to features/terminal/panel.tsx in 0.1.2-alpha.1.
