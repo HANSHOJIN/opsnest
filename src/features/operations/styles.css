@@ -18,7 +18,7 @@
 .manager-server em { margin-top: 5px; color: #b1b8c2; font-size: 10px; font-style: normal; }
 .manager-empty { padding: 4px; color: #9aa4b1; font-size: 12px; line-height: 1.6; }
 .manager-chat { display: flex; flex-direction: column; overflow: hidden; }
-.manager-messages { flex: 1; overflow: auto; padding: 28px 34px; }
+.manager-messages { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 28px 34px; }
 .manager-intro { max-width: 680px; margin-bottom: 24px; color: #657285; font-size: 14px; line-height: 1.7; }
 .manager-message { display: flex; gap: 12px; max-width: 780px; margin: 14px 0; }
 .manager-message > span { display: grid; flex: 0 0 auto; place-items: center; width: 28px; height: 28px; border-radius: 9px; color: #5267e8; background: #eef0ff; font-size: 11px; font-weight: 700; }
@@ -27,7 +27,7 @@
 .manager-message pre { max-width: calc(100% - 42px); margin: 0; padding: 11px 14px; border-radius: 12px; color: #3c4858; background: #f4f6fa; white-space: pre-wrap; word-break: break-word; font: 13px/1.7 system-ui, sans-serif; }
 .manager-message.user pre { color: #fff; background: #5267e8; }
 .manager-message.system pre { color: #8a94a2; background: transparent; }
-.manager-input-row { display: flex; align-items: flex-end; gap: 10px; padding: 16px; border-top: 1px solid #edf0f4; background: #fbfcfd; }
+.manager-input-row { display: flex; flex: 0 0 auto; align-items: flex-end; gap: 10px; padding: 16px; border-top: 1px solid #edf0f4; background: #fbfcfd; }
 .manager-input-row textarea { flex: 1; min-width: 0; resize: none; padding: 11px 12px; border: 1px solid #d9dee7; border-radius: 9px; outline: none; color: #18202a; background: #fff; font: 13px/1.5 system-ui, sans-serif; }
 .manager-input-row textarea:focus { border-color: #5267e8; box-shadow: 0 0 0 3px #eef0ff; }
 .manager-input-row .primary { padding: 11px 17px; }
@@ -54,13 +54,17 @@
 .task-history-empty > div { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 12px; border-radius: 17px; color: #5267e8; background: #eef0ff; font-size: 30px; }
 .task-history-empty h2 { margin: 0; color: #59677d; font-size: 18px; }
 @media (max-width: 900px) { .task-history-view { inset: 0; padding: 24px; } .task-history-header { gap: 14px; flex-direction: column; } }
-.agent-run-panel { margin: 0 34px 16px; padding: 16px; border: 1px solid #dfe5f2; border-radius: 14px; background: #fbfcff; box-shadow: 0 8px 24px rgba(30,47,86,.05); }
+.agent-run-panel { flex: 0 0 auto; max-height: min(46vh, 420px); margin: 0 34px 16px; padding: 16px; overflow: auto; position: relative; z-index: 1; border: 1px solid #dfe5f2; border-radius: 14px; background: #fbfcff; box-shadow: 0 8px 24px rgba(30,47,86,.05); }
+.agent-run-panel.collapsed { max-height: none; padding-top: 11px; padding-bottom: 11px; }
 .agent-run-panel.executing { border-color: #b9c8ff; }
 .agent-run-panel.completed { border-color: #b9e6cc; }
 .agent-run-panel.failed, .agent-run-panel.blocked { border-color: #f0b9b9; }
 .agent-run-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; color: #15254d; }
+.agent-run-panel.collapsed .agent-run-heading { margin-bottom: 0; }
+.agent-run-heading-actions { display: flex; align-items: center; gap: 10px; }
 .agent-run-heading strong { font-size: 15px; }
 .agent-run-heading span { color: #7c8aa7; font-size: 12px; }
+.agent-run-toggle { padding: 4px 8px; border: 1px solid #d7deed; border-radius: 7px; color: #5267e8; background: #fff; font-size: 11px; cursor: pointer; }
 .agent-run-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .agent-run-step { display: flex; gap: 8px; min-width: 0; padding: 9px; border-radius: 10px; background: #f3f5fa; }
 .agent-run-step.running { background: #eef2ff; }

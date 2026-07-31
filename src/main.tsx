@@ -19,7 +19,7 @@ import { CronPanel } from "./features/cron/panel";
 import { TaskHistoryPanel } from "./features/activity/task-history";
 import { normalizeConversationLog } from "./features/activity/conversation";
 import { ManagerPanel } from "./features/manager/panel";
-import { extractManagerServerDetails, generateTunnelScript, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest } from "./features/manager/requests";
+import { extractManagerServerDetails, generateTunnelScript, isManagerAddServerRequest, isManagerDeleteServerRequest, isServiceShortcutRequest, resolveManagerTargetIds } from "./features/manager/requests";
 import { TerminalPanel } from "./features/terminal/panel";
 import { defaultAiConfig, providerPresets } from "./features/settings/model-config";
 import { restoreTerminalLines } from "./features/terminal/history";
@@ -59,14 +59,14 @@ const zh = {
   welcome: "欢迎回来", hosts: "我的服务器", cron: "定时任务", tasks: "任务记录", settings: "设置", servers: "服务器", addServer: "添加服务器", localFirst: "本地优先", credentialsLocal: "凭据只在连接时使用", localMode: "● 本地模式", aiStatusNotConfigured: "● AI 未配置", aiStatusConnected: "● AI 已连接", aiStatusFailed: "● AI 连接失败", aiStatusNotTested: "● AI 未测试", localConfig: "本地配置", aiModel: "AI 模型", localOnly: "● 仅本机使用", apiDirect: "API 直连",
   addAiModel: "添加一个 AI 模型", aiModelIntro: "模型只负责理解你的描述和服务器状态，所有 SSH 操作仍由本地安全流程控制。", modelService: "模型服务", apiAddress: "API 地址", apiKey: "API Key", optional: "可选", modelName: "模型名称", modelPlaceholder: "例如：deepseek-chat", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "输入你的 API Key", ollamaKey: "本地 Ollama 不需要 Key", testConnection: "测试连接", testing: "正在测试…", saveModel: "保存模型", savedLocal: "已保存到本机", connectionFound: (count: number) => `连接成功，发现 ${count} 个模型`, connectionNoList: "连接成功，可以手动填写模型名称", keyLocalNote: "API Key 目前仅保存在当前电脑的本地配置中，不会上传到 OpsNest。建议使用权限受限、额度可控的 Key。", language: "语言", simplifiedChinese: "简体中文", english: "English", languageNote: "更改语言后，界面会立即更新。",
   connectFirst: "连接你的第一台服务器", connectIntro: "输入 IP 地址、用户名和密码，然后用人话描述你想做什么。", startConnect: "开始连接", demo: "查看演示", connected: "已连接", saved: "已保存", notConnected: "未连接", system: "系统", connectionMethod: "连接方式", ssh: "SSH", addAnother: "添加另一台服务器", serverProfile: "AI 服务器档案", understood: "我已经了解这台服务器", readOnly: "只读扫描", profileIntro: "已读取基础环境信息。没有修改文件、安装软件或启动服务。", hostname: "主机名", cpu: "CPU", memory: "内存", disk: "磁盘", docker: "Docker", installedRunning: (count: string) => count === "unavailable" ? "已安装 · 无法读取容器" : `已安装 · ${count} 个运行中`, notInstalled: "未安装", rescan: "重新扫描", analyzeServer: "让 AI 解读这台服务器", analyzing: "AI 正在分析…", aiInterpretation: "AI 解读", nextStep: "下一步：让 AI 了解这台服务器", understanding: "正在了解这台服务器…", scanIntro: "读取系统、资源和 Docker 状态，不会自动修改任何内容。", scanWait: "只读取基础环境信息，请稍候。", principles: ["先检查，再行动", "AI 会先解释计划和风险", "每一步都可追踪", "查看完整操作时间线", "危险操作需批准", "你始终掌握最终决定权"],
-  addWizardTitle: "添加你的服务器", firstStep: "第一步 · 连接服务器", wizardIntro: "只需要填写你已有的信息。OpsNest 会先测试连接，不会修改服务器。", serverName: "服务器名称", serverNamePlaceholder: "例如：我的网站", serverAddress: "服务器地址", serverAddressPlaceholder: "例如：203.0.113.10", port: "SSH 端口", username: "用户名", usernamePlaceholder: "例如：root 或 ubuntu", passwordLogin: "密码登录", privateKey: "SSH 私钥", password: "密码", passwordPlaceholder: "只在本次连接中使用", keyPath: "私钥文件路径", keyPathPlaceholder: "例如：C:\\Users\\你\\.ssh\\id_ed25519", passphrase: "私钥密码", cancel: "取消", connecting: "正在测试连接…", connect: "测试并连接", close: "关闭", missingHost: "请输入服务器地址。", missingUser: "请输入用户名。", invalidPort: "端口号需要是 1 到 65535 之间的数字。", missingPassword: "请输入密码。", missingKey: "请输入私钥文件路径。", reconnect: "请重新连接服务器后再进行扫描。", noCredentials: "当前会话没有保存登录凭据，请重新连接服务器。", connectionFailed: "连接失败，请检查地址、端口和登录方式。", scanFailed: "扫描失败，请重新连接服务器后再试。", configureAi: "请先在设置中完成 AI 模型配置。", aiFailed: "AI 调用失败，请检查模型设置。", apiMissing: "请输入 API 地址。", modelMissing: "请输入模型名称。", keyMissing: "请输入 API Key。", modelFailed: "模型连接失败，请检查地址和 Key。", taskComing: "任务记录将在下一阶段加入。", connectionTypeDirect: "直连", connectionTypeReverse: "反向隧道", connectionTypeDirectHint: "服务器有公网 IP，OpsNest 直接连接", connectionTypeReverseHint: "服务器在内网，通过跳板机反向隧道连接", relayServer: "跳板机", relayServerHint: "选择一台已有可连接服务器作为跳板", tunnelPort: "隧道远端端口", tunnelPortHint: "内网主机在跳板机上监听的端口号", terminalShell: "Shell", terminalAi: "AI 助手", terminalPlaceholder: "输入命令，或切换到 AI 模式用自然语言描述…", terminalAiPlaceholder: "例如：查看磁盘还有多少空间", terminalEmpty: "双击左侧服务器名称即可进入 SSH。", terminalConnecting: "正在连接…", terminalExit: "退出终端", terminalCommandFailed: "命令执行失败：", terminalAiNeedModel: "请先在设置中配置 AI 模型。", managerTitle: "服务器总管", managerSubtitle: "管理所有已保存的服务器", managerIntro: "你好，我可以同时了解你的服务器，并帮你规划检查、排障和维护任务。", managerPlaceholder: "例如：检查所有服务器的磁盘空间", managerSend: "发送", managerExit: "退出总管", managerNoServers: "还没有保存的服务器。", managerThinking: "总管正在分析…", managerSystem: "服务器总管已就绪。", contextConnect: "连接服务器", contextTerminal: "打开 SSH 会话", contextView: "查看服务器",
+  addWizardTitle: "添加你的服务器", firstStep: "第一步 · 连接服务器", wizardIntro: "只需要填写你已有的信息。OpsNest 会先测试连接，不会修改服务器。", serverName: "服务器名称", serverNamePlaceholder: "例如：我的网站", serverAddress: "服务器地址", serverAddressPlaceholder: "例如：203.0.113.10", port: "SSH 端口", username: "用户名", usernamePlaceholder: "例如：root 或 ubuntu", passwordLogin: "密码登录", privateKey: "SSH 私钥", password: "密码", passwordPlaceholder: "只在本次连接中使用", keyPath: "私钥文件路径", keyPathPlaceholder: "例如：C:\\Users\\你\\.ssh\\id_ed25519", passphrase: "私钥密码", cancel: "取消", connecting: "正在测试连接…", connect: "测试并连接", close: "关闭", missingHost: "请输入服务器地址。", missingUser: "请输入用户名。", invalidPort: "端口号需要是 1 到 65535 之间的数字。", missingPassword: "请输入密码。", missingKey: "请输入私钥文件路径。", reconnect: "请重新连接服务器后再进行扫描。", noCredentials: "当前会话没有保存登录凭据，请重新连接服务器。", connectionFailed: "连接失败，请检查地址、端口和登录方式。", scanFailed: "扫描失败，请重新连接服务器后再试。", configureAi: "请先在设置中完成 AI 模型配置。", aiFailed: "AI 调用失败，请检查模型设置。", apiMissing: "请输入 API 地址。", modelMissing: "请输入模型名称。", keyMissing: "请输入 API Key。", modelFailed: "模型连接失败，请检查地址和 Key。", taskComing: "任务记录将在下一阶段加入。", connectionTypeDirect: "直连", connectionTypeReverse: "反向隧道", connectionTypeDirectHint: "服务器有公网 IP，OpsNest 直接连接", connectionTypeReverseHint: "服务器在内网，通过跳板机反向隧道连接", relayServer: "跳板机", relayServerHint: "选择一台已有可连接服务器作为跳板", tunnelPort: "隧道远端端口", tunnelPortHint: "内网主机在跳板机上监听的端口号", terminalShell: "Shell", terminalAi: "AI 助手", terminalPlaceholder: "输入命令，或切换到 AI 模式用自然语言描述…", terminalAiPlaceholder: "例如：查看磁盘还有多少空间", terminalEmpty: "双击左侧服务器名称即可进入 SSH。", terminalConnecting: "正在连接…", terminalMinimize: "最小化", terminalExit: "退出终端", terminalCommandFailed: "命令执行失败：", terminalAiNeedModel: "请先在设置中配置 AI 模型。", managerTitle: "服务器总管", managerSubtitle: "管理所有已保存的服务器", managerIntro: "你好，我可以同时了解你的服务器，并帮你规划检查、排障和维护任务。", managerPlaceholder: "例如：检查所有服务器的磁盘空间", managerSend: "发送", managerExit: "退出总管", managerNoServers: "还没有保存的服务器。", managerThinking: "总管正在分析…", managerSystem: "服务器总管已就绪。", contextConnect: "连接服务器", contextTerminal: "打开 SSH 会话", contextView: "查看服务器",
 };
 
 const en = {
   welcome: "Welcome back", hosts: "My servers", cron: "Scheduled tasks", tasks: "Task history", settings: "Settings", servers: "Servers", addServer: "Add server", localFirst: "Local-first", credentialsLocal: "Credentials are used only while connecting", localMode: "● Local mode", aiStatusNotConfigured: "● AI not configured", aiStatusConnected: "● AI connected", aiStatusFailed: "● AI connection failed", aiStatusNotTested: "● AI not tested", localConfig: "Local configuration", aiModel: "AI model", localOnly: "● Local only", apiDirect: "Direct API",
   addAiModel: "Add an AI model", aiModelIntro: "The model only interprets your request and server status. SSH actions remain controlled by the local safety flow.", modelService: "Model provider", apiAddress: "API URL", apiKey: "API key", optional: "Optional", modelName: "Model name", modelPlaceholder: "For example: gpt-4o-mini", apiPlaceholder: "https://api.example.com/v1", keyPlaceholder: "Enter your API key", ollamaKey: "Ollama runs locally and does not need a key", testConnection: "Test connection", testing: "Testing…", saveModel: "Save model", savedLocal: "Saved on this computer", connectionFound: (count: number) => `Connected, found ${count} model${count === 1 ? "" : "s"}`, connectionNoList: "Connected. You can enter a model name manually.", keyLocalNote: "The API key is stored only on this computer and is not sent to OpsNest. Use a key with limited permissions and spending.", language: "Language", simplifiedChinese: "简体中文", english: "English", languageNote: "The interface updates immediately after changing the language.",
   connectFirst: "Connect your first server", connectIntro: "Enter the IP address, username and password, then describe what you want to do in plain language.", startConnect: "Start connecting", demo: "View demo", connected: "Connected", saved: "Saved", notConnected: "Not connected", system: "System", connectionMethod: "Connection", ssh: "SSH", addAnother: "Add another server", serverProfile: "AI server profile", understood: "I understand this server", readOnly: "Read-only scan", profileIntro: "Basic environment information was read. No files were changed, software installed or services started.", hostname: "Hostname", cpu: "CPU", memory: "Memory", disk: "Disk", docker: "Docker", installedRunning: (count: string) => count === "unavailable" ? "Installed · containers unavailable" : `Installed · ${count} running`, notInstalled: "Not installed", rescan: "Scan again", analyzeServer: "Ask AI to explain this server", analyzing: "AI is analyzing…", aiInterpretation: "AI interpretation", nextStep: "Next: let AI understand this server", understanding: "Learning about this server…", scanIntro: "Read system, resource and Docker status. Nothing will be changed automatically.", scanWait: "Reading basic environment information…", principles: ["Check first, then act", "AI explains the plan and risk first", "Every step is traceable", "View the complete operation timeline", "Risky actions require approval", "You always make the final decision"],
-  addWizardTitle: "Add your server", firstStep: "Step 1 · Connect a server", wizardIntro: "Enter the information you already have. OpsNest tests the connection before doing anything else.", serverName: "Server name", serverNamePlaceholder: "For example: My website", serverAddress: "Server address", serverAddressPlaceholder: "For example: 203.0.113.10", port: "SSH port", username: "Username", usernamePlaceholder: "For example: root or ubuntu", passwordLogin: "Password", privateKey: "SSH private key", password: "Password", passwordPlaceholder: "Used only for this connection", keyPath: "Private key path", keyPathPlaceholder: "For example: C:\\Users\\you\\.ssh\\id_ed25519", passphrase: "Key passphrase", cancel: "Cancel", connecting: "Testing connection…", connect: "Test and connect", close: "Close", missingHost: "Enter the server address.", missingUser: "Enter a username.", invalidPort: "The port must be a number between 1 and 65535.", missingPassword: "Enter the password.", missingKey: "Enter the private key path.", reconnect: "Reconnect to the server before scanning it.", noCredentials: "This session has no login credentials. Reconnect to the server first.", connectionFailed: "Connection failed. Check the address, port and login method.", scanFailed: "Scan failed. Reconnect to the server and try again.", configureAi: "Complete the AI model settings first.", aiFailed: "The AI request failed. Check the model settings.", apiMissing: "Enter the API URL.", modelMissing: "Enter a model name.", keyMissing: "Enter an API key.", modelFailed: "The model connection failed. Check the URL and key.", taskComing: "Task history will be added in the next stage.", connectionTypeDirect: "Direct", connectionTypeReverse: "Reverse tunnel", connectionTypeDirectHint: "Server has a public IP, OpsNest connects directly", connectionTypeReverseHint: "Server is on an internal network, connect via a relay server", relayServer: "Relay server", relayServerHint: "Select an existing server to use as the tunnel relay", tunnelPort: "Tunnel remote port", tunnelPortHint: "The port the internal server listens on the relay", terminalShell: "Shell", terminalAi: "AI assistant", terminalPlaceholder: "Enter a command, or switch to AI mode and describe what you need…", terminalAiPlaceholder: "For example: How much disk space is left?", terminalEmpty: "Double-click a server on the left to open SSH.", terminalConnecting: "Connecting…", terminalExit: "Exit terminal", terminalCommandFailed: "Command failed: ", terminalAiNeedModel: "Configure an AI model in Settings first.", managerTitle: "Server manager", managerSubtitle: "Manage all saved servers", managerIntro: "Hello. I can understand your servers together and help plan checks, troubleshooting and maintenance tasks.", managerPlaceholder: "For example: Check disk space on all servers", managerSend: "Send", managerExit: "Exit manager", managerNoServers: "No saved servers yet.", managerThinking: "The manager is analyzing…", managerSystem: "Server manager is ready.", contextConnect: "Connect server", contextTerminal: "Open SSH session", contextView: "View server",
+  addWizardTitle: "Add your server", firstStep: "Step 1 · Connect a server", wizardIntro: "Enter the information you already have. OpsNest tests the connection before doing anything else.", serverName: "Server name", serverNamePlaceholder: "For example: My website", serverAddress: "Server address", serverAddressPlaceholder: "For example: 203.0.113.10", port: "SSH port", username: "Username", usernamePlaceholder: "For example: root or ubuntu", passwordLogin: "Password", privateKey: "SSH private key", password: "Password", passwordPlaceholder: "Used only for this connection", keyPath: "Private key path", keyPathPlaceholder: "For example: C:\\Users\\you\\.ssh\\id_ed25519", passphrase: "Key passphrase", cancel: "Cancel", connecting: "Testing connection…", connect: "Test and connect", close: "Close", missingHost: "Enter the server address.", missingUser: "Enter a username.", invalidPort: "The port must be a number between 1 and 65535.", missingPassword: "Enter the password.", missingKey: "Enter the private key path.", reconnect: "Reconnect to the server before scanning it.", noCredentials: "This session has no login credentials. Reconnect to the server first.", connectionFailed: "Connection failed. Check the address, port and login method.", scanFailed: "Scan failed. Reconnect to the server and try again.", configureAi: "Complete the AI model settings first.", aiFailed: "The AI request failed. Check the model settings.", apiMissing: "Enter the API URL.", modelMissing: "Enter a model name.", keyMissing: "Enter an API key.", modelFailed: "The model connection failed. Check the URL and key.", taskComing: "Task history will be added in the next stage.", connectionTypeDirect: "Direct", connectionTypeReverse: "Reverse tunnel", connectionTypeDirectHint: "Server has a public IP, OpsNest connects directly", connectionTypeReverseHint: "Server is on an internal network, connect via a relay server", relayServer: "Relay server", relayServerHint: "Select an existing server to use as the tunnel relay", tunnelPort: "Tunnel remote port", tunnelPortHint: "The port the internal server listens on the relay", terminalShell: "Shell", terminalAi: "AI assistant", terminalPlaceholder: "Enter a command, or switch to AI mode and describe what you need…", terminalAiPlaceholder: "For example: How much disk space is left?", terminalEmpty: "Double-click a server on the left to open SSH.", terminalConnecting: "Connecting…", terminalMinimize: "Minimize", terminalExit: "Exit terminal", terminalCommandFailed: "Command failed: ", terminalAiNeedModel: "Configure an AI model in Settings first.", managerTitle: "Server manager", managerSubtitle: "Manage all saved servers", managerIntro: "Hello. I can understand your servers together and help plan checks, troubleshooting and maintenance tasks.", managerPlaceholder: "For example: Check disk space on all servers", managerSend: "Send", managerExit: "Exit manager", managerNoServers: "No saved servers yet.", managerThinking: "The manager is analyzing…", managerSystem: "Server manager is ready.", contextConnect: "Connect server", contextTerminal: "Open SSH session", contextView: "View server",
 };
 
 function App() {
@@ -637,7 +637,9 @@ function App() {
   const startAgentRun = async (task: string) => {
     const modelConfigured = Boolean(aiConfig.baseUrl.trim() && aiConfig.model.trim() && (!providerPresets[aiConfig.provider].keyRequired || aiConfig.apiKey.trim()));
     if (!modelConfigured) { setView("settings"); setError(text.configureAi); return; }
-    const targetServers = servers.filter((item) => item.status !== "failed");
+    const currentServers = serversRef.current;
+    const targetIds = resolveManagerTargetIds(task, currentServers);
+    const targetServers = currentServers.filter((item) => targetIds.includes(item.id));
     if (!targetServers.length) { setError(text.managerNoServers); return; }
     const steps: AgentStep[] = ["context", "memory", "search", "explore", "diagnose", "plan", "approval", "execute", "verify", "remember"].map((id) => ({ id: id as AgentStepId, label: id, status: "pending" }));
     const run: AgentRun = { id: crypto.randomUUID(), task, targetIds: targetServers.map((item) => item.id), steps, phase: "running" };
@@ -664,7 +666,7 @@ function App() {
       patchAgentStep("search", "completed", needsSearch ? `${webResults.length} reference result${webResults.length === 1 ? "" : "s"} found.` : "Skipped.");
 
       patchAgentStep("explore", "running", "Reading current environment before planning.");
-      const explored = [...servers];
+      const explored = [...serversRef.current];
       for (const target of targetServers) {
         const request = await getCredential(target);
         if (!request) continue;
@@ -706,9 +708,16 @@ function App() {
         return buildMachineIdentity(item);
       }).join("\n");
       const searchContext = webResults.length ? webResults.map((item) => `${item.title}: ${item.url}\n${item.snippet}`).join("\n") : "No web references.";
-      const conversationContext = managerMessages.slice(-80).map((message) => `${message.role}: ${message.text}`).join("\n") || "No previous manager conversation.";
+      const conversationContext = conversationLogsRef.current.filter((item) => item.scope === "manager").slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous manager conversation.";
       const planned = await askAgentPlanWithTools(aiConfig, task, language, refreshedContext, memory, searchContext, diagnosisContext, conversationContext);
       const plan = planned.plan;
+      if (!plan.command.trim()) {
+        const chatSteps = run.steps.map((step) => ({ ...step, status: "completed" as const, detail: step.id === "plan" ? "Conversation reply; no server command was requested." : "Not needed for a chat reply." }));
+        patchAgentRun({ plan, toolSession: undefined, phase: "completed", result: plan.explanation, steps: chatSteps });
+        setManagerMessages((messages) => [...messages, { role: "assistant", text: plan.explanation }]);
+        appendLog({ type: "manager", role: "assistant", title: "Manager conversation reply", content: plan.explanation, status: "success" });
+        return;
+      }
       patchAgentRun({ plan, toolSession: planned.toolSession, phase: "waiting_approval", steps: run.steps.map((step) => {
         if (step.id === "context") return { ...step, status: "completed", detail: `${targetServers.length} target${targetServers.length === 1 ? "" : "s"} locked.` };
         if (step.id === "memory") return { ...step, status: "completed", detail: memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded." };
@@ -749,7 +758,7 @@ function App() {
     const outputs: string[] = [];
     try {
       for (const targetId of current.targetIds) {
-        const target = servers.find((item) => item.id === targetId);
+        const target = serversRef.current.find((item) => item.id === targetId);
         if (!target) continue;
         const request = await getCredential(target);
         if (!request) { outputs.push(`${target.name}: no saved credentials`); continue; }
@@ -761,7 +770,7 @@ function App() {
       const verification: string[] = [];
       if (current.plan.verifyCommand) {
         for (const targetId of current.targetIds) {
-          const target = servers.find((item) => item.id === targetId);
+          const target = serversRef.current.find((item) => item.id === targetId);
           const request = target ? await getCredential(target) : null;
           if (!target || !request) continue;
           const output = await invoke<string>("execute_ssh_command", { request, command: current.plan.verifyCommand });
@@ -795,7 +804,7 @@ function App() {
       }
       patchAgentStep("remember", "running", "Saving a concise result note for the next run.");
       const completedAt = new Date().toISOString();
-      const nextServers = servers.map((item) => current.targetIds.includes(item.id) ? { ...item, memory: [...(item.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${current.task}: ${current.plan?.explanation ?? "task completed"}. Execution finished and verification was attempted.` }].slice(-20) } : item);
+      const nextServers = serversRef.current.map((item) => current.targetIds.includes(item.id) ? { ...item, memory: [...(item.memory ?? []), { id: crypto.randomUUID(), createdAt: completedAt, summary: `${current.task}: ${current.plan?.explanation ?? "task completed"}. Execution finished and verification was attempted.` }].slice(-20) } : item);
       persistServers(nextServers);
       patchAgentStep("remember", "completed", "Result summary saved locally.");
       patchAgentRun({ phase: "completed", result: managerResult });
@@ -1115,15 +1124,6 @@ function App() {
       updateTerminalSession(target.id, { executing: false });
       return;
     }
-    // A background AgentRun must never inherit the focused terminal's command
-    // id. That id belongs to the target session only.
-    const commandId = terminalSessionsRef.current[target.id]?.activeCommandId ?? undefined;
-    // Keep the user's real terminal on its persistent shell so `cd`, virtual
-    // environments and interactive input continue to work. AI-approved task
-    // commands use a separate exec channel: installers and updaters may
-    // reload or terminate the login shell, and must not take the visible
-    // terminal session down with them.
-    const commandRequest = { ...request, commandId, sessionId: undefined };
     if (isHighRiskCommand(run.plan.command)) {
       patchTerminalAgentRunFor(target.id, { phase: "blocked", error: "This command is blocked by the local safety policy." });
       patchTerminalAgentStepFor(target.id, "approval", "blocked", "High-risk command requires a dedicated safety flow.");
@@ -1137,12 +1137,11 @@ function App() {
     let handedOff = false;
     try {
       setTerminalAgentStatus(language === "zh-CN" ? "AI 正在等待命令结果…" : "AI is waiting for the command result…");
-      const interactive = isInteractiveShellCommand(run.plan.command);
-      const output = interactive
-        ? await runInteractiveCommandFor(target.id, run.plan.command)
-        : await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.command });
+      // Use the visible persistent PTY for every approved Agent command. This
+      // keeps cwd/session state intact and lets long-running installs stream
+      // their real output instead of leaving a black screen until completion.
+      const output = await runInteractiveCommandFor(target.id, run.plan.command);
       const outputText = output.trim() ? output : "";
-      if (!interactive && outputText) appendTerminalLines({ kind: "command", text: run.plan!.command }, { kind: "output", text: outputText });
       appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan.command}\n\n${outputText}` });
       appendLog({ type: "terminal", title: "AgentRun output", serverId: target.id, serverName: target.name, content: `${run.task}\n\n$ ${run.plan.command}\n\n${outputText}`, status: "success" });
 
@@ -1187,8 +1186,7 @@ function App() {
       patchTerminalAgentStepFor(target.id, "verify", "running", "Checking the requested result.");
       let verification = "";
       if (run.plan.verifyCommand?.trim()) {
-        verification = await invoke<string>("execute_ssh_command", { request: commandRequest, command: run.plan.verifyCommand });
-        if (verification.trim()) appendTerminalLines({ kind: "command", text: run.plan!.verifyCommand! }, { kind: "output", text: verification });
+        verification = await runInteractiveCommandFor(target.id, run.plan.verifyCommand);
         appendConversationLog({ scope: "terminal", role: "tool", serverId: target.id, serverName: target.name, content: `$ ${run.plan!.verifyCommand}\n\n${verification || "(no output)"}` });
       }
       patchTerminalAgentStepFor(target.id, "verify", "completed", run.plan.verifyCommand ? "Verification completed." : "No dedicated verification command was needed.");
@@ -1352,6 +1350,15 @@ function App() {
       const conversationContext = conversationLogsRef.current.filter((item) => item.scope === "terminal" && item.serverId === target.id).slice(-80).map((item) => `${item.role}: ${item.content}`).join("\n") || "No previous terminal conversation for this server.";
        const planned = await askAgentPlanWithTools(aiConfig, task, language, `${target.name} (${target.username}@${target.host}:${target.port}) ${refreshedContext}`, memory, searchContext, diagnosisContext, conversationContext);
        const plan = planned.plan;
+       if (!plan.command.trim()) {
+        const chatSteps = run.steps.map((step) => ({ ...step, status: "completed" as const, detail: step.id === "plan" ? "Conversation reply; no server command was requested." : "Not needed for a chat reply." }));
+        setTerminalAgentRun({ ...run, plan, toolSession: undefined, phase: "completed", result: plan.explanation, steps: chatSteps });
+        setTerminalLines((lines) => [...lines, { kind: "ai", text: plan.explanation }]);
+        appendConversationLog({ scope: "terminal", role: "assistant", serverId: target.id, serverName: target.name, content: plan.explanation });
+        setTerminalAgentStatus(language === "zh-CN" ? "AI 已回复" : "AI replied");
+        setExecuting(false);
+        return;
+       }
        const plannedRun: AgentRun = { ...run, plan, toolSession: planned.toolSession, phase: "waiting_approval", steps: run.steps.map((step) => {
         if (step.id === "context") return { ...step, status: "completed", detail: "Current server locked." };
         if (step.id === "memory") return { ...step, status: "completed", detail: memory === "No saved memory yet." ? "No prior memory." : "Prior notes loaded." };
@@ -1718,7 +1725,7 @@ function App() {
         if (!panelServer) return null;
         const visible = view === "terminal" && server?.id === sessionId;
         return <div className={visible ? "terminal-session-active" : "terminal-session-background"} key={sessionId}>
-          <TerminalPanel server={panelServer} request={activeCredentials.current[sessionId] ?? null} text={text} language={language} interventionMode={aiConfig.interventionMode} lines={session.lines} executing={session.executing} agentStatus={session.agentStatus} interactiveCommand={session.interactiveCommand} onInputChange={(value) => updateTerminalSession(sessionId, { input: value })} onSubmit={(rawInput) => { if (serverRef.current?.id === sessionId) void submitTerminalInput(rawInput); }} onStop={() => { if (serverRef.current?.id === sessionId) void stopCurrentCommand(); }} onExit={() => { if (serverRef.current?.id === sessionId) exitTerminal(); }} onInteractiveComplete={(id, output) => completeInteractiveCommandFor(sessionId, id, output)} onInteractiveError={(id, message) => failInteractiveCommandFor(sessionId, id, message)} />
+          <TerminalPanel server={panelServer} request={activeCredentials.current[sessionId] ?? null} text={text} language={language} interventionMode={aiConfig.interventionMode} lines={session.lines} executing={session.executing} agentStatus={session.agentStatus} interactiveCommand={session.interactiveCommand} onInputChange={(value) => updateTerminalSession(sessionId, { input: value })} onSubmit={(rawInput) => { if (serverRef.current?.id === sessionId) void submitTerminalInput(rawInput); }} onStop={() => { if (serverRef.current?.id === sessionId) void stopCurrentCommand(); }} onMinimize={() => { if (serverRef.current?.id === sessionId) setView("hosts"); }} onExit={() => { if (serverRef.current?.id === sessionId) exitTerminal(); }} onInteractiveComplete={(id, output) => completeInteractiveCommandFor(sessionId, id, output)} onInteractiveError={(id, message) => failInteractiveCommandFor(sessionId, id, message)} />
         </div>;
        })}
       {view === "manager" && <ManagerPanel text={text} language={language} servers={servers} messages={managerMessages} input={managerInput} thinking={isManagerThinking} agentRun={agentRun} onApprove={approveAgentRun} onReject={rejectAgentRun} onInputChange={setManagerInput} onSubmit={submitManagerInput} onExit={() => setView("hosts")} />}
@@ -1897,14 +1904,16 @@ const opsnestAgentTools = [{
   },
 }];
 
-type AgentToolPlanResult = { plan: ShellPlan; toolSession: AgentToolSession };
+type AgentToolPlanResult = { plan: ShellPlan; toolSession?: AgentToolSession };
 type AgentToolDecision = { final?: string; next?: AgentToolPlanResult };
 
 async function askAgentPlanWithTools(config: AiConfig, task: string, language: Locale, context: string, memory: string, search: string, diagnosis: string, conversation: string): Promise<AgentToolPlanResult> {
   const system = [
     "You are the OpsNest Agent for a real locked Linux server.",
     "You are not a command translator. Use the supplied machine identity, memory, diagnosis and conversation as evidence.",
-    "Reason about the user's goal, then call request_server_command with the next concrete command.",
+    "First decide whether the user is chatting, sharing information, asking a question, or requesting a server operation.",
+    "For chatting, acknowledgements, or information the user only wants remembered, reply naturally and do not request a command.",
+    "For a server operation, reason about the user's goal, then call request_server_command with the next concrete command.",
     "Do not claim that a command has already run. Do not return a JSON plan in text; use the function tool.",
     "If the evidence is insufficient, request a read-only discovery command first.",
     language === "zh-CN" ? "Explain the command in concise Chinese." : "Explain the command in concise English.",
@@ -1929,7 +1938,7 @@ async function askAgentPlanWithTools(config: AiConfig, task: string, language: L
       model: config.model.trim(),
       messages,
       tools: opsnestAgentTools,
-      toolChoice: { type: "function", function: { name: "request_server_command" } },
+      toolChoice: "auto",
     },
   })).trim();
   let payload: { choices?: Array<{ message?: { content?: string | null; tool_calls?: AgentToolCall[] } }> };
@@ -1940,11 +1949,15 @@ async function askAgentPlanWithTools(config: AiConfig, task: string, language: L
   }
   const message = payload.choices?.[0]?.message;
   const toolCall = message?.tool_calls?.find((item) => item.type === "function" && item.function?.name === "request_server_command");
-  if (!toolCall) throw new Error("Agent did not return the request_server_command tool call.");
+  if (!toolCall) {
+    const reply = message?.content?.trim();
+    if (!reply) throw new Error("Agent returned neither a reply nor a server command.");
+    return { plan: { explanation: reply, command: "", verifyCommand: "", risk: "low" } };
+  }
   let args: Partial<ShellPlan>;
   try { args = JSON.parse(toolCall.function.arguments) as Partial<ShellPlan>; }
   catch (error) { throw new Error(`Invalid Agent tool arguments: ${error instanceof Error ? error.message : String(error)}`); }
-  if (typeof args.command !== "string" || !args.command.trim()) throw new Error("Agent tool call did not contain an executable command.");
+  if (typeof args.command !== "string") throw new Error("Agent tool call did not contain a command field.");
   const risk = args.risk === "low" || args.risk === "high" ? args.risk : "medium";
   const plan: ShellPlan = {
     explanation: typeof args.explanation === "string" && args.explanation.trim() ? args.explanation.trim() : "Agent requested the next server command.",

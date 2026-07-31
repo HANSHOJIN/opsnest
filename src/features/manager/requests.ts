@@ -1,4 +1,15 @@
-import type { ManagerServerDetails } from "../../domain/types";
+import type { ManagerServerDetails, Server } from "../../domain/types";
+
+/** Resolve an explicit host mention without turning every manager request into a cluster-wide task. */
+export function resolveManagerTargetIds(input: string, servers: Server[]): string[] {
+  const available = servers.filter((server) => server.status !== "failed");
+  if (/所有|全部|每台|各台|集群|all\s+servers|every\s+server|cluster/i.test(input)) return available.map((server) => server.id);
+  const normalized = input.toLocaleLowerCase();
+  const matches = available.filter((server) => [server.name, server.host, `${server.username}@${server.host}`]
+    .filter(Boolean)
+    .some((value) => normalized.includes(value.toLocaleLowerCase())));
+  return (matches.length ? matches : available).map((server) => server.id);
+}
 
 export function isManagerAddServerRequest(input: string) {
   return /(?:添加|新增|新建|保存).*(?:服务器|主机)|(?:add|new)\s+(?:a\s+)?server/i.test(input);

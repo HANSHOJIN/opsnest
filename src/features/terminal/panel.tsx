@@ -5,14 +5,14 @@ import type { AiInterventionMode, InteractiveCommand, Locale, ShellContext, Serv
 import { desktopInvoke as invoke, listenDesktopEvent as listen } from "../../services/desktop";
 import { displayServerHostname } from "../servers/profile";
 
-export type TerminalText = { terminalExit: string; terminalConnecting: string; connected: string };
+export type TerminalText = { terminalMinimize: string; terminalExit: string; terminalConnecting: string; connected: string };
 
 function terminalLineText(line: TerminalLine) {
   const isApprovalPrompt = line.kind === "system" && /等待批准|Approval required/i.test(line.text);
   return isApprovalPrompt ? `\x1b[1;4;38;5;221m${line.text}\x1b[0m` : line.text;
 }
 
-export function TerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: TerminalText; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
+export function TerminalPanel({ server, request, text, language, interventionMode, lines, executing, agentStatus, interactiveCommand, onInputChange, onSubmit, onStop, onMinimize, onExit, onInteractiveComplete, onInteractiveError }: { server: Server; request: SshRequest | null; text: TerminalText; language: Locale; interventionMode: AiInterventionMode; lines: TerminalLine[]; executing: boolean; agentStatus: string; interactiveCommand: InteractiveCommand | null; onInputChange: (value: string) => void; onSubmit: (rawInput?: string) => void; onStop: () => void; onMinimize: () => void; onExit: () => void; onInteractiveComplete: (id: string, output: string) => void; onInteractiveError: (id: string, message: string) => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const lineCountRef = useRef(0);
@@ -274,7 +274,7 @@ export function TerminalPanel({ server, request, text, language, interventionMod
   }, [executing, server, shellContext]);
 
   return <section className="terminal-view">
-    <div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><button className="secondary terminal-exit" onClick={onExit}>{text.terminalExit}</button></div>
+    <div className="terminal-header"><div><p className="eyebrow">SSH</p><h1>{server.name}</h1><span>{server.username}@{server.host}:{server.port}</span></div><div className="terminal-header-actions"><button className="secondary terminal-minimize" type="button" onClick={onMinimize}>{text.terminalMinimize}</button><button className="secondary terminal-exit" type="button" onClick={onExit}>{text.terminalExit}</button></div></div>
     <div className="terminal-toolbar">{executing && <button className="terminal-stop terminal-toolbar-stop" type="button" onClick={onStop}>停止</button>}<span className="terminal-status">● {agentStatus || (executing ? text.terminalConnecting : text.connected)}</span></div>
     <div className="terminal-xterm-host" ref={hostRef} aria-label="SSH terminal" />
   </section>;
