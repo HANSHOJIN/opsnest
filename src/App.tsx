@@ -197,9 +197,14 @@ function ToolServerManagerPage({ language, servers, onSelect, model = DEFAULT_MO
     setInput(""); setBusy(true); const next = [...messages, { role: "user" as const, text: prompt }]; setMessages(next); void appendActivity({ category: "ai", title: `服务器总管 · ${server.name}`, detail: `用户: ${prompt}` }).catch(() => undefined);
     const apiMessages: Array<Record<string, unknown>> = [{ role: "system", content: `你是 OpsNest 服务器总管。当前服务器：${server.name}，地址：${server.host}:${server.port}。你可以读取或修改 OpsNest 白名单配置文件。修改前必须说明文件和内容并等待用户确认。` }, ...next.map((item) => ({ role: item.role, content: item.text }))];
     const tools = [{ type: "function", function: { name: "read_opsnest_config", description: "读取 OpsNest 白名单内的 JSON 配置文件。", parameters: { type: "object", properties: { file_name: { type: "string", enum: ["appearance.json", "model.json", "servers.json", "debug.json", "layout.json"] } }, required: ["file_name"] } } }, { type: "function", function: { name: "write_opsnest_config", description: "修改 OpsNest 白名单内的 JSON 配置文件。写入前必须获得用户确认。", parameters: { type: "object", properties: { file_name: { type: "string" }, content: { type: "string" } }, required: ["file_name", "content"] } } }];
-    try {
+     const configTools = [
+       { type: "function", function: { name: "read_opsnest_config", description: "Read an allowed OpsNest JSON configuration file.", parameters: { type: "object", properties: { file_name: { type: "string", enum: ["appearance.json", "model.json", "servers.json", "debug.json", "layout.json"] } }, required: ["file_name"] } } },
+       { type: "function", function: { name: "write_opsnest_config", description: "Write an allowed OpsNest JSON configuration file after explicit approval.", parameters: { type: "object", properties: { file_name: { type: "string" }, content: { type: "string" } }, required: ["file_name", "content"] } } },
+     ];
+     const allTools = [...tools, ...configTools];
+     try {
       for (let round = 0; round < 4; round += 1) {
-        const raw = await invoke<string>("chat_completion_with_tools", { request: { baseUrl: activeModel.baseUrl, apiKey: activeModel.apiKey, model: activeModel.model, messages: apiMessages, tools, toolChoice: "auto" } });
+        const raw = await invoke<string>("chat_completion_with_tools", { request: { baseUrl: activeModel.baseUrl, apiKey: activeModel.apiKey, model: activeModel.model, messages: apiMessages, tools: allTools, toolChoice: "auto" } });
         const payload = JSON.parse(raw) as { choices?: Array<{ message?: { role?: string; content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
         const message = payload.choices?.[0]?.message;
         if (!message) throw new Error("AI 响应缺少消息");
@@ -219,7 +224,69 @@ function ToolServerManagerPage({ language, servers, onSelect, model = DEFAULT_MO
   return <div className="manager-chat-page"><div className="manager-chat-body">{messages.length === 0 ? <div className="manager-chat-empty"><h1>{server ? "我们处理什么服务器问题？" : "先添加一台服务器"}</h1><p>{server ? "可以询问服务器，也可以让 AI 读取或修改 OpsNest 配置。" : "添加服务器后，服务器总管会在这里开始对话。"}</p>{server && <button className="secondary" type="button" onClick={() => onSelect(`server-${server.id}`)}>查看服务器主页</button>}</div> : <div className="manager-chat-messages">{messages.filter((item) => item.role !== "tool").map((message, index) => <div className={`manager-chat-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>)}{busy && <div className="manager-chat-thinking">正在分析并调用工具…</div>}</div>}</div><div className="manager-chat-composer"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.ctrlKey) { event.preventDefault(); void send(); } }} placeholder={server ? "询问服务器或配置…" : "请先添加服务器"} rows={2} disabled={!server || busy} /><button className="primary" type="button" onClick={() => void send()} disabled={!server || busy || !input.trim()}>发送</button></div></div>;
 }
 
-const ServerManagerPage = ToolServerManagerPage;
+const UnusedToolServerManagerPage = ToolServerManagerPage;
+
+function ServerManagerPage({ language, servers, onSelect, model = DEFAULT_MODEL }: { language: Language; servers: ServerSummary[]; onSelect: (id: string) => void; model?: ModelPreferences }) {
+  const [input, setInput] = React.useState("");
+  const [messages, setMessages] = React.useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  const [busy, setBusy] = React.useState(false);
+  const [activeModel, setActiveModel] = React.useState<ModelPreferences>(model);
+  const server = servers[0];
+  React.useEffect(() => { void readPortableJson<Partial<ModelPreferences>>(MODEL_FILE, {}).then((saved) => setActiveModel({ ...DEFAULT_MODEL, ...saved })); }, []);
+  React.useEffect(() => {
+    if (!server) return;
+    void readPortableJson<ActivityRecord[]>(ACTIVITY_FILE, []).then((saved) => {
+      const restored = (Array.isArray(saved) ? saved : []).filter((record) => record.category === "ai" && record.title === `服务器总管 · ${server.name}`).reverse().map((record) => ({ role: record.detail.startsWith("用户: ") ? "user" as const : "assistant" as const, text: record.detail.replace(/^(用户|AI):\s*/, "") }));
+      setMessages(restored);
+    });
+  }, [server?.id]);
+  const send = async () => {
+    const prompt = input.trim();
+    if (!prompt || busy || !server || !activeModel.baseUrl.trim() || !activeModel.model.trim()) return;
+    setInput(""); setBusy(true);
+    const next = [...messages, { role: "user" as const, text: prompt }]; setMessages(next);
+    void appendActivity({ category: "ai", title: `服务器总管 · ${server.name}`, detail: `用户: ${prompt}` }).catch(() => undefined);
+    const apiMessages: Array<Record<string, unknown>> = [{ role: "system", content: `你是 OpsNest 服务器总管。你可以检查和管理已保存的服务器。执行服务器命令前必须调用 request_server_command，并等待用户确认；普通聊天、感谢和确认直接自然回答。服务器列表：${servers.map((item) => `${item.id}=${item.name} (${item.host}:${item.port})`).join("；")}` }, ...next.map((item) => ({ role: item.role, content: item.text }))];
+    const tools = [{ type: "function", function: { name: "request_server_command", description: "为服务器规划一个需要用户确认的命令，并可附带执行后的验证命令。", parameters: { type: "object", properties: { server_id: { type: "string", enum: servers.map((item) => item.id) }, command: { type: "string" }, explain: { type: "string" }, verify_command: { type: "string" }, risk: { type: "string", enum: ["low", "medium", "high"] } }, required: ["server_id", "command", "explain", "risk"] } } }];
+    try {
+      const configTools = [
+        { type: "function", function: { name: "read_opsnest_config", description: "Read an allowed OpsNest JSON configuration file.", parameters: { type: "object", properties: { file_name: { type: "string", enum: ["appearance.json", "model.json", "servers.json", "debug.json", "layout.json"] } }, required: ["file_name"] } } },
+        { type: "function", function: { name: "write_opsnest_config", description: "Write an allowed OpsNest JSON configuration file after explicit approval.", parameters: { type: "object", properties: { file_name: { type: "string" }, content: { type: "string" } }, required: ["file_name", "content"] } } },
+      ];
+      const allTools = [...tools, ...configTools];
+      for (let round = 0; round < 6; round += 1) {
+        const raw = await invoke<string>("chat_completion_with_tools", { request: { baseUrl: activeModel.baseUrl, apiKey: activeModel.apiKey, model: activeModel.model, messages: apiMessages, tools: allTools, toolChoice: "auto" } });
+        const payload = JSON.parse(raw) as { choices?: Array<{ message?: { role?: string; content?: string; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
+        const message = payload.choices?.[0]?.message; if (!message) throw new Error("AI 响应缺少消息");
+        if (!message.tool_calls?.length) { const answer = message.content?.trim() || "AI 未返回文字内容。"; setMessages((items) => [...items, { role: "assistant", text: answer }]); void appendActivity({ category: "ai", title: `服务器总管 · ${server.name}`, detail: `AI: ${answer}` }).catch(() => undefined); break; }
+        apiMessages.push(message as unknown as Record<string, unknown>);
+        for (const call of message.tool_calls) {
+          const name = call.function?.name || ""; const args = JSON.parse(call.function?.arguments || "{}");
+          if (name === "read_opsnest_config") { const result = (await invoke<string | null>("read_opsnest_config", { fileName: String(args.file_name || "") })) || "Configuration file does not exist."; apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: result }); continue; }
+          if (name === "write_opsnest_config") { const approved = window.confirm(`AI requests writing OpsNest configuration: ${String(args.file_name || "")}\n\nConfirm? A backup will be created first.`); const result = approved ? await invoke<string>("write_opsnest_config", { fileName: String(args.file_name || ""), content: String(args.content || ""), approved: true }).then(() => "Configuration written and backed up.") : "User rejected the configuration change."; apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: result }); continue; }
+          if (name !== "request_server_command") { apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: "Tool not allowed." }); continue; }
+          const target = servers.find((item) => item.id === args.server_id) || server; const command = String(args.command || "").trim();
+          if (!command) { apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: "命令为空，无法执行。" }); continue; }
+          const approved = window.confirm(`AI 请求在“${target.name}”上执行命令：\n\n${command}\n\n${args.explain || ""}\n\n确认执行？`);
+          if (!approved) { apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: "用户拒绝执行。" }); continue; }
+          const at = target.host.indexOf("@"); const username = at > 0 ? target.host.slice(0, at) : "root"; const host = at > 0 ? target.host.slice(at + 1) : target.host;
+          const request = { host, port: target.port, username, authMethod: target.authMethod ?? "password", password: target.password ?? null, privateKeyPath: null, passphrase: null };
+          let result = ""; let sessionId = "";
+          try {
+            const opened = await invoke<{ sessionId: string }>("open_ssh_session", { request }); sessionId = opened.sessionId;
+            result = await invoke<string>("execute_ssh_command", { sessionId, command, approved: true });
+            if (args.verify_command) { const verification = await invoke<string>("execute_ssh_command", { sessionId, command: String(args.verify_command), approved: true }); result += `\n\n[验证]\n${verification}`; }
+          } catch (error) { result = `Command failed: ${String(error)}`; }
+          finally { if (sessionId) await invoke("close_ssh_session", { sessionId }).catch(() => undefined); }
+          void appendActivity({ category: "task", title: `服务器总管 · ${target.name}`, detail: `$ ${command}\n${result}` }).catch(() => undefined);
+          apiMessages.push({ role: "tool", tool_call_id: call.id || "opsnest-tool", content: result || "命令已执行但没有输出。" });
+        }
+      }
+    } catch (error) { const text = `服务器命令执行失败：${String(error)}`; setMessages((items) => [...items, { role: "assistant", text }]); void appendActivity({ category: "task", title: `服务器总管 · ${server.name}`, detail: text }).catch(() => undefined); }
+    finally { setBusy(false); }
+  };
+  return <div className="manager-chat-page"><div className="manager-chat-body">{messages.length === 0 ? <div className="manager-chat-empty"><h1>{server ? "我们处理什么服务器问题？" : "先添加一台服务器"}</h1><p>{server ? "可以询问服务器，也可以让 AI 检查或管理已保存的服务器。" : "添加服务器后，服务器总管会在这里开始对话。"}</p>{server && <button className="secondary" type="button" onClick={() => onSelect(`server-${server.id}`)}>查看服务器主页</button>}</div> : <div className="manager-chat-messages">{messages.map((message, index) => <div className={`manager-chat-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>)}{busy && <div className="manager-chat-thinking">正在分析并调用工具…</div>}</div>}</div><div className="manager-chat-composer"><textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.ctrlKey) { event.preventDefault(); void send(); } }} placeholder={server ? "询问服务器或配置…" : "请先添加服务器"} rows={2} disabled={!server || busy} /><button className="primary" type="button" onClick={() => void send()} disabled={!server || busy || !input.trim()}>发送</button></div></div>;
+}
 
 function FeaturePage({ title, description }: { title: string; description: string }) {
   if (!title.trim()) return <div className="feature-page feature-page-empty" aria-hidden="true" />;
@@ -498,6 +565,21 @@ function TerminalWorkspace({ server, servers, model }: { server: ServerSummary; 
   };
   return <div className="terminal-workspace"><div className="terminal-tabs">{tabs.map((item) => <div key={item.id} className={`terminal-tab ${item.id === focused.id ? "is-active" : ""}`}><button type="button" onClick={() => setFocusedId(item.id)}><ServiceIcon kind="system" name={item.system || "linux"} /><span>{item.name}</span></button><button className="terminal-tab-close" type="button" onClick={() => closeTab(item.id)} aria-label={`关闭 ${item.name}`}><X size={12} /></button></div>)}<button className="terminal-tab-add" type="button" onClick={() => { const next = servers.find((item) => !tabIds.includes(item.id)); if (next) { setTabIds((current) => [...current, next.id]); setFocusedId(next.id); } }} aria-label="新建 SSH 连接">+</button></div>{tabs.length > 0 && <InteractiveTerminalPanel key={focused.id} server={focused} model={model} />}</div>;
 }
+const SHELL_COMMANDS = new Set(["cd", "ls", "pwd", "cat", "echo", "printf", "clear", "history", "find", "grep", "sed", "awk", "head", "tail", "less", "more", "sort", "uniq", "cut", "xargs", "tee", "touch", "mkdir", "cp", "mv", "rm", "ln", "chmod", "chown", "sudo", "apt", "apt-get", "apk", "yum", "dnf", "pacman", "brew", "docker", "podman", "systemctl", "service", "journalctl", "ps", "top", "htop", "kill", "df", "du", "free", "uname", "hostname", "whoami", "id", "env", "export", "source", "set", "ssh", "scp", "curl", "wget", "tar", "zip", "unzip", "git", "npm", "pnpm", "yarn", "pip", "python", "python3", "node", "go", "cargo", "make", "cmake", "java", "php", "ruby", "perl", "openssl", "vim", "vi", "nano", "tmux", "screen", "reboot", "shutdown"]);
+const RISKY_SHELL_PARTS = ["sudo ", "rm ", "mv ", "chmod ", "chown ", "systemctl ", "service ", "reboot", "shutdown", "docker rm", "docker stop", "docker restart", "apt install", "apt remove", "apt purge", "apt upgrade", "dnf install", "yum install"];
+function looksLikeShellCommand(input: string) {
+  const value = input.trim();
+  if (!value) return false;
+  if (value.startsWith("/cmd ")) return true;
+  if (/^(?:[.!/~$][^\s]*|[A-Za-z]:\\[^\s]*)/.test(value)) return true;
+  if (/[|;&<>`]|	/.test(value)) return true;
+  const first = value.split(/\s+/, 1)[0].toLowerCase();
+  return SHELL_COMMANDS.has(first);
+}
+function isRiskyShellCommand(input: string) {
+  const value = input.trim().toLowerCase();
+  return RISKY_SHELL_PARTS.some((part) => value.includes(part));
+}
 function InteractiveTerminalPanel({ server, model }: { server: ServerSummary; model: ModelPreferences }) {
   const hostRef = React.useRef<HTMLDivElement>(null);
   const termRef = React.useRef<Terminal | null>(null);
@@ -549,7 +631,15 @@ function InteractiveTerminalPanel({ server, model }: { server: ServerSummary; mo
         const line = inputRef.current.trim(); inputRef.current = ""; term.write("\r\n");
         if (!line) { void write("\r"); return; }
         if (pendingRef.current && line.toLowerCase() === "approve") { void askAi(pendingRef.current, true); return; }
-        void askAi(line, false);
+        const forcedAi = line.startsWith("/ai ");
+        const command = line.startsWith("/cmd ") ? line.slice(5).trim() : line;
+        if (!forcedAi && looksLikeShellCommand(line)) {
+          if (isRiskyShellCommand(command) && !window.confirm(`此命令可能改变服务器状态：\n\n${command}\n\n确认直接执行？`)) return;
+          void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${command}` }).catch(() => undefined);
+          void write(`${command}\r`);
+          return;
+        }
+        void askAi(forcedAi ? line.slice(4).trim() : line, false);
         return;
       }
       if (data === "\x7f" || data === "\b") { if (inputRef.current) { inputRef.current = inputRef.current.slice(0, -1); term.write("\b \b"); } return; }
@@ -557,7 +647,23 @@ function InteractiveTerminalPanel({ server, model }: { server: ServerSummary; mo
     });
     const resize = () => { fit.fit(); void invoke("resize_interactive_ssh_terminal", { sessionId: sessionRef.current, columns: term.cols, rows: term.rows }).catch(() => undefined); };
     window.addEventListener("resize", resize); resize();
-    return () => { input.dispose(); unlisten?.(); window.removeEventListener("resize", resize); void invoke("close_interactive_ssh_terminal", { sessionId: sessionRef.current }); term.dispose(); termRef.current = null; };
+    return () => {
+      input.dispose();
+      unlisten?.();
+      window.removeEventListener("resize", resize);
+      const closingSession = sessionRef.current;
+      // Persist the shared blackboard before the PTY is torn down. This keeps
+      // direct commands, terminal output, and AI/tool events available in task history.
+      void invoke<{ events?: Array<{ kind: string; text: string }> }>("get_ssh_session_blackboard", { sessionId: closingSession })
+        .then((snapshot) => {
+          const detail = (snapshot.events ?? []).slice(-80).map((event) => `[${event.kind}] ${event.text}`).join("\n").slice(-24000);
+          if (detail.trim()) void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail }).catch(() => undefined);
+        })
+        .catch(() => undefined)
+        .finally(() => { void invoke("close_interactive_ssh_terminal", { sessionId: closingSession }); });
+      term.dispose();
+      termRef.current = null;
+    };
   }, [server.id, model.baseUrl, model.model]);
   return <section className="interactive-terminal-panel"><div ref={hostRef} className="interactive-terminal-host" />{error && <div className="interactive-terminal-error">{error}</div>}</section>;
 }

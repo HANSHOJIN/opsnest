@@ -30,7 +30,7 @@ The CodexShell source was copied into the V2 project at:
 
 `C:\Users\hansh\Documents\Codex\2026-07-23\referenced-chatgpt-conversation-this-is-untrusted\outputs\Opsnet-V2`
 
-The copied CodexShell source baseline was version `0.1.1`; the current OpsNest V2 product metadata is `0.2.0-alpha1` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. The existing V2 `docs/` directory was preserved. Git metadata, dependency directories, build output, `src-tauri/target`, release artifacts, and build logs were excluded. The copied shell has since been renamed to the OpsNest product identity and its preferences now use the portable `data/` directory beside the executable.
+The copied CodexShell source baseline was version `0.1.1`; the current OpsNest V2 product metadata is `0.2.0-alpha.1` in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. The existing V2 `docs/` directory was preserved. Git metadata, dependency directories, build output, `src-tauri/target`, release artifacts, and build logs were excluded. The copied shell has since been renamed to the OpsNest product identity and its preferences now use the portable `data/` directory beside the executable.
 
 ## OpsNest 0.1.2-alpha.1 portable build
 

@@ -1,12 +1,12 @@
+use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use serde_json::Value;
 
+mod ai;
 mod ssh_scan;
 mod ssh_session;
-mod ai;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -29,15 +29,26 @@ fn exit_app(app: tauri::AppHandle) {
 
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    if !(url.starts_with("http://") || url.starts_with("https://")) || url.chars().any(|ch| ch.is_control() || ch == '"') {
+    if !(url.starts_with("http://") || url.starts_with("https://"))
+        || url.chars().any(|ch| ch.is_control() || ch == '"')
+    {
         return Err("only safe HTTP or HTTPS URLs can be opened".to_string());
     }
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn().map_err(|error| error.to_string())?;
+    std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn()
+        .map_err(|error| error.to_string())?;
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&url).spawn().map_err(|error| error.to_string())?;
+    std::process::Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map_err(|error| error.to_string())?;
     #[cfg(all(unix, not(target_os = "macos")))]
-    std::process::Command::new("xdg-open").arg(&url).spawn().map_err(|error| error.to_string())?;
+    std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -90,7 +101,8 @@ fn credential_entry(server_id: &str) -> Result<keyring::Entry, String> {
 
 #[tauri::command]
 fn save_server_credential(server_id: String, password: String) -> Result<(), String> {
-    credential_entry(&server_id)?.set_password(&password)
+    credential_entry(&server_id)?
+        .set_password(&password)
         .map_err(|error| format!("unable to save server credential: {error}"))
 }
 
@@ -112,8 +124,16 @@ fn delete_server_credential(server_id: String) -> Result<(), String> {
 }
 
 fn config_file_path(file_name: &str) -> Result<PathBuf, String> {
-    const ALLOWED: &[&str] = &["appearance.json", "model.json", "servers.json", "debug.json", "layout.json"];
-    if !ALLOWED.contains(&file_name) { return Err("configuration file is outside the approved allowlist".into()); }
+    const ALLOWED: &[&str] = &[
+        "appearance.json",
+        "model.json",
+        "servers.json",
+        "debug.json",
+        "layout.json",
+    ];
+    if !ALLOWED.contains(&file_name) {
+        return Err("configuration file is outside the approved allowlist".into());
+    }
     portable_file_path(file_name)
 }
 
@@ -129,11 +149,20 @@ fn read_opsnest_config(file_name: String) -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn write_opsnest_config(file_name: String, content: String, approved: bool) -> Result<(), String> {
-    if !approved { return Err("configuration write requires explicit approval".into()); }
-    if content.len() > 2 * 1024 * 1024 { return Err("configuration file is too large".into()); }
+    if !approved {
+        return Err("configuration write requires explicit approval".into());
+    }
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("configuration file is too large".into());
+    }
     let path = config_file_path(&file_name)?;
-    let _parsed: Value = serde_json::from_str(&content).map_err(|error| format!("invalid JSON configuration: {error}"))?;
-    if path.exists() { let backup = path.with_extension("json.bak"); fs::copy(&path, backup).map_err(|error| format!("unable to create configuration backup: {error}"))?; }
+    let _parsed: Value = serde_json::from_str(&content)
+        .map_err(|error| format!("invalid JSON configuration: {error}"))?;
+    if path.exists() {
+        let backup = path.with_extension("json.bak");
+        fs::copy(&path, backup)
+            .map_err(|error| format!("unable to create configuration backup: {error}"))?;
+    }
     fs::write(path, content).map_err(|error| format!("unable to write configuration: {error}"))
 }
 
@@ -153,7 +182,10 @@ fn append_debug_log(level: String, message: String, details: Option<String>) -> 
         return Ok(());
     }
     let log_path = data_dir.join("opsnest-debug.log");
-    if fs::metadata(&log_path).map(|meta| meta.len() > 5 * 1024 * 1024).unwrap_or(false) {
+    if fs::metadata(&log_path)
+        .map(|meta| meta.len() > 5 * 1024 * 1024)
+        .unwrap_or(false)
+    {
         fs::write(&log_path, "--- log rotated after reaching 5 MB ---\n")
             .map_err(|error| format!("unable to rotate debug log: {error}"))?;
     }
@@ -161,7 +193,11 @@ fn append_debug_log(level: String, message: String, details: Option<String>) -> 
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_secs())
         .unwrap_or_default();
-    let mut line = format!("[{timestamp}] [{}] {}", level.trim().to_uppercase(), message.trim());
+    let mut line = format!(
+        "[{timestamp}] [{}] {}",
+        level.trim().to_uppercase(),
+        message.trim()
+    );
     if let Some(details) = details.filter(|value| !value.trim().is_empty()) {
         line.push_str(" | ");
         line.push_str(&details.replace(['\r', '\n'], " "));
@@ -178,8 +214,16 @@ fn append_debug_log(level: String, message: String, details: Option<String>) -> 
 }
 
 #[tauri::command]
-async fn test_model_connection(base_url: String, api_key: String, model: String) -> Result<String, String> {
-    let _ = append_debug_log("info".to_string(), "model connection test started".to_string(), Some(format!("model={}", model.trim())));
+async fn test_model_connection(
+    base_url: String,
+    api_key: String,
+    model: String,
+) -> Result<String, String> {
+    let _ = append_debug_log(
+        "info".to_string(),
+        "model connection test started".to_string(),
+        Some(format!("model={}", model.trim())),
+    );
     let base_url = base_url.trim().trim_end_matches('/');
     let model = model.trim();
     if base_url.is_empty() || model.is_empty() {
@@ -189,32 +233,58 @@ async fn test_model_connection(base_url: String, api_key: String, model: String)
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| format!("unable to create HTTP client: {error}"))?;
-    let mut request = client.post(format!("{base_url}/chat/completions")).json(&serde_json::json!({
-        "model": model,
-        "messages": [{ "role": "user", "content": "Reply with OK." }],
-        "max_tokens": 8,
-        "temperature": 0
-    }));
+    let mut request =
+        client
+            .post(format!("{base_url}/chat/completions"))
+            .json(&serde_json::json!({
+                "model": model,
+                "messages": [{ "role": "user", "content": "Reply with OK." }],
+                "max_tokens": 8,
+                "temperature": 0
+            }));
     if !api_key.trim().is_empty() {
         request = request.bearer_auth(api_key.trim());
     }
-    let response = request.send().await.map_err(|error| format!("connection failed: {error}"))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("connection failed: {error}"))?;
     let status = response.status();
-    let body = response.text().await.map_err(|error| format!("unable to read response: {error}"))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("unable to read response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("API returned {}: {}", status.as_u16(), body.chars().take(240).collect::<String>()));
+        return Err(format!(
+            "API returned {}: {}",
+            status.as_u16(),
+            body.chars().take(240).collect::<String>()
+        ));
     }
-    let payload: Value = serde_json::from_str(&body).map_err(|error| format!("invalid API response: {error}"))?;
-    if payload.get("choices").and_then(|choices| choices.get(0)).is_none() {
+    let payload: Value =
+        serde_json::from_str(&body).map_err(|error| format!("invalid API response: {error}"))?;
+    if payload
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .is_none()
+    {
         return Err("API response did not contain choices".to_string());
     }
-    let _ = append_debug_log("info".to_string(), "model connection test succeeded".to_string(), Some(format!("model={}", model)));
+    let _ = append_debug_log(
+        "info".to_string(),
+        "model connection test succeeded".to_string(),
+        Some(format!("model={}", model)),
+    );
     Ok("Connection successful".to_string())
 }
 
 #[tauri::command]
 async fn fetch_model_names(base_url: String, api_key: String) -> Result<Vec<String>, String> {
-    let _ = append_debug_log("info".to_string(), "model list fetch started".to_string(), Some(format!("endpoint={}", base_url.trim())));
+    let _ = append_debug_log(
+        "info".to_string(),
+        "model list fetch started".to_string(),
+        Some(format!("endpoint={}", base_url.trim())),
+    );
     let base_url = base_url.trim().trim_end_matches('/');
     if base_url.is_empty() {
         return Err("API address is required".to_string());
@@ -227,21 +297,42 @@ async fn fetch_model_names(base_url: String, api_key: String) -> Result<Vec<Stri
     if !api_key.trim().is_empty() {
         request = request.bearer_auth(api_key.trim());
     }
-    let response = request.send().await.map_err(|error| format!("connection failed: {error}"))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|error| format!("connection failed: {error}"))?;
     let status = response.status();
-    let body = response.text().await.map_err(|error| format!("unable to read response: {error}"))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("unable to read response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("API returned {}: {}", status.as_u16(), body.chars().take(240).collect::<String>()));
+        return Err(format!(
+            "API returned {}: {}",
+            status.as_u16(),
+            body.chars().take(240).collect::<String>()
+        ));
     }
-    let payload: Value = serde_json::from_str(&body).map_err(|error| format!("invalid models response: {error}"))?;
-    let models = payload.get("data").and_then(Value::as_array).ok_or_else(|| "API response did not contain a model list".to_string())?;
-    let mut names = models.iter().filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned)).collect::<Vec<_>>();
+    let payload: Value =
+        serde_json::from_str(&body).map_err(|error| format!("invalid models response: {error}"))?;
+    let models = payload
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "API response did not contain a model list".to_string())?;
+    let mut names = models
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<Vec<_>>();
     names.sort();
     names.dedup();
     if names.is_empty() {
         return Err("No models were returned".to_string());
     }
-    let _ = append_debug_log("info".to_string(), "model list fetch succeeded".to_string(), Some(format!("count={}", names.len())));
+    let _ = append_debug_log(
+        "info".to_string(),
+        "model list fetch succeeded".to_string(),
+        Some(format!("count={}", names.len())),
+    );
     Ok(names)
 }
 
@@ -265,6 +356,7 @@ pub fn run() {
             ssh_session::open_ssh_session,
             ssh_session::open_interactive_ssh_terminal,
             ssh_session::write_interactive_ssh_terminal,
+            ssh_session::get_ssh_session_blackboard,
             ssh_session::resize_interactive_ssh_terminal,
             ssh_session::close_interactive_ssh_terminal,
             ssh_session::execute_ssh_command,
