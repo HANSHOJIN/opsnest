@@ -2,7 +2,10 @@ use russh::{client, keys, ChannelMsg};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::Emitter;
@@ -51,10 +54,57 @@ struct InteractiveShell {
     output: Mutex<Vec<u8>>,
     notify: Notify,
     blackboard: Mutex<BlackboardState>,
+    last_activity: AtomicU64,
 }
 static INTERACTIVE: OnceLock<Mutex<HashMap<String, Arc<InteractiveShell>>>> = OnceLock::new();
+static INTERACTIVE_REAPER: OnceLock<()> = OnceLock::new();
+const INTERACTIVE_IDLE_SECS: u64 = 30 * 60;
 fn interactive() -> &'static Mutex<HashMap<String, Arc<InteractiveShell>>> {
     INTERACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn touch_activity(shell: &InteractiveShell) {
+    shell.last_activity.store(unix_seconds(), Ordering::Relaxed);
+}
+
+fn start_interactive_reaper() {
+    if INTERACTIVE_REAPER.set(()).is_err() {
+        return;
+    }
+    tokio::spawn(async {
+        let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            ticker.tick().await;
+            let now = unix_seconds();
+            let expired = {
+                let Ok(mut sessions) = interactive().lock() else {
+                    continue;
+                };
+                let ids = sessions
+                    .iter()
+                    .filter_map(|(id, shell)| {
+                        (now.saturating_sub(shell.last_activity.load(Ordering::Relaxed))
+                            >= INTERACTIVE_IDLE_SECS)
+                            .then(|| id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                ids.into_iter()
+                    .filter_map(|id| sessions.remove(&id))
+                    .collect::<Vec<_>>()
+            };
+            for shell in expired {
+                let _ = shell.writer.lock().await.close().await;
+                shell.notify.notify_waiters();
+            }
+        }
+    });
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -97,6 +147,7 @@ fn new_blackboard() -> Mutex<BlackboardState> {
 }
 
 fn append_blackboard(shell: &InteractiveShell, kind: &str, text: impl Into<String>) {
+    touch_activity(shell);
     let Ok(mut state) = shell.blackboard.lock() else {
         return;
     };
@@ -277,6 +328,7 @@ pub async fn open_interactive_ssh_terminal(
     request: SessionRequest,
     session_id: String,
 ) -> Result<(), String> {
+    start_interactive_reaper();
     if interactive()
         .lock()
         .map_err(|_| "SSH terminal lock failed")?
@@ -302,6 +354,7 @@ pub async fn open_interactive_ssh_terminal(
         output: Mutex::new(Vec::new()),
         notify: Notify::new(),
         blackboard: new_blackboard(),
+        last_activity: AtomicU64::new(unix_seconds()),
     });
     append_blackboard(&shell, "session_opened", "SSH interactive session opened");
     interactive()
@@ -483,6 +536,7 @@ pub async fn resize_interactive_ssh_terminal(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
+    touch_activity(&shell);
     let result = shell
         .writer
         .lock()

@@ -37,6 +37,54 @@ pub struct AiSshRequest {
     pub context: Option<String>,
 }
 
+fn summarize_execution(executed: &[Value]) -> String {
+    if executed.is_empty() {
+        return "本轮没有执行命令。".to_string();
+    }
+    let failures = executed
+        .iter()
+        .filter(|item| {
+            item.get("output")
+                .and_then(Value::as_str)
+                .map(|value| value.contains("[command_error]"))
+                .unwrap_or(false)
+                || item
+                    .get("verification")
+                    .and_then(Value::as_str)
+                    .map(|value| value.contains("[verification_error]"))
+                    .unwrap_or(false)
+        })
+        .count();
+    let last_output = executed
+        .last()
+        .and_then(|item| item.get("output"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let tail = last_output
+        .chars()
+        .rev()
+        .take(360)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    if failures > 0 {
+        format!(
+            "已执行 {} 条命令，其中 {} 条失败。最近结果：{}",
+            executed.len(),
+            failures,
+            tail
+        )
+    } else {
+        format!(
+            "已执行 {} 条命令，全部返回结果。最近结果：{}",
+            executed.len(),
+            tail
+        )
+    }
+}
+
 async fn post_chat(
     base_url: &str,
     api_key: &str,
@@ -163,8 +211,18 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     ];
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
+    let mut recovery_attempts = 0u8;
     for _round in 0..8 {
-        let raw = post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":"auto"}), Duration::from_secs(120)).await?;
+        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":"auto"}), Duration::from_secs(120)).await {
+            Ok(raw) => raw,
+            Err(error) if recovery_attempts < 2 => {
+                recovery_attempts += 1;
+                let _ = ssh_session::record_session_event(&request.session_id, "ai_recovery", format!("AI 请求失败，正在重试（第 {} 次）：{}", recovery_attempts, error));
+                tokio::time::sleep(Duration::from_millis(500 * u64::from(recovery_attempts))).await;
+                continue;
+            }
+            Err(error) => return Err(format!("AI 请求失败，重试后仍未恢复：{error}")),
+        };
         let payload: Value =
             serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
         let choice = payload
@@ -214,6 +272,14 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     Ok(value) => value,
                     Err(error) => format!("[command_error] {error}"),
                 };
+            if output.contains("[command_error]") {
+                recovery_attempts = recovery_attempts.saturating_add(1);
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_recovery",
+                    format!("命令执行失败，已把错误返回给模型继续恢复：{}", output),
+                );
+            }
             let verification = if verify_command.is_empty() {
                 None
             } else {
@@ -266,7 +332,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             "ai_message",
             content.to_string(),
         );
-        return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"executed":executed}).to_string());
+        let summary = summarize_execution(&executed);
+        return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
+    }
+    if recovery_attempts > 0 {
+        let summary = summarize_execution(&executed);
+        return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
     }
     Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed}).to_string())
 }

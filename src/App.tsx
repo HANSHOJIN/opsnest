@@ -599,7 +599,7 @@ function InteractiveTerminalPanel({ server, model }: { server: ServerSummary; mo
       void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `用户: ${prompt}` }).catch(() => undefined);
       try {
         const raw = await invoke<string>("ai_ssh_chat", { request: { baseUrl: model.baseUrl, apiKey: model.apiKey, model: model.model, sessionId: sessionRef.current, prompt, approved, context: `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}` } });
-        const result = JSON.parse(raw) as { status?: string; command?: string; content?: string; executed?: Array<{ command: string; output: string }> };
+        const result = JSON.parse(raw) as { status?: string; command?: string; content?: string; summary?: string; executed?: Array<{ command: string; output: string }> };
         if (result.status === "approval_required" && result.command) { pendingRef.current = result.command; term.write(`\r\n\x1b[38;5;220m• AI 建议执行：${result.command}\r\n  输入 approve 确认\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI 待确认命令: ${result.command}` }).catch(() => undefined); return; }
         if (result.executed?.length) for (const item of result.executed) { term.write(`\r\n\x1b[38;5;114m$ ${item.command}\r\n${item.output}\x1b[0m\r\n`); void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${item.command}\n${item.output}` }).catch(() => undefined); }
         if (result.content) { term.write(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI: ${result.content}` }).catch(() => undefined); }
