@@ -1,31 +1,29 @@
 {
   "name": "opsnest",
   "private": true,
-  "version": "0.1.2-alpha.2",
-  "description": "A local-first AI server manager for people who do not know Linux.",
+  "version": "0.2.0-alpha.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "check": "tsc -b --pretty false"
+    "check": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
+    "@fontsource-variable/noto-sans-sc": "^5.3.0",
+    "@tauri-apps/api": "^2.11.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
-    "@types/react": "^18.3.3",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.1",
-    "typescript": "^5.5.4",
-    "vite": "^6.4.3"
+    "@tauri-apps/cli": "^2.11.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
   }
 }

@@ -1,0 +1,474 @@
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
+import { readPortableJson, writePortableJson } from "../services/portableStorage";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Activity,
+  CalendarClock,
+  ClipboardList,
+  House,
+  ChevronUp,
+  CircleHelp,
+  ChevronDown,
+  MessageSquare,
+  Maximize2,
+  Minimize2,
+  Minus,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  Pin,
+  Plus,
+  Server,
+  Settings,
+  Square,
+  Sun,
+  X,
+} from "lucide-react";
+
+type DragKind = "left" | "right" | "bottom";
+
+export type ShellLayoutProps = {
+  title?: string;
+  appName?: string;
+  language?: "zh-CN" | "en";
+  showMenuBar?: boolean;
+  closeAction?: "tray" | "exit";
+  left: ReactNode;
+  main: ReactNode;
+  right: ReactNode;
+  bottom: ReactNode;
+  settings?: ReactNode;
+  modelSettings?: ReactNode;
+  settingsRequest?: "appearance" | "model" | null;
+  onNavigateBack?: () => void;
+  canNavigateBack?: boolean;
+  onNavigateForward?: () => void;
+  canNavigateForward?: boolean;
+  onSettingsClosed?: (section: "appearance" | "model") => void;
+};
+
+export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string };
+export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; pinned?: boolean; connected?: boolean; system?: string; cpu?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[] };
+
+export function ShellNavigation({ language = "zh-CN", selected, onSelect, servers: serverSummaries = [], onTogglePin, onRename, onToggleConnection, onDelete, onOpenSsh }: { language?: "zh-CN" | "en"; selected?: string | null; onSelect?: (id: string) => void; servers?: ServerSummary[]; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void }) {
+  const isEnglish = language === "en";
+  const [openGroups, setOpenGroups] = useState({ pinned: true, servers: true });
+  const toggle = (group: "pinned" | "servers") => setOpenGroups((value) => ({ ...value, [group]: !value[group] }));
+  const displayServers = serverSummaries.length > 0 ? serverSummaries.map((server) => server.name) : (isEnglish ? ["Server A", "Server B", "Router", "NAS"] : ["服务器 A", "服务器 B", "路由器", "NAS"]);
+
+  if (true) {
+    const pinned = serverSummaries.filter((server) => server.pinned);
+    return <nav className="left-navigation" aria-label={isEnglish ? "Shell navigation" : "导航"}>
+      <button className={`nav-item ${selected === "home" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("home")}><House size={15} /><span>{isEnglish ? "Home" : "首页"}</span></button>
+      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Server Manager" : "服务器总管"}</span></button>
+      <button className={`nav-item ${selected === "tasks" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("tasks")}><ClipboardList size={15} /><span>{isEnglish ? "Task history" : "任务记录"}</span></button>
+      <button className={`nav-item ${selected === "cron" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("cron")}><CalendarClock size={15} /><span>{isEnglish ? "Scheduled tasks" : "定时任务"}</span></button>
+      {pinned.length > 0 && <ServerNavGroup label={isEnglish ? "Pinned" : "置顶"} servers={pinned} selected={selected} onSelect={onSelect} onTogglePin={onTogglePin} onRename={onRename} onToggleConnection={onToggleConnection} onDelete={onDelete} onOpenSsh={onOpenSsh} />}
+      <ServerNavGroup label={isEnglish ? "My servers" : "我的服务器"} servers={serverSummaries} selected={selected} onSelect={onSelect} onTogglePin={onTogglePin} onRename={onRename} onToggleConnection={onToggleConnection} onDelete={onDelete} onOpenSsh={onOpenSsh} addLabel={isEnglish ? "Add server" : "添加服务器"} />
+    </nav>;
+  }
+  const pinnedServers = isEnglish ? ["Server A", "Router"] : ["服务器 A", "路由器"];
+  const servers = isEnglish ? ["Server A", "Server B", "Router", "NAS"] : ["服务器 A", "服务器 B", "路由器", "NAS"];
+
+  return (
+    <nav className="left-navigation" aria-label={isEnglish ? "Shell navigation" : "壳导航"}>
+      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Server Manager" : "服务器总管"}</span></button>
+      <button className={`nav-item ${selected === "tasks" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("tasks")}><ClipboardList size={15} /><span>{isEnglish ? "Task history" : "任务记录"}</span></button>
+      <button className={`nav-item ${selected === "cron" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("cron")}><CalendarClock size={15} /><span>{isEnglish ? "Scheduled tasks" : "定时任务"}</span></button>
+      <NavGroup label={isEnglish ? "Pinned" : "置顶"} icon={<Pin size={14} />} open={openGroups.pinned} onToggle={() => toggle("pinned")} items={pinnedServers} onSelect={onSelect} groupId="pinned" selected={selected} />
+      <NavGroup label={isEnglish ? "My servers" : "我的服务器"} icon={<Server size={14} />} open={openGroups.servers} onToggle={() => toggle("servers")} items={servers} onSelect={onSelect} groupId="server" selected={selected} trailingAction={<Plus size={15} />} trailingLabel={isEnglish ? "Add server" : "添加服务器"} />
+      <button className={`nav-item ${selected === "activity" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("activity")}><Activity size={15} /><span>{isEnglish ? "Activity log" : "活动日志"}</span></button>
+      <button className={`nav-item ${selected === "home" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("home")}><House size={15} /><span>{isEnglish ? "Home" : "首页"}</span></button>
+    </nav>
+  );
+}
+
+function ServerNavGroup({ label, servers, selected, onSelect, onTogglePin, onRename = (id) => onSelect?.(`__rename:${id}`), onToggleConnection = (id) => onSelect?.(`__connect:${id}`), onDelete = (id) => onSelect?.(`__delete:${id}`), onOpenSsh, addLabel }: { label: string; servers: ServerSummary[]; selected?: string | null; onSelect?: (id: string) => void; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void; addLabel?: string }) {
+  const [context, setContext] = useState<{ id: string; x: number; y: number } | null>(null);
+  useEffect(() => { const close = () => setContext(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
+  const target = context ? servers.find((server) => server.id === context.id) : undefined;
+  return <section className="server-nav-group"><div className="server-nav-heading"><span>{label}</span>{addLabel && <button className="nav-group-action" type="button" onClick={() => onSelect?.("server-add")} aria-label={addLabel}><Plus size={15} /></button>}</div>{servers.map((server) => <div className="server-nav-row" key={server.id}><button className={`nav-subitem ${selected === `server-${server.id}` ? "is-selected" : ""}`} type="button" onContextMenu={(event) => { event.preventDefault(); setContext({ id: server.id, x: event.clientX, y: event.clientY }); }} onClick={() => onSelect?.(`server-${server.id}`)}><span className={`server-status-dot ${server.connected ? "is-connected" : "is-disconnected"}`} /><span>{server.name}</span></button><button className={`server-pin-button ${server.pinned ? "is-pinned" : ""}`} type="button" onClick={() => onTogglePin?.(server.id)} aria-label={server.pinned ? "取消置顶" : "置顶"}><Pin size={13} /></button></div>)}{context && target && <div className="server-context-menu" style={{ left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}><button type="button" onClick={() => { onTogglePin?.(target.id); setContext(null); }}>{target.pinned ? "取消置顶" : "置顶"}</button><button type="button" onClick={() => { onRename?.(target.id); setContext(null); }}>编辑</button><button type="button" onClick={() => { onToggleConnection?.(target.id); setContext(null); }}>{target.connected ? "断开" : "连接"}</button><button type="button" onClick={() => { onSelect?.(`server-${target.id}`); onOpenSsh?.(target.id); setContext(null); }}>SSH</button><button className="is-danger" type="button" onClick={() => { onDelete?.(target.id); setContext(null); }}>删除</button></div>}</section>;
+}
+
+function LegacyServerNavGroup({ label, servers, selected, onSelect, onTogglePin, onRename, onToggleConnection, onDelete, addLabel }: { label: string; servers: ServerSummary[]; selected?: string | null; onSelect?: (id: string) => void; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void; addLabel?: string }) {
+  const [context, setContext] = useState<{ id: string; x: number; y: number } | null>(null);
+  useEffect(() => { const close = () => setContext(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
+  return <section className="server-nav-group"><div className="server-nav-heading"><span>{label}</span>{addLabel && <button className="nav-group-action" type="button" onClick={() => onSelect?.("server-add")} aria-label={addLabel}><Plus size={15} /></button>}</div>{servers.map((server) => <div className="server-nav-row" key={server.id}><button className={`nav-subitem ${selected === `server-${server.id}` ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.(`server-${server.id}`)}><span className={`server-status-dot ${server.connected ? "is-connected" : "is-disconnected"}`} title={server.connected ? "已连接" : "未连接"} /> <span>{server.name}</span></button><button className={`server-pin-button ${server.pinned ? "is-pinned" : ""}`} type="button" onClick={() => onTogglePin?.(server.id)} aria-label={server.pinned ? "取消置顶" : "置顶"} title={server.pinned ? "取消置顶" : "置顶"}><Pin size={13} /></button></div>)}</section>;
+}
+
+function NavGroup({ label, icon, open, onToggle, items, onSelect, groupId, selected, trailingAction, trailingLabel }: { label: string; icon: ReactNode; open: boolean; onToggle: () => void; items: string[]; onSelect?: (id: string) => void; groupId: string; selected?: string | null; trailingAction?: ReactNode; trailingLabel?: string }) {
+  return (
+    <div className={`nav-group ${open ? "is-open" : ""}`}>
+      <div className="nav-group-heading">
+        <button className="nav-group-button" type="button" onClick={onToggle} aria-expanded={open}>
+          {icon}<span>{label}</span><ChevronDown className="nav-group-chevron" size={13} />
+        </button>
+        {trailingAction && <button className="nav-group-action" type="button" onClick={() => onSelect?.(`${groupId}-add`)} title={trailingLabel} aria-label={trailingLabel}>{trailingAction}</button>}
+      </div>
+      <div className="nav-group-content" aria-hidden={!open}>
+        <div className="nav-group-content-inner">
+          {items.map((item, index) => { const id = `${groupId}-${index + 1}`; return <button className={`nav-subitem ${selected === id ? "is-selected" : ""}`} type="button" key={id} onClick={() => onSelect?.(id)}><span>{item}</span></button>; })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const LEFT_DEFAULT = 260;
+const RIGHT_DEFAULT = 300;
+const BOTTOM_DEFAULT = 210;
+const MIN_SIDE = 190;
+const MIN_BOTTOM = 120;
+const LAYOUT_FILE = "layout.json";
+
+type LayoutState = {
+  leftOpen: boolean;
+  rightOpen: boolean;
+  bottomOpen: boolean;
+  leftWidth: number;
+  rightWidth: number;
+  bottomHeight: number;
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function IconButton({ label, onClick, children, className = "" }: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button className={`icon-button ${className}`} onClick={onClick} title={label} aria-label={label}>
+      {children}
+    </button>
+  );
+}
+
+function WindowButton({ label, onClick, children, danger = false }: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+  danger?: boolean;
+}) {
+  return (
+    <button className={`window-button${danger ? " danger" : ""}`} onClick={onClick} aria-label={label} title={label}>
+      {children}
+    </button>
+  );
+}
+
+function SidebarFooter({ onSettings, language }: { onSettings: () => void; language: "zh-CN" | "en" }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [versionOpen, setVersionOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const isEnglish = language === "en";
+
+  return (
+    <div className="sidebar-footer">
+      {menuOpen && (
+        <div className="sidebar-menu" role="menu">
+          <button className="sidebar-menu-item" role="menuitem" onClick={() => { setMenuOpen(false); onSettings(); }}>
+            <Settings className="sidebar-menu-icon" size={15} />
+            <span>{isEnglish ? "Settings" : "设置"}</span>
+          </button>
+        </div>
+      )}
+      {versionOpen && (
+        <div className="sidebar-help-menu" role="menu">
+          <button className="sidebar-menu-item" role="menuitem" onClick={() => { setVersionOpen(false); setAboutOpen(true); }}>
+            <CircleHelp className="sidebar-menu-icon" size={15} />
+            <span>{isEnglish ? "About OpsNest" : "关于 OpsNest"}</span>
+          </button>
+        </div>
+      )}
+      <div className="sidebar-footer-row">
+        <button className="sidebar-account" onClick={() => { setVersionOpen(false); setMenuOpen((value) => !value); }} aria-expanded={menuOpen}>
+          <span className="sidebar-avatar">ON</span>
+          <span>OpsNest</span>
+          <ChevronUp className={menuOpen ? "" : "is-down"} size={14} />
+        </button>
+        <button className="sidebar-help" title={isEnglish ? "Help" : "帮助"} aria-label={isEnglish ? "Help" : "帮助"} aria-expanded={versionOpen} onClick={() => { setMenuOpen(false); setVersionOpen((value) => !value); }}>
+          <CircleHelp size={15} strokeWidth={1.7} />
+        </button>
+      </div>
+      {aboutOpen && (
+        <div className="about-backdrop" role="presentation" onMouseDown={() => setAboutOpen(false)}>
+          <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" onMouseDown={(event) => event.stopPropagation()}>
+            <button className="about-close" type="button" aria-label={isEnglish ? "Close" : "关闭"} onClick={() => setAboutOpen(false)}><X size={15} /></button>
+            <div className="about-mark">ON</div>
+            <h2 id="about-title">OpsNest</h2>
+            <p className="about-version">OpsNest 0.2.0-alpha1</p>
+            <p className="about-credit">{isEnglish ? "AI-integrated server management." : "集成 AI 的服务器管理工具。"}</p>
+            <a className="about-link" href="https://github.com/HANSHOJIN/opsnest" target="_blank" rel="noreferrer">github.com/HANSHOJIN/opsnest</a>
+            <p className="about-license">{isEnglish ? "OpsNest is open source and free to use. Please keep the project name and source address when using it, so more people can discover the project. Thank you." : "OpsNest 是开源且免费的软件。使用或再发布时，请保留项目名称和源码地址，让更多人可以找到这个项目。谢谢。"}</p>
+            <p className="about-powered">{isEnglish ? "Built on the CodexShell desktop shell." : "基于 CodexShell 桌面外壳构建。"}</p>
+            <a className="about-link" href="https://github.com/HANSHOJIN/codex-shell" target="_blank" rel="noreferrer">github.com/HANSHOJIN/codex-shell</a>
+            <p className="about-copyright">© 2026 OpsNest</p>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsSidebar({ onBack, language, section, onSectionChange }: { onBack: () => void; language: "zh-CN" | "en"; section: "appearance" | "model"; onSectionChange: (section: "appearance" | "model") => void }) {
+  const isEnglish = language === "en";
+  return (
+    <div className="settings-sidebar" aria-label={isEnglish ? "Settings navigation" : "设置导航"}>
+      <button className="settings-return" onClick={onBack}>
+        <ArrowLeft size={14} />
+        <span>{isEnglish ? "Back to app" : "返回应用"}</span>
+      </button>
+      <div className="settings-nav-label">{isEnglish ? "Settings" : "设置"}</div>
+      <button className={`settings-nav-item ${section === "appearance" ? "is-selected" : ""}`} aria-current={section === "appearance" ? "page" : undefined} onClick={() => onSectionChange("appearance")}>
+        <Sun size={15} />
+        <span>{isEnglish ? "Appearance" : "外观"}</span>
+      </button>
+      <button className={`settings-nav-item ${section === "model" ? "is-selected" : ""}`} aria-current={section === "model" ? "page" : undefined} onClick={() => onSectionChange("model")}>
+        <MessageSquare size={15} />
+        <span>{isEnglish ? "AI model" : "AI 模型"}</span>
+      </button>
+    </div>
+  );
+}
+
+function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN", showMenuBar = true, closeAction = "tray", left, main, right, bottom, settings, modelSettings, settingsRequest, onNavigateBack, canNavigateBack = false, onNavigateForward, canNavigateForward = false, onSettingsClosed }: ShellLayoutProps) {
+  const isEnglish = language === "en";
+  const [layoutLoaded, setLayoutLoaded] = useState(false);
+  const [leftOpen, setLeftOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(true);
+  const [bottomOpen, setBottomOpen] = useState(false);
+  const [bottomFullscreen, setBottomFullscreen] = useState(false);
+  const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
+  const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT);
+  const [bottomHeight, setBottomHeight] = useState(BOTTOM_DEFAULT);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<"appearance" | "model">("appearance");
+  useEffect(() => {
+    if (!settingsRequest) return;
+    setSettingsSection(settingsRequest);
+    setSettingsOpen(true);
+  }, [settingsRequest]);
+  useEffect(() => {
+    if (bottom == null) {
+      setBottomOpen(false);
+      setBottomFullscreen(false);
+    }
+  }, [bottom]);
+  useEffect(() => {
+    const openTerminal = (event: Event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".server-profile-banner .primary, .open-terminal-action")) setBottomOpen(true);
+    };
+    document.addEventListener("click", openTerminal, true);
+    const openSsh = () => setBottomOpen(true);
+    const closeSsh = () => { setBottomFullscreen(false); setBottomOpen(false); };
+    window.addEventListener("opsnest-open-ssh", openSsh);
+    window.addEventListener("opsnest-close-ssh", closeSsh);
+    return () => { document.removeEventListener("click", openTerminal, true); window.removeEventListener("opsnest-open-ssh", openSsh); window.removeEventListener("opsnest-close-ssh", closeSsh); };
+  }, []);
+  const [dragging, setDragging] = useState<DragKind | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let active = true;
+    void readPortableJson<Partial<LayoutState>>(LAYOUT_FILE, {}).then((saved) => {
+      if (!active) return;
+      setLeftOpen(saved.leftOpen ?? true);
+      setRightOpen(saved.rightOpen ?? true);
+      setBottomOpen(saved.bottomOpen ?? false);
+      setLeftWidth(saved.leftWidth ?? LEFT_DEFAULT);
+      setRightWidth(saved.rightWidth ?? RIGHT_DEFAULT);
+      setBottomHeight(saved.bottomHeight ?? BOTTOM_DEFAULT);
+      setLayoutLoaded(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+
+    const keepLayoutInsideWindow = () => {
+      const bounds = shell.getBoundingClientRect();
+      const openSides = Number(leftOpen) + Number(rightOpen);
+      if (openSides > 0) {
+        const availableForSides = Math.max(MIN_SIDE * openSides, bounds.width - 240);
+        if (leftOpen && rightOpen && leftWidth + rightWidth > availableForSides) {
+          const ratio = leftWidth / (leftWidth + rightWidth);
+          const nextLeft = clamp(availableForSides * ratio, MIN_SIDE, availableForSides - MIN_SIDE);
+          setLeftWidth(Math.round(nextLeft));
+          setRightWidth(Math.round(availableForSides - nextLeft));
+        } else if (leftOpen && !rightOpen) {
+          setLeftWidth((value) => Math.min(value, availableForSides));
+        } else if (rightOpen && !leftOpen) {
+          setRightWidth((value) => Math.min(value, availableForSides));
+        }
+      }
+
+      if (bottomOpen) {
+        setBottomHeight((value) => Math.min(value, Math.max(MIN_BOTTOM, bounds.height - 44)));
+      }
+    };
+
+    keepLayoutInsideWindow();
+    const observer = new ResizeObserver(keepLayoutInsideWindow);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, [bottomOpen, leftOpen, leftWidth, rightOpen, rightWidth]);
+
+  const startDrag = useCallback((kind: DragKind, event: React.PointerEvent) => {
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    setDragging(kind);
+  }, []);
+
+  const resizeWithKeyboard = useCallback((kind: DragKind, event: React.KeyboardEvent) => {
+    const step = event.shiftKey ? 32 : 8;
+    let handled = true;
+    if (kind === "left") {
+      if (event.key === "ArrowRight") setLeftWidth((value) => clamp(value + step, MIN_SIDE, 420));
+      else if (event.key === "ArrowLeft") setLeftWidth((value) => clamp(value - step, MIN_SIDE, 420));
+      else if (event.key === "Home") setLeftOpen(false);
+      else if (event.key === "End") { setLeftOpen(true); setLeftWidth(420); }
+      else handled = false;
+    } else if (kind === "right") {
+      if (event.key === "ArrowLeft") setRightWidth((value) => clamp(value + step, MIN_SIDE, 440));
+      else if (event.key === "ArrowRight") setRightWidth((value) => clamp(value - step, MIN_SIDE, 440));
+      else if (event.key === "Home") setRightOpen(false);
+      else if (event.key === "End") { setRightOpen(true); setRightWidth(440); }
+      else handled = false;
+    } else {
+      if (event.key === "ArrowUp") setBottomHeight((value) => clamp(value + step, MIN_BOTTOM, 600));
+      else if (event.key === "ArrowDown") { setBottomFullscreen(false); setBottomHeight((value) => clamp(value - step, MIN_BOTTOM, 1200)); }
+      else if (event.key === "Home") { setBottomFullscreen(false); setBottomOpen(false); }
+      else if (event.key === "End") { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); }
+      else handled = false;
+    }
+    if (handled) event.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const move = (event: PointerEvent) => {
+      const bounds = shellRef.current?.getBoundingClientRect();
+      if (!bounds) return;
+      if (dragging === "left") {
+        const next = event.clientX - bounds.left;
+        if (next < MIN_SIDE * 0.62) { setDragging(null); setLeftOpen(false); }
+        else { setLeftOpen(true); setLeftWidth(clamp(next, MIN_SIDE, 420)); }
+      }
+      if (dragging === "right") {
+        const next = bounds.right - event.clientX;
+        if (next < MIN_SIDE * 0.62) { setDragging(null); setRightOpen(false); }
+        else { setRightOpen(true); setRightWidth(clamp(next, MIN_SIDE, 440)); }
+      }
+      if (dragging === "bottom") {
+        const next = bounds.bottom - event.clientY;
+        if (next < MIN_BOTTOM * 0.62) { setDragging(null); setBottomOpen(false); }
+        else {
+          const maxBottom = Math.max(MIN_BOTTOM, bounds.height - 44);
+          const snapped = next >= maxBottom - 64;
+          setBottomOpen(true);
+          setBottomFullscreen(snapped);
+          setBottomHeight(snapped ? maxBottom : clamp(next, MIN_BOTTOM, maxBottom));
+        }
+      }
+    };
+    const stop = () => setDragging(null);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop, { once: true });
+    window.addEventListener("pointercancel", stop, { once: true });
+    window.addEventListener("blur", stop, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      window.removeEventListener("blur", stop);
+    };
+  }, [dragging]);
+
+  useEffect(() => {
+    if (!layoutLoaded) return;
+    void writePortableJson(LAYOUT_FILE, { leftOpen, rightOpen, bottomOpen, leftWidth, rightWidth, bottomHeight } satisfies LayoutState).catch(() => undefined);
+  }, [layoutLoaded, leftOpen, rightOpen, bottomOpen, leftWidth, rightWidth, bottomHeight]);
+
+  const layoutStyle = {
+    "--left-width": leftOpen ? `${leftWidth}px` : "0px",
+    "--right-width": rightOpen ? `${rightWidth}px` : "0px",
+    "--bottom-height": bottomOpen ? `${bottomHeight}px` : "0px",
+  } as React.CSSProperties;
+
+  return (
+    <div className="window-shell" style={layoutStyle}>
+      <header className="window-chrome" data-tauri-drag-region>
+        <div className="window-chrome-left" data-tauri-drag-region>
+          <WindowButton label={isEnglish ? "Toggle sidebar" : "切换左侧栏"} onClick={() => setLeftOpen((value) => !value)}><PanelLeft size={15} /></WindowButton>
+          <button className={`window-button window-history ${canNavigateBack || settingsOpen ? "is-enabled" : ""}`} type="button" aria-label={isEnglish ? "Back" : "后退"} aria-disabled={!canNavigateBack && !settingsOpen} disabled={!canNavigateBack && !settingsOpen} onClick={() => { if (settingsOpen) { setSettingsOpen(false); onSettingsClosed?.(settingsSection); } else onNavigateBack?.(); }}><ArrowLeft size={15} /></button>
+          <button className={`window-button window-history ${canNavigateForward ? "is-enabled" : ""}`} type="button" aria-label={isEnglish ? "Forward" : "前进"} aria-disabled={!canNavigateForward} disabled={!canNavigateForward} onClick={() => onNavigateForward?.()}><ArrowRight size={15} /></button>
+          {showMenuBar && (
+            <nav className="window-menu" aria-label={isEnglish ? "Application menu" : "应用菜单"}>
+              {(isEnglish ? ["File", "Edit", "View", "Help"] : ["文件", "编辑", "视图", "帮助"]).map((item) => (
+                <button key={item} type="button" aria-disabled="true">{item}</button>
+              ))}
+            </nav>
+          )}
+        </div>
+        <div className="window-chrome-right" data-tauri-drag-region="false">
+          <WindowButton label={isEnglish ? "Minimize" : "最小化"} onClick={() => void getCurrentWindow().minimize()}><Minus size={14} /></WindowButton>
+          <WindowButton label={isEnglish ? "Maximize" : "最大化"} onClick={() => void getCurrentWindow().toggleMaximize()}><Square size={12} /></WindowButton>
+          <WindowButton label={isEnglish ? "Close" : "关闭"} danger onClick={() => {
+            if (closeAction === "exit") void invoke("exit_app");
+            else void getCurrentWindow().hide();
+          }}><X size={14} /></WindowButton>
+        </div>
+      </header>
+      <div ref={shellRef} className={`app-shell ${dragging ? `is-dragging drag-${dragging}` : ""}`}>
+        <aside className={`panel left-panel ${leftOpen ? "is-open" : "is-closed"}`} aria-hidden={!leftOpen} inert={!leftOpen}>
+          {settingsOpen ? (
+            <SettingsSidebar onBack={() => setSettingsOpen(false)} language={language} section={settingsSection} onSectionChange={setSettingsSection} />
+          ) : (
+            <>
+              <div className="panel-toolbar left-toolbar"><span className="app-title">{appName}</span></div>
+              <div className="left-content">{left}</div>
+              <SidebarFooter onSettings={() => setSettingsOpen(true)} language={language} />
+            </>
+          )}
+        </aside>
+
+        {leftOpen && <div className="resize-handle vertical left-handle" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整左侧栏宽度" onPointerDown={(e) => startDrag("left", e)} onKeyDown={(e) => resizeWithKeyboard("left", e)} />}
+
+        <main className="center-area">
+          <div className="center-toolbar">
+            {!leftOpen && <IconButton label={isEnglish ? "Show sidebar" : "展开左侧栏"} onClick={() => setLeftOpen(true)} className="left-restore"><PanelLeft size={15} /></IconButton>}
+            {!settingsOpen && title && <span className="center-label">{title}</span>}
+            <div className="toolbar-actions">
+              <IconButton label={isEnglish ? (bottomOpen ? "Hide bottom panel" : "Show bottom panel") : (bottomOpen ? "收起底部面板" : "展开底部面板")} onClick={() => { setBottomFullscreen(false); setBottomOpen((value) => !value); }} className={bottomOpen ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
+              <IconButton label={isEnglish ? (rightOpen ? "Hide files panel" : "Show files panel") : (rightOpen ? "收起文件栏" : "展开文件栏")} onClick={() => setRightOpen((value) => !value)} className={rightOpen ? "is-active" : ""}><PanelRight size={15} /></IconButton>
+            </div>
+          </div>
+          <section className="main-placeholder">{settingsOpen ? (settingsSection === "model" && modelSettings ? modelSettings : settings) : main}</section>
+          {bottomOpen && <div className="resize-handle horizontal bottom-handle" role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="调整底部面板高度" onPointerDown={(e) => startDrag("bottom", e)} onKeyDown={(e) => resizeWithKeyboard("bottom", e)} />}
+          <section className={`bottom-panel ${bottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen} inert={!bottomOpen}>
+            <div className="bottom-toolbar"><span>{title}</span><div className="bottom-toolbar-actions"><IconButton label={isEnglish ? "Minimize terminal" : "最小化终端"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}><Minimize2 size={14} /></IconButton><IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={() => { if (bottomFullscreen) { setBottomFullscreen(false); setBottomHeight(BOTTOM_DEFAULT); } else { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); } }}><Maximize2 size={14} /></IconButton></div></div>
+            {bottom}
+          </section>
+        </main>
+
+        {rightOpen && <div className="resize-handle vertical right-handle" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整右侧栏宽度" onPointerDown={(e) => startDrag("right", e)} onKeyDown={(e) => resizeWithKeyboard("right", e)} />}
+        <aside className={`panel right-panel ${rightOpen ? "is-open" : "is-closed"}`} aria-hidden={!rightOpen} inert={!rightOpen}>
+          <div className="panel-toolbar right-toolbar"><span>{isEnglish ? "Files" : "文件"}</span><IconButton label={isEnglish ? "Hide files panel" : "收起文件栏"} onClick={() => setRightOpen(false)}><PanelRight size={15} /></IconButton></div>
+          {right}
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+export default ShellLayout;

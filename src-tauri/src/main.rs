@@ -1,5 +1,5 @@
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    opsnest_lib::run()
+    opsnest_lib::run();
 }
