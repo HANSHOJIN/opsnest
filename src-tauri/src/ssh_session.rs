@@ -1,4 +1,4 @@
-use russh::{client, keys, ChannelMsg};
+use russh::{client, keys, ChannelMsg, Pty};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -327,14 +327,14 @@ pub async fn open_interactive_ssh_terminal(
     app: tauri::AppHandle,
     request: SessionRequest,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     start_interactive_reaper();
     if interactive()
         .lock()
         .map_err(|_| "SSH terminal lock failed")?
         .contains_key(&session_id)
     {
-        return Ok(());
+        return Ok(false);
     }
     let session = connect(&request).await?;
     let channel = session
@@ -342,7 +342,9 @@ pub async fn open_interactive_ssh_terminal(
         .await
         .map_err(|error| error.to_string())?;
     let _ = channel
-        .request_pty(false, "xterm-256color", 240, 40, 0, 0, &[])
+        // Disable remote line echo at PTY allocation time. Sending a later
+        // `stty -echo` command makes bash print an extra prompt.
+        .request_pty(false, "xterm-256color", 240, 40, 0, 0, &[(Pty::ECHO, 0)])
         .await;
     let (mut reader, writer) = channel.split();
     writer
@@ -387,13 +389,16 @@ pub async fn open_interactive_ssh_terminal(
         let _ = app.emit(
             "ssh-terminal-output",
             TerminalEvent {
-                session_id,
+                session_id: session_id.clone(),
                 data: String::new(),
                 closed: true,
             },
         );
+        // Do not leave a dead PTY in the session pool. Otherwise the next
+        // attempt reuses a closed channel and the UI can show stale prompts.
+        let _ = interactive().lock().map(|mut sessions| sessions.remove(&session_id));
     });
-    Ok(())
+    Ok(true)
 }
 
 #[tauri::command]
@@ -407,6 +412,7 @@ pub async fn write_interactive_ssh_terminal(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
+    touch_activity(&shell);
     let normalized = data.replace('\r', "").replace('\n', "");
     if !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
         append_blackboard(&shell, "user_input", normalized);
@@ -513,6 +519,11 @@ pub async fn run_interactive_command(
             .to_vec();
         let text = String::from_utf8_lossy(&data).into_owned();
         if let Some(index) = text.find(&marker) {
+            // The shell writes the marker before it writes the next real
+            // prompt. Give the PTY reader a short grace period so that the
+            // prompt is delivered to the terminal before the caller renders
+            // its completion status. We never synthesize a prompt here.
+            tokio::time::sleep(Duration::from_millis(120)).await;
             return Ok(text[..index].to_string());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -522,6 +533,14 @@ pub async fn run_interactive_command(
             .await
             .ok();
     }
+}
+
+#[tauri::command]
+pub async fn execute_interactive_ssh_command(
+    session_id: String,
+    command: String,
+) -> Result<String, String> {
+    run_interactive_command(&session_id, &command, true).await
 }
 
 #[tauri::command]

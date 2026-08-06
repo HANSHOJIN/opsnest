@@ -213,9 +213,9 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let mut executed = Vec::new();
     let mut recovery_attempts = 0u8;
     for _round in 0..8 {
-        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":"auto"}), Duration::from_secs(120)).await {
+        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":"auto"}), Duration::from_secs(60)).await {
             Ok(raw) => raw,
-            Err(error) if recovery_attempts < 2 => {
+            Err(error) if recovery_attempts < 1 => {
                 recovery_attempts += 1;
                 let _ = ssh_session::record_session_event(&request.session_id, "ai_recovery", format!("AI 请求失败，正在重试（第 {} 次）：{}", recovery_attempts, error));
                 tokio::time::sleep(Duration::from_millis(500 * u64::from(recovery_attempts))).await;
@@ -262,7 +262,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             if command.is_empty() {
                 return Err("AI requested an invalid command".into());
             }
-            if !approved_for_this_turn {
+            if !approved_for_this_turn && command_requires_approval(&command, &risk) {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
             }
             let output =
@@ -340,4 +340,34 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
     }
     Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed}).to_string())
+}
+
+fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    // The model's risk label is advisory. Read-only inspection should remain
+    // one-click/automatic even when the model conservatively labels it high.
+    [
+        "sudo ", "rm ", "mv ", "cp ", "chmod ", "chown ", "systemctl start",
+        "systemctl stop", "systemctl restart", "systemctl enable", "systemctl disable",
+        "systemctl mask", "systemctl unmask", "systemctl reload", "service start",
+        "service stop", "service restart", "reboot", "shutdown", "docker rm", "docker stop",
+        "docker restart", "apt install", "apt remove", "apt purge", "apt upgrade",
+        "dnf install", "yum install", "apk add", "pacman -s", "mkfs", "dd ",
+    ]
+    .iter().any(|token| lowered.contains(token))
+        || (declared_risk.eq_ignore_ascii_case("high") && !is_read_only_command(&lowered))
+}
+
+fn is_read_only_command(command: &str) -> bool {
+    let read_only = [
+        "which ", "command -v ", "type ", "ls", "stat ", "cat ", "head ", "tail ",
+        "grep ", "egrep ", "fgrep ", "awk ", "sed -n", "find ", "ps", "top", "free",
+        "df", "du ", "uname", "id", "whoami", "hostname", "uptime", "env", "printenv",
+        "systemctl status", "systemctl is-active", "systemctl list-units", "service --status-all",
+        "docker ps", "docker inspect", "docker version", "docker info", "ss ", "netstat ",
+        "ip ", "curl -i", "curl -I", "wget --spider",
+    ];
+    command.split(|ch| ch == '&' || ch == '|' || ch == ';')
+        .map(str::trim).filter(|part| !part.is_empty())
+        .all(|part| read_only.iter().any(|prefix| part.starts_with(prefix)))
 }

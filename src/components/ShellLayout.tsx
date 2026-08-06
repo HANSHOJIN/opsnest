@@ -8,13 +8,14 @@ import {
   Activity,
   CalendarClock,
   ClipboardList,
+  Copy,
   House,
   ChevronUp,
   CircleHelp,
   ChevronDown,
   MessageSquare,
-  Maximize2,
-  Minimize2,
+  PanelBottomClose,
+  PanelBottomOpen,
   Minus,
   PanelBottom,
   PanelLeft,
@@ -48,9 +49,13 @@ export type ShellLayoutProps = {
   onNavigateForward?: () => void;
   canNavigateForward?: boolean;
   onSettingsClosed?: (section: "appearance" | "model") => void;
+  openBottomSignal?: number;
+  openRightSignal?: number;
+  closeRightSignal?: number;
+  bottomRouteKey?: string | null;
 };
 
-export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string };
+export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string; customLabel?: string };
 export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; pinned?: boolean; connected?: boolean; system?: string; cpu?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[] };
 
 export function ShellNavigation({ language = "zh-CN", selected, onSelect, servers: serverSummaries = [], onTogglePin, onRename, onToggleConnection, onDelete, onOpenSsh }: { language?: "zh-CN" | "en"; selected?: string | null; onSelect?: (id: string) => void; servers?: ServerSummary[]; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void }) {
@@ -238,7 +243,7 @@ function SettingsSidebar({ onBack, language, section, onSectionChange }: { onBac
   );
 }
 
-function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN", showMenuBar = true, closeAction = "tray", left, main, right, bottom, settings, modelSettings, settingsRequest, onNavigateBack, canNavigateBack = false, onNavigateForward, canNavigateForward = false, onSettingsClosed }: ShellLayoutProps) {
+function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN", showMenuBar = true, closeAction = "tray", left, main, right, bottom, settings, modelSettings, settingsRequest, onNavigateBack, canNavigateBack = false, onNavigateForward, canNavigateForward = false, onSettingsClosed, openBottomSignal = 0, openRightSignal = 0, closeRightSignal = 0, bottomRouteKey = null }: ShellLayoutProps) {
   const isEnglish = language === "en";
   const [layoutLoaded, setLayoutLoaded] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
@@ -248,8 +253,27 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const [rightWidth, setRightWidth] = useState(RIGHT_DEFAULT);
   const [bottomHeight, setBottomHeight] = useState(BOTTOM_DEFAULT);
+  const [isMaximized, setIsMaximized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<"appearance" | "model">("appearance");
+  useEffect(() => {
+    const windowHandle = getCurrentWindow();
+    let disposed = false;
+    const syncMaximizedState = async () => {
+      const maximized = await windowHandle.isMaximized();
+      if (!disposed) setIsMaximized(maximized);
+    };
+    void syncMaximizedState();
+    let unlisten: (() => void) | undefined;
+    void windowHandle.onResized(() => { void syncMaximizedState(); }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   useEffect(() => {
     if (!settingsRequest) return;
     setSettingsSection(settingsRequest);
@@ -261,17 +285,46 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       setBottomFullscreen(false);
     }
   }, [bottom]);
+  const lastOpenBottomSignal = useRef(0);
+  useEffect(() => {
+    if (openBottomSignal !== lastOpenBottomSignal.current) {
+      lastOpenBottomSignal.current = openBottomSignal;
+      if (openBottomSignal > 0 && bottom != null) setBottomOpen(true);
+    }
+  }, [openBottomSignal, bottom]);
+  const lastOpenRightSignal = useRef(0);
+  useEffect(() => {
+    if (openRightSignal !== lastOpenRightSignal.current) {
+      lastOpenRightSignal.current = openRightSignal;
+      if (openRightSignal > 0 && right != null) setRightOpen(true);
+    }
+  }, [openRightSignal, right]);
+  const lastCloseRightSignal = useRef(0);
+  useEffect(() => {
+    if (closeRightSignal !== lastCloseRightSignal.current) {
+      lastCloseRightSignal.current = closeRightSignal;
+      if (closeRightSignal > 0) setRightOpen(false);
+    }
+  }, [closeRightSignal]);
+  useEffect(() => {
+    setBottomFullscreen(false);
+    setBottomOpen(false);
+  }, [bottomRouteKey]);
   useEffect(() => {
     const openTerminal = (event: Event) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest(".server-profile-banner .primary, .open-terminal-action")) setBottomOpen(true);
+      if (target?.closest(".server-profile-banner .primary, .open-terminal-action, .open-manager-action")) setBottomOpen(true);
     };
     document.addEventListener("click", openTerminal, true);
     const openSsh = () => setBottomOpen(true);
+    const openManager = () => setBottomOpen(true);
     const closeSsh = () => { setBottomFullscreen(false); setBottomOpen(false); };
+    const closeFiles = () => setRightOpen(false);
     window.addEventListener("opsnest-open-ssh", openSsh);
+    window.addEventListener("opsnest-open-manager", openManager);
     window.addEventListener("opsnest-close-ssh", closeSsh);
-    return () => { document.removeEventListener("click", openTerminal, true); window.removeEventListener("opsnest-open-ssh", openSsh); window.removeEventListener("opsnest-close-ssh", closeSsh); };
+    window.addEventListener("opsnest-close-files", closeFiles);
+    return () => { document.removeEventListener("click", openTerminal, true); window.removeEventListener("opsnest-open-ssh", openSsh); window.removeEventListener("opsnest-open-manager", openManager); window.removeEventListener("opsnest-close-ssh", closeSsh); window.removeEventListener("opsnest-close-files", closeFiles); };
   }, []);
   const [dragging, setDragging] = useState<DragKind | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
@@ -281,7 +334,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     void readPortableJson<Partial<LayoutState>>(LAYOUT_FILE, {}).then((saved) => {
       if (!active) return;
       setLeftOpen(saved.leftOpen ?? true);
-      setRightOpen(saved.rightOpen ?? true);
+      setRightOpen(saved.rightOpen ?? false);
       setBottomOpen(saved.bottomOpen ?? false);
       setLeftWidth(saved.leftWidth ?? LEFT_DEFAULT);
       setRightWidth(saved.rightWidth ?? RIGHT_DEFAULT);
@@ -422,7 +475,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
         </div>
         <div className="window-chrome-right" data-tauri-drag-region="false">
           <WindowButton label={isEnglish ? "Minimize" : "最小化"} onClick={() => void getCurrentWindow().minimize()}><Minus size={14} /></WindowButton>
-          <WindowButton label={isEnglish ? "Maximize" : "最大化"} onClick={() => void getCurrentWindow().toggleMaximize()}><Square size={12} /></WindowButton>
+          <WindowButton label={isMaximized ? (isEnglish ? "Restore" : "恢复") : (isEnglish ? "Maximize" : "最大化")} onClick={() => void getCurrentWindow().toggleMaximize()}>{isMaximized ? <Copy size={12} /> : <Square size={12} />}</WindowButton>
           <WindowButton label={isEnglish ? "Close" : "关闭"} danger onClick={() => {
             if (closeAction === "exit") void invoke("exit_app");
             else void getCurrentWindow().hide();
@@ -456,7 +509,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
           <section className="main-placeholder">{settingsOpen ? (settingsSection === "model" && modelSettings ? modelSettings : settings) : main}</section>
           {bottomOpen && <div className="resize-handle horizontal bottom-handle" role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="调整底部面板高度" onPointerDown={(e) => startDrag("bottom", e)} onKeyDown={(e) => resizeWithKeyboard("bottom", e)} />}
           <section className={`bottom-panel ${bottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen} inert={!bottomOpen}>
-            <div className="bottom-toolbar"><span>{title}</span><div className="bottom-toolbar-actions"><IconButton label={isEnglish ? "Minimize terminal" : "最小化终端"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}><Minimize2 size={14} /></IconButton><IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={() => { if (bottomFullscreen) { setBottomFullscreen(false); setBottomHeight(BOTTOM_DEFAULT); } else { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); } }}><Maximize2 size={14} /></IconButton></div></div>
+            <div className="bottom-toolbar" aria-label={isEnglish ? "Terminal controls" : "终端窗口操作"}><div className="bottom-toolbar-actions"><IconButton label={isEnglish ? "Minimize terminal" : "最小化终端"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}><PanelBottomClose size={14} /></IconButton><IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={() => { if (bottomFullscreen) { setBottomFullscreen(false); setBottomHeight(BOTTOM_DEFAULT); } else { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); } }}><PanelBottomOpen size={14} /></IconButton></div></div>
             {bottom}
           </section>
         </main>

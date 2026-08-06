@@ -169,8 +169,29 @@ pub async fn discover_linux_services(
     request: ScanRequest,
 ) -> Result<Vec<DiscoveredService>, String> {
     let session = connect(&request).await?;
-    let command = r#"printf 'PANEL\n'; if [ -d /opt/1panel ] || command -v 1pctl >/dev/null 2>&1; then panel_url=$(1pctl user-info 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | head -n 1); panel_port=$(printf '%s' \"$panel_url\" | sed -nE 's#^https?://[^/:]+:([0-9]+).*#\1#p'); [ -z \"$panel_port\" ] && panel_port=$(grep -E 'port:' /opt/1panel/conf/app.yaml 2>/dev/null | head -n 1 | sed -E 's/[^0-9]*([0-9]+).*/\1/'); [ -z \"$panel_port\" ] && panel_port=20520; panel_scheme=$(printf '%s' \"$panel_url\" | sed -nE 's#^(https?)://.*#\1#p'); [ -z \"$panel_scheme\" ] && panel_scheme=https; printf '1panel\trunning\t%s\t%s\n' \"$panel_port\" \"$panel_scheme\"; fi; printf 'DOCKER\n'; if command -v docker >/dev/null 2>&1; then docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null; fi; printf 'SYSTEMD\n'; for service in nginx apache2 httpd caddy; do if command -v \"$service\" >/dev/null 2>&1; then status=stopped; systemctl is-active --quiet \"$service\" 2>/dev/null && status=running; port=$(ss -ltn 2>/dev/null | awk '$4 ~ /:(80|443|8080|8443)$/ {sub(/^.*:/,\"\",$4); print $4; exit}'); [ -n \"$port\" ] && printf '%s\t%s\t%s\t%s\n' \"$service\" \"$status\" \"$port\" \"$service\"; fi; done"#;
-    let raw = execute(&session, command).await?;
+    fn discover_command() -> &'static str {
+        r#"printf 'PANEL\n';
+if [ -d /opt/1panel ] || command -v 1pctl >/dev/null 2>&1; then
+  one_status=stopped
+  ps 2>/dev/null | grep -v grep | grep -E '1panel|1p-daemon' >/dev/null 2>&1 && one_status=running
+  one_port=''; one_url=''; one_scheme=http; one_path=''
+  if command -v 1pctl >/dev/null 2>&1; then one_url=$(1pctl user-info 2>/dev/null | grep -Eo 'https?://[^[:space:]]+' | head -n 1 | tr -d '\r'); fi
+  if [ -n "$one_url" ]; then
+    one_port=$(printf '%s' "$one_url" | sed -nE 's#^https?://[^/:]+:([0-9]+)(/.*)?$#\1#p')
+    one_scheme=$(printf '%s' "$one_url" | sed -nE 's#^(https?)://.*#\1#p')
+    one_path=$(printf '%s' "$one_url" | sed -nE 's#^https?://[^/]+(/.*)$#\1#p')
+  fi
+  if [ -z "$one_port" ] && command -v ss >/dev/null 2>&1; then one_port=$(ss -lntpH 2>/dev/null | grep -E '1panel|1p-daemon' | sed -nE 's/.*:([0-9]+)[[:space:]].*/\1/p' | head -n 1); fi
+  if [ -z "$one_port" ] && [ -r /opt/1panel/conf/app.yaml ]; then one_port=$(awk -F: '/^[[:space:]]*port:/{gsub(/[[:space:]]/, "", $2); print $2; exit}' /opt/1panel/conf/app.yaml 2>/dev/null); fi
+  if [ -z "$one_path" ] && [ -r /opt/1panel/conf/app.yaml ]; then one_path=$(grep -Ei 'securityEntrance|security-entrance|security_entrance' /opt/1panel/conf/app.yaml 2>/dev/null | head -n 1 | sed -E 's/.*:[[:space:]]*//' | tr -d ' ' | tr -d '"'); fi
+  case "$one_path" in /*) ;; "") ;; *) one_path="/$one_path" ;; esac
+  [ -z "$one_port" ] && one_port=20520
+  one_web=https; printf '1panel\t%s\t%s\t%s\t%s\n' "$one_status" "$one_port" "$one_scheme" "$one_path"
+fi
+printf 'DOCKER\n'; if command -v docker >/dev/null 2>&1; then docker ps --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null; fi
+printf 'SYSTEMD\n'; for service in nginx apache2 httpd caddy; do if command -v "$service" >/dev/null 2>&1; then status=stopped; systemctl is-active --quiet "$service" 2>/dev/null && status=running; port=$(ss -ltn 2>/dev/null | awk '$4 ~ /:(80|443|8080|8443)$/ {sub(/^.*:/,"",$4); print $4; exit}'); [ -n "$port" ] && printf '%s\t%s\t%s\t%s\n' "$service" "$status" "$port" "$service"; fi; done"#
+    }
+    let raw = execute(&session, discover_command()).await?;
     let mut services = Vec::new();
     let mut section = "";
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -201,8 +222,8 @@ pub async fn discover_linux_services(
                         status: parts[1].to_string(),
                         detail: "1Panel 管理面板".into(),
                         port: Some(port),
-                        web_path: None,
-                        web_scheme: Some(parts[3].to_string()),
+                        web_path: parts.get(4).filter(|value| !value.is_empty()).map(|value| value.to_string()),
+                        web_scheme: parts.get(3).filter(|value| **value == "http" || **value == "https").map(|value| value.to_string()).or_else(|| Some("http".into())),
                         version: None,
                     });
                 }
@@ -272,7 +293,7 @@ pub async fn discover_linux_services(
         .iter()
         .any(|service: &DiscoveredService| service.id == "1panel")
     {
-        let fallback = execute(&session, r#"if [ -d /opt/1panel ] || [ -x /usr/local/bin/1pctl ] || [ -x /usr/bin/1pctl ] || pgrep -f '1panel' >/dev/null 2>&1; then port=$(grep -E '^[[:space:]]*port:' /opt/1panel/conf/app.yaml /opt/1panel/conf/app.yaml 2>/dev/null | grep -Eo '[0-9]{2,5}' | head -n 1); [ -z \"$port\" ] && port=$(ss -ltnp 2>/dev/null | grep -Eo ':(20520|[0-9]{4,5})[[:space:]]' | grep -Eo '[0-9]{4,5}' | head -n 1); [ -z \"$port\" ] && port=20520; printf '1PANEL_FALLBACK\\t%s\\n' \"$port\"; fi"#).await.unwrap_or_default();
+        let fallback = execute(&session, r#"if [ -d /opt/1panel ] || [ -x /usr/local/bin/1pctl ] || [ -x /usr/bin/1pctl ] || pgrep -f '1panel' >/dev/null 2>&1; then port=$(grep -E '^[[:space:]]*port:' /opt/1panel/conf/app.yaml 2>/dev/null | grep -Eo '[0-9]{2,5}' | head -n 1); [ -z \"$port\" ] && port=$(ss -ltnp 2>/dev/null | grep -i 1panel | grep -Eo ':[0-9]+' | grep -Eo '[0-9]+' | head -n 1); [ -z \"$port\" ] && port=20520; printf '1PANEL_FALLBACK\\t%s\\n' \"$port\"; fi"#).await.unwrap_or_default();
         if let Some(port) = fallback.lines().find_map(|line| {
             line.strip_prefix("1PANEL_FALLBACK\t")
                 .and_then(|value| value.trim().parse::<u16>().ok())
@@ -293,6 +314,42 @@ pub async fn discover_linux_services(
                     }
                     .into(),
                 ),
+                version: None,
+            });
+        }
+    }
+    // A number of 1Panel installations do not expose a reliable `1pctl user-info`
+    // URL. Probe the installation and its configured/listening port with a clean
+    // shell command as a final fallback. Keep this separate from the legacy probe
+    // above so older servers remain compatible.
+    if !services
+        .iter()
+        .any(|service: &DiscoveredService| service.id == "1panel")
+    {
+        let probe = execute(
+            &session,
+            r#"if [ -d /opt/1panel ] || command -v 1pctl >/dev/null 2>&1 || systemctl list-unit-files 2>/dev/null | grep -q '^1panel'; then
+port=$(grep -E '^[[:space:]]*port:' /opt/1panel/conf/app.yaml 2>/dev/null | grep -Eo '[0-9]{2,5}' | head -n 1)
+[ -z "$port" ] && port=$(ss -ltn 2>/dev/null | awk '$4 ~ /:[0-9]+$/ {sub(/^.*:/,"",$4); if ($4 >= 1000) {print $4; exit}}')
+[ -z "$port" ] && port=20520
+printf 'OPSNEST_1PANEL\t%s\n' "$port"
+fi"#,
+        )
+        .await
+        .unwrap_or_default();
+        if let Some(port) = probe.lines().find_map(|line| {
+            line.strip_prefix("OPSNEST_1PANEL\t")
+                .and_then(|value| value.trim().parse::<u16>().ok())
+        }) {
+            services.push(DiscoveredService {
+                id: "1panel".into(),
+                name: "1Panel".into(),
+                kind: "Web".into(),
+                status: "运行中".into(),
+                detail: "1Panel 管理面板".into(),
+                port: Some(port),
+                web_path: None,
+                web_scheme: Some(if port == 443 || port == 8443 { "https" } else { "http" }.into()),
                 version: None,
             });
         }

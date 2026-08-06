@@ -5,6 +5,7 @@ use std::{
 };
 
 mod ai;
+mod file_manager;
 mod ssh_scan;
 mod ssh_session;
 
@@ -50,6 +51,44 @@ fn open_external_url(url: String) -> Result<(), String> {
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+async fn resolve_service_url(
+    host: String,
+    port: u16,
+    preferred_scheme: Option<String>,
+) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() || port == 0 {
+        return Err("invalid service address".to_string());
+    }
+    let preferred = preferred_scheme
+        .as_deref()
+        .filter(|scheme| matches!(*scheme, "http" | "https"));
+    let mut schemes = Vec::with_capacity(2);
+    if let Some(scheme) = preferred {
+        schemes.push(scheme);
+    }
+    for scheme in ["https", "http"] {
+        if !schemes.contains(&scheme) {
+            schemes.push(scheme);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())?;
+    for scheme in schemes {
+        let url = format!("{scheme}://{host}:{port}/");
+        if client.head(&url).send().await.is_ok() {
+            return Ok(url);
+        }
+    }
+    Ok(format!("http://{host}:{port}/"))
 }
 
 fn portable_data_dir() -> Result<PathBuf, String> {
@@ -214,6 +253,35 @@ fn append_debug_log(level: String, message: String, details: Option<String>) -> 
 }
 
 #[tauri::command]
+fn read_debug_log() -> Result<String, String> {
+    let path = portable_data_dir()?.join("opsnest-debug.log");
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            const MAX_CHARS: usize = 200_000;
+            if content.chars().count() > MAX_CHARS {
+                Ok(content
+                    .chars()
+                    .skip(content.chars().count().saturating_sub(MAX_CHARS))
+                    .collect())
+            } else {
+                Ok(content)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(format!("unable to read debug log: {error}")),
+    }
+}
+
+#[tauri::command]
+fn clear_debug_log() -> Result<(), String> {
+    let path = portable_data_dir()?.join("opsnest-debug.log");
+    if path.exists() {
+        fs::write(path, "").map_err(|error| format!("unable to clear debug log: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn test_model_connection(
     base_url: String,
     api_key: String,
@@ -342,6 +410,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             exit_app,
             open_external_url,
+            resolve_service_url,
             read_portable_json,
             write_portable_json,
             save_server_credential,
@@ -360,11 +429,17 @@ pub fn run() {
             ssh_session::resize_interactive_ssh_terminal,
             ssh_session::close_interactive_ssh_terminal,
             ssh_session::execute_ssh_command,
+            ssh_session::execute_interactive_ssh_command,
             ssh_session::close_ssh_session,
             ai::chat_completion,
             ai::chat_completion_with_tools,
             ai::ai_ssh_chat,
-            append_debug_log
+            append_debug_log,
+            read_debug_log,
+            clear_debug_log
+            ,file_manager::list_local_directory
+            ,file_manager::read_local_file_base64
+            ,file_manager::write_local_file_base64
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show OpsNest", true, None::<&str>)?;
