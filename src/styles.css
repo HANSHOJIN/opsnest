@@ -546,8 +546,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   background: var(--bottom);
   transition: opacity 180ms ease;
 }
-.bottom-panel > .bottom-toolbar { position: absolute; top: 3px; right: 6px; z-index: 10; height: 30px; padding: 0; border: 0; background: transparent; pointer-events: none; }
-.bottom-panel > .bottom-toolbar .bottom-toolbar-actions { pointer-events: auto; }
+.bottom-panel > .bottom-toolbar { position: absolute; top: 3px; right: 6px; z-index: 40; height: 30px; padding: 0; border: 0; background: transparent; pointer-events: auto; }
 .bottom-panel > .empty-slot { height: calc(100% - 48px); }
 .bottom-collapse-button svg { transform: rotate(180deg); }
 

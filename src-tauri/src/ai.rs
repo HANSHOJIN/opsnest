@@ -280,7 +280,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     format!("命令执行失败，已把错误返回给模型继续恢复：{}", output),
                 );
             }
-            let verification = if verify_command.is_empty() {
+            let verification = if verify_command.is_empty() || verify_command == command {
                 None
             } else {
                 Some(

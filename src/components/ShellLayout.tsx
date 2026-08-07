@@ -149,7 +149,7 @@ function IconButton({ label, onClick, children, className = "" }: {
   className?: string;
 }) {
   return (
-    <button className={`icon-button ${className}`} onClick={onClick} title={label} aria-label={label}>
+    <button className={`icon-button ${className}`} type="button" onClick={(event) => { event.stopPropagation(); onClick(); }} title={label} aria-label={label}>
       {children}
     </button>
   );
@@ -508,7 +508,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
           </div>
           <section className="main-placeholder">{settingsOpen ? (settingsSection === "model" && modelSettings ? modelSettings : settings) : main}</section>
           {bottomOpen && <div className="resize-handle horizontal bottom-handle" role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="调整底部面板高度" onPointerDown={(e) => startDrag("bottom", e)} onKeyDown={(e) => resizeWithKeyboard("bottom", e)} />}
-          <section className={`bottom-panel ${bottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen} inert={!bottomOpen}>
+          <section className={`bottom-panel ${bottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen}>
             <div className="bottom-toolbar" aria-label={isEnglish ? "Terminal controls" : "终端窗口操作"}><div className="bottom-toolbar-actions"><IconButton label={isEnglish ? "Minimize terminal" : "最小化终端"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}><PanelBottomClose size={14} /></IconButton><IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={() => { if (bottomFullscreen) { setBottomFullscreen(false); setBottomHeight(BOTTOM_DEFAULT); } else { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); } }}><PanelBottomOpen size={14} /></IconButton></div></div>
             {bottom}
           </section>

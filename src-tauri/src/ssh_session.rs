@@ -70,6 +70,18 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
+fn prompt_seen_after_marker(text: &str, marker_end: usize) -> bool {
+    let suffix = text.get(marker_end..).unwrap_or_default().replace('\r', "");
+    let line = suffix.rsplit('\n').next().unwrap_or_default().trim_end();
+    if line.is_empty() {
+        return false;
+    }
+    // A PTY prompt is emitted by the shell after the marker command exits.
+    // Do not assume a timing window: wait for the prompt itself. This covers
+    // the common sh/bash/zsh forms without requiring us to rewrite PS1.
+    line.ends_with("#") || line.ends_with('$') || line.ends_with('>')
+}
+
 fn touch_activity(shell: &InteractiveShell) {
     shell.last_activity.store(unix_seconds(), Ordering::Relaxed);
 }
@@ -504,7 +516,11 @@ pub async fn run_interactive_command(
     {
         let writer = shell.writer.lock().await;
         writer
-            .data_bytes(format!("{}\nprintf '\\n{}\\n'\r", command.trim(), marker).into_bytes())
+            // Keep the marker on its own line without injecting a leading
+            // blank line or a second carriage-return command. The previous
+            // `printf '\nmarker\n'\r` sequence made the PTY redraw an extra
+            // prompt after otherwise simple commands.
+            .data_bytes(format!("{}\nprintf '%s\\n' '{}'\n", command.trim(), marker).into_bytes())
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -519,12 +535,12 @@ pub async fn run_interactive_command(
             .to_vec();
         let text = String::from_utf8_lossy(&data).into_owned();
         if let Some(index) = text.find(&marker) {
-            // The shell writes the marker before it writes the next real
-            // prompt. Give the PTY reader a short grace period so that the
-            // prompt is delivered to the terminal before the caller renders
-            // its completion status. We never synthesize a prompt here.
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            return Ok(text[..index].to_string());
+            let marker_end = index + marker.len();
+            if prompt_seen_after_marker(&text, marker_end) {
+                // Return only command output. The prompt remains in the PTY
+                // stream and is rendered once by the terminal listener.
+                return Ok(text[..index].to_string());
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return Err("Interactive command timed out".into());
