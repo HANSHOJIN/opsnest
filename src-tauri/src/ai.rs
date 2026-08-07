@@ -205,6 +205,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
     let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。");
     let system = format!("{system}\n共享终端黑板（最近事件）：\n{board_context}\n");
+    // The PTY output is already visible in the xterm surface. Keep replies
+    // focused on interpretation and next steps instead of copying a full
+    // directory listing or command transcript into the green AI channel.
+    let system = format!(
+        "{system}\nTerminal output is visible to the user in real time. Do not repeat raw command output, file listings, prompts, or banners unless the user explicitly asks for a quotation. If a read-only tool result already answers the request (for example ls, pwd, df, or system status), return no summary text; only report errors, anomalies, or an actionable conclusion."
+    );
     let mut messages = vec![
         serde_json::json!({"role":"system","content":system}),
         serde_json::json!({"role":"user","content":request.prompt}),

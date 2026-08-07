@@ -70,18 +70,6 @@ fn unix_seconds() -> u64 {
         .as_secs()
 }
 
-fn prompt_seen_after_marker(text: &str, marker_end: usize) -> bool {
-    let suffix = text.get(marker_end..).unwrap_or_default().replace('\r', "");
-    let line = suffix.rsplit('\n').next().unwrap_or_default().trim_end();
-    if line.is_empty() {
-        return false;
-    }
-    // A PTY prompt is emitted by the shell after the marker command exits.
-    // Do not assume a timing window: wait for the prompt itself. This covers
-    // the common sh/bash/zsh forms without requiring us to rewrite PS1.
-    line.ends_with("#") || line.ends_with('$') || line.ends_with('>')
-}
-
 fn touch_activity(shell: &InteractiveShell) {
     shell.last_activity.store(unix_seconds(), Ordering::Relaxed);
 }
@@ -516,11 +504,14 @@ pub async fn run_interactive_command(
     {
         let writer = shell.writer.lock().await;
         writer
-            // Keep the marker on its own line without injecting a leading
-            // blank line or a second carriage-return command. The previous
-            // `printf '\nmarker\n'\r` sequence made the PTY redraw an extra
-            // prompt after otherwise simple commands.
-            .data_bytes(format!("{}\nprintf '%s\\n' '{}'\n", command.trim(), marker).into_bytes())
+            // Emit a self-contained completion record. The command's exit
+            // code is captured before the marker, so completion never depends
+            // on a prompt arriving within an arbitrary timing window.
+            // Keep the command and completion marker in one shell input line.
+            // Sending them as two lines makes an interactive shell print a
+            // prompt after the command and another prompt after the marker,
+            // which leaks duplicate prompts into the terminal blackboard.
+            .data_bytes(format!("{}; rc=$?; printf '{} rc=%s\\n' \"$rc\"\n", command.trim(), marker).into_bytes())
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -535,12 +526,10 @@ pub async fn run_interactive_command(
             .to_vec();
         let text = String::from_utf8_lossy(&data).into_owned();
         if let Some(index) = text.find(&marker) {
-            let marker_end = index + marker.len();
-            if prompt_seen_after_marker(&text, marker_end) {
-                // Return only command output. The prompt remains in the PTY
-                // stream and is rendered once by the terminal listener.
-                return Ok(text[..index].to_string());
-            }
+            // Return only command output. The marker line is the protocol
+            // boundary; the following shell prompt remains in the PTY stream
+            // and is rendered once by the terminal listener.
+            return Ok(text[..index].trim_end_matches(['\r', '\n']).to_string());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err("Interactive command timed out".into());

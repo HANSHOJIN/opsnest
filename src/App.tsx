@@ -9,6 +9,8 @@ import { iconCandidates, iconDirectory, remoteIconUrl } from "./services/iconCat
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { listen } from "@tauri-apps/api/event";
+import { ImeGate } from "./features/terminal/ime-gate";
+import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -900,8 +902,9 @@ function TerminalWorkspace({ server, servers, model, onConnectionState }: { serv
   };
   return <><div className="terminal-workspace"><div className="terminal-tabs">{tabs.map((item) => <div key={item.id} className={`terminal-tab ${item.id === focused.id ? "is-active" : ""}`}><button type="button" onClick={() => setFocusedId(item.id)}><TerminalGlyph size={14} strokeWidth={1.8} /><span>{item.name}</span></button><button className="terminal-tab-close" type="button" onClick={() => closeTab(item.id)} aria-label={`关闭 ${item.name}`}><X size={12} /></button></div>)}<button className="terminal-tab-add" type="button" onClick={() => { const next = servers.find((item) => !tabIds.includes(item.id)); if (next) { setTabIds((current) => [...current, next.id]); setFocusedId(next.id); } }} aria-label="新建 SSH 连接">+</button></div>{tabs.length > 0 && <InteractiveTerminalPanel key={focused.id} server={focused} model={model} onConnectionState={onConnectionState} />}</div>{closeTarget && <div className="rename-modal-backdrop" role="presentation"><section className="rename-modal terminal-close-modal" role="dialog" aria-modal="true" aria-labelledby="terminal-close-title"><h2 id="terminal-close-title">关闭 {closeTarget.name} 的 SSH 终端？</h2><p>关闭后会断开当前 SSH 连接；聊天记录仍会保存在任务记录中。</p><div className="rename-modal-actions"><button className="secondary" type="button" onClick={() => setCloseTarget(null)}>取消</button><button className="primary" type="button" onClick={confirmCloseTab}>确定</button></div></section></div>}</>;
 }
-const SHELL_COMMANDS = new Set(["cd", "ls", "pwd", "cat", "echo", "printf", "clear", "history", "find", "grep", "sed", "awk", "head", "tail", "less", "more", "sort", "uniq", "cut", "xargs", "tee", "touch", "mkdir", "cp", "mv", "rm", "ln", "chmod", "chown", "sudo", "apt", "apt-get", "apk", "yum", "dnf", "pacman", "brew", "docker", "podman", "systemctl", "service", "journalctl", "ps", "top", "htop", "kill", "df", "du", "free", "uname", "hostname", "whoami", "id", "env", "export", "source", "set", "ssh", "scp", "curl", "wget", "tar", "zip", "unzip", "git", "npm", "pnpm", "yarn", "pip", "python", "python3", "node", "go", "cargo", "make", "cmake", "java", "php", "ruby", "perl", "openssl", "vim", "vi", "nano", "tmux", "screen", "reboot", "shutdown"]);
+const SHELL_COMMANDS = new Set(["cd", "ls", "pwd", "cat", "echo", "printf", "clear", "history", "find", "grep", "sed", "awk", "head", "tail", "less", "more", "sort", "uniq", "cut", "xargs", "tee", "touch", "mkdir", "cp", "mv", "rm", "ln", "chmod", "chown", "sudo", "apt", "apt-get", "apk", "yum", "dnf", "pacman", "brew", "docker", "podman", "systemctl", "service", "journalctl", "ps", "top", "htop", "kill", "df", "du", "free", "uname", "hostname", "whoami", "id", "env", "export", "source", "set", "ssh", "scp", "curl", "wget", "tar", "zip", "unzip", "git", "npm", "pnpm", "yarn", "pip", "python", "python3", "node", "go", "cargo", "make", "cmake", "java", "php", "ruby", "perl", "openssl", "vim", "vi", "nano", "tmux", "screen", "hermes", "reboot", "shutdown"]);
 const RISKY_SHELL_PARTS = ["sudo ", "rm ", "mv ", "chmod ", "chown ", "systemctl start", "systemctl stop", "systemctl restart", "systemctl enable", "systemctl disable", "service start", "service stop", "service restart", "reboot", "shutdown", "docker rm", "docker stop", "docker restart", "apt install", "apt remove", "apt purge", "apt upgrade", "dnf install", "yum install"];
+type SessionContextItem = { role: "user_command" | "result" | "user_question" | "ai_reply" | "tool_result"; content: string };
 function looksLikeShellCommand(input: string) {
   const value = input.trim();
   if (!value) return false;
@@ -916,6 +919,7 @@ function isRiskyShellCommand(input: string) {
   return RISKY_SHELL_PARTS.some((part) => value.includes(part));
 }
 const terminalBuffers = new Map<string, string>();
+const remoteCommandCache = new Map<string, boolean>();
 const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
   return `opsnest-terminal-buffer:${sessionId}`;
@@ -953,6 +957,9 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
   const promptRef = React.useRef("");
   const promptVersionRef = React.useRef(0);
   const pendingRef = React.useRef<string | null>(null);
+  const sessionContextRef = React.useRef<SessionContextItem[]>([]);
+  const activeCommandRef = React.useRef<string | null>(null);
+  const activeCommandOutputRef = React.useRef("");
   const approveHandlerRef = React.useRef<((command: string) => void) | null>(null);
   const [pendingApproval, setPendingApproval] = React.useState<string | null>(null);
   // Each mounted terminal gets its own backend session. Reusing the server id
@@ -966,7 +973,10 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
     void writeDebugLog("debug", "AI-SSH terminal mounted", { serverId: server.id });
     const term = new Terminal({ convertEol: true, cursorBlink: true, scrollback: 10000, fontSize: 13, lineHeight: 1.35, fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace", theme: { background: "#0d0d0f", foreground: "#e7e7e7", cursor: "#f5f5f5", selectionBackground: "#39404a" } });
     const fit = new FitAddon(); term.loadAddon(fit); term.open(host); fit.fit(); termRef.current = term; term.focus();
+    const focusRequested = () => term.focus();
+    window.addEventListener("opsnest-focus-ssh-terminal", focusRequested);
     let promptSeenSinceOperation = false;
+    let renderEndsWithNewline = false;
     const focusTerminal = () => term.focus();
     host.addEventListener("mousedown", focusTerminal);
     const render = (data: string, persist = true) => {
@@ -974,13 +984,29 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       // carriage return to the remote shell just to redraw it: bash treats
       // that as an empty command and emits a duplicate prompt.
       const plain = data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+      const promptText = plain.replace(/\r/g, "\n");
       if (persist) rememberTerminalOutput(server.id, data);
-      const prompt = plain.match(/(?:^|\r?\n)([^\r\n]{1,160}(?:#|\$)\s?)$/);
+      const prompt = promptText.match(/(?:^|\n)([^\n]{1,160}(?:#|\$)\s?)$/);
        if (prompt?.[1] && !prompt[1].includes("AI 正在处理")) { promptRef.current = prompt[1]; promptVersionRef.current += 1; promptSeenSinceOperation = true; }
+      if (activeCommandRef.current && plain.trim()) {
+        activeCommandOutputRef.current += `${promptText}\n`;
+        if (prompt?.[1]) {
+          const result = activeCommandOutputRef.current.replace(prompt[1], "").trim();
+          sessionContextRef.current.push({ role: "result", content: result.slice(-8000) });
+          activeCommandRef.current = null;
+          activeCommandOutputRef.current = "";
+        }
+      }
       if (data.includes("AI 正在处理") || data.includes("• ") || (prompt?.[1] && data.includes(prompt[1]))) {
         void writeDebugLog("debug", "AI-SSH terminal render", { serverId: server.id, length: data.length, hasProcessing: data.includes("AI 正在处理"), hasPrompt: Boolean(prompt?.[1]) });
       }
-      term.write(data, () => { term.scrollToBottom(); term.refresh(0, term.rows - 1); });
+      // Several sources (Enter handling, AI status, and PTY output) can each
+      // prepend CRLF for the same line break. Collapse only a boundary CRLF
+      // so the terminal keeps one real line break without hiding shell data.
+      let displayData = data;
+      if (renderEndsWithNewline && displayData.startsWith("\r\n")) displayData = displayData.slice(2);
+      renderEndsWithNewline = /(?:\r\n|\n)$/.test(displayData);
+      term.write(displayData, () => { term.scrollToBottom(); term.refresh(0, term.rows - 1); });
     };
     const previous = terminalBuffers.get(server.id); if (previous) render(previous, false);
     const at = server.host.indexOf("@"); const username = at > 0 ? server.host.slice(0, at) : "root"; const hostName = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -997,7 +1023,40 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       // stale visual cell after a plain backspace sequence.
       term.write(`\r\x1b[2K${promptRef.current}${inputRef.current}`, () => term.refresh(0, term.rows - 1));
     };
+    let processInputData: (data: string) => void = () => undefined;
+    const imeGate = new ImeGate(host, (data) => processInputData(data));
+    const copyTerminalSelection = async () => {
+      const selection = term.getSelection();
+      if (!selection) return;
+      try {
+        await navigator.clipboard.writeText(selection);
+      } catch {
+        // WebView clipboard permissions can be unavailable in a portable build.
+        // Keep Ctrl+C useful with the same temporary textarea fallback used by
+        // other desktop web surfaces.
+        const textarea = document.createElement("textarea");
+        textarea.value = selection;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try { document.execCommand("copy"); } finally { textarea.remove(); }
+      }
+      term.clearSelection();
+    };
     term.attachCustomKeyEventHandler((event) => {
+      if (!imeGate.handleKeyEvent(event)) return false;
+      if (event.type === "keydown" && (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c" && !event.isComposing) {
+        // A selection means copy only. Without a selection xterm emits ETX
+        // through onData, which is forwarded to the remote PTY below.
+        if (term.hasSelection()) {
+          event.preventDefault();
+          void copyTerminalSelection();
+          return false;
+        }
+        return true;
+      }
       if (event.type === "keydown" && event.key === "Backspace" && !event.isComposing) {
         event.preventDefault();
         keyBackspaceHandled = true;
@@ -1014,30 +1073,57 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       // prompt; adding a newline here would also leave a blank line before it.
       term.write(`\r\x1b[2K${promptRef.current}`, () => term.refresh(0, term.rows - 1));
     };
+    const schedulePromptRecovery = () => {
+      // The PTY prompt can arrive in a later SSH event than the AI response.
+      // Check the actual xterm cursor line instead of a stale per-operation
+      // flag; a prompt may have arrived before the AI reply was rendered.
+      window.setTimeout(() => {
+        if (disposed || !promptRef.current) return;
+        const line = term.buffer.active.getLine(term.buffer.active.cursorY)?.translateToString(true) ?? "";
+        if (!line.includes(promptRef.current.trim())) refreshPrompt();
+      }, 350);
+    };
     const askAi = async (prompt: string, approved: boolean) => {
       const currentModel = modelRef.current;
       void writeDebugLog("debug", "AI-SSH input received", { serverId: server.id, promptLength: prompt.length, approved });
       if (!currentModel.baseUrl.trim() || !currentModel.model.trim()) { render("\r\n\x1b[31mAI 模型尚未配置\x1b[0m\r\n"); refreshPrompt(); return; }
        promptSeenSinceOperation = false;
        render("\r\n\x1b[38;5;114m• AI 正在处理…\x1b[0m\r\n");
+       sessionContextRef.current.push({ role: "user_question", content: prompt });
        void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `用户: ${prompt}` }).catch(() => undefined);
       try {
         void writeDebugLog("debug", "AI-SSH model request started", { serverId: server.id, model: currentModel.model });
-        const raw = await invoke<string>("ai_ssh_chat", { request: { baseUrl: currentModel.baseUrl, apiKey: currentModel.apiKey, model: currentModel.model, sessionId: sessionRef.current, prompt, approved, context: `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}` } });
+        const context = [
+          `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}`,
+          ...sessionContextRef.current.slice(-50).map((item) => `[${item.role}] ${item.content}`),
+        ].join("\n").slice(-12000);
+        const raw = await invoke<string>("ai_ssh_chat", { request: { baseUrl: currentModel.baseUrl, apiKey: currentModel.apiKey, model: currentModel.model, sessionId: sessionRef.current, prompt, approved, context } });
         const result = JSON.parse(raw) as { status?: string; command?: string; content?: string; summary?: string; executed?: Array<{ command: string; output: string }> };
         void writeDebugLog("debug", "AI-SSH model response received", { serverId: server.id, status: result.status ?? "unknown", hasContent: Boolean(result.content), executed: result.executed?.length ?? 0 });
-        if (result.status === "approval_required" && result.command) { pendingRef.current = result.command; setPendingApproval(result.command); render(`\r\n\x1b[38;5;220m• AI 建议执行：${result.command}\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI 待确认命令: ${result.command}` }).catch(() => undefined); return; }
+        if (result.status === "approval_required" && result.command) {
+          const command = result.command;
+          void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI 请求确认命令: ${command}` }).catch(() => undefined);
+          const approved = window.confirm(`AI 请求执行以下命令：\n\n${command}\n\n确认执行？`);
+          if (approved) {
+            pendingRef.current = null;
+            setPendingApproval(null);
+            approveHandlerRef.current?.(command);
+          } else {
+            render("\r\n\x1b[38;5;220m• 已取消 AI 命令执行\x1b[0m\r\n");
+          }
+          return;
+        }
         // The command and its output already arrive through the live PTY event.
         // Rendering the returned tool result again duplicates prompts and banners.
-        if (result.executed?.length) for (const item of result.executed) { void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${item.command}\n${item.output}` }).catch(() => undefined); }
-        if (result.content) { render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI: ${result.content}` }).catch(() => undefined); }
+        if (result.executed?.length) for (const item of result.executed) { sessionContextRef.current.push({ role: "tool_result", content: `$ ${item.command}\n${item.output}` }); void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${item.command}\n${item.output}` }).catch(() => undefined); }
+        if (result.content) { sessionContextRef.current.push({ role: "ai_reply", content: result.content }); render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI: ${result.content}` }).catch(() => undefined); }
         pendingRef.current = null;
         // The PTY may emit its prompt in a separate chunk. Restore it locally
         // after every AI conclusion without sending another remote command.
         // A tool execution waits for the real PTY prompt in Rust, so do not
         // redraw it locally (that would create a second prompt). Only plain
         // AI replies need the local fallback.
-        if (!result.executed?.length && !promptSeenSinceOperation) refreshPrompt();
+        schedulePromptRecovery();
       } catch (reason) { void writeDebugLog("error", "AI-SSH request failed", { serverId: server.id, error: String(reason) }); render(`\r\n\x1b[31mAI-SSH 请求失败：${String(reason)}\x1b[0m\r\n`); refreshPrompt(); }
     };
     const executeApprovedCommand = async (command: string) => {
@@ -1067,8 +1153,12 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       markerCarry = "";
       const markerStart = text.indexOf(prefix);
       if (markerStart >= 0) {
-        const markerEnd = text.indexOf("__", markerStart + prefix.length);
-        if (markerEnd >= 0) text = `${text.slice(0, markerStart)}${text.slice(markerEnd + 2)}`;
+        // The completion record is one whole line (`marker rc=N`). Remove
+        // that line only; anything after it, including the real shell prompt,
+        // must remain visible. Waiting for the line ending also handles a
+        // marker split across multiple SSH output chunks.
+        const lineEnd = text.indexOf("\n", markerStart);
+        if (lineEnd >= 0) text = `${text.slice(0, markerStart)}${text.slice(lineEnd + 1)}`;
         else { markerCarry = text.slice(markerStart); text = text.slice(0, markerStart); }
       } else {
         for (let length = Math.min(prefix.length - 1, text.length); length > 0; length -= 1) {
@@ -1087,31 +1177,79 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       .then((dispose) => { if (disposed) { dispose(); return null; } unlisten = dispose; intentionallyClosedSessions.delete(sessionRef.current); return invoke<boolean>("open_interactive_ssh_terminal", { request, sessionId: sessionRef.current }); })
       .then((created) => { if (created === null) return; if (disposed) { if (created) void invoke("close_interactive_ssh_terminal", { sessionId: sessionRef.current }); return; } window.dispatchEvent(new CustomEvent("opsnest-server-connection-state", { detail: { serverId: server.id, connected: true } })); })
       .catch((reason) => { if (disposed) return; window.dispatchEvent(new CustomEvent("opsnest-server-connection-state", { detail: { serverId: server.id, connected: false } })); setError(String(reason)); render(`\r\n\x1b[31mSSH connection failed: ${String(reason)}\x1b[0m\r\n`); });
-    const input = term.onData((data) => {
+    const dispatcher = new TerminalDispatcher({
+      writeCommand: (command) => { void write(`${command}\r`); },
+      askAi: (prompt) => { void askAi(prompt, false); },
+      approve: (command) => { pendingRef.current = null; setPendingApproval(null); approveHandlerRef.current?.(command); },
+      pendingCommand: () => pendingRef.current,
+      looksLikeCommand: looksLikeShellCommand,
+      probeCommand: async (line) => {
+        // Avoid probing ordinary one-line conversation. Multi-word input with
+        // an executable-looking first token is the common shape of a newly
+        // installed CLI (for example `hermes chat`).
+        const first = line.trim().split(/\s+/, 1)[0] ?? "";
+        if (!line.includes(" ") || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(first)) return false;
+        const cacheKey = `${server.id}:${first.toLowerCase()}`;
+        const cached = remoteCommandCache.get(cacheKey);
+        if (cached !== undefined) return cached;
+        let probeSession: string | undefined;
+        try {
+          const opened = await invoke<{ sessionId: string }>("open_ssh_session", { request });
+          probeSession = opened.sessionId;
+          const output = await invoke<string>("execute_ssh_command", { sessionId: probeSession, command: `command -v ${shellQuote(first)}`, approved: true });
+          const found = Boolean(output.trim());
+          // Cache only positive discoveries. A negative result may simply be
+          // the install-before-PATH-refresh race this probe is meant to fix.
+          if (found) remoteCommandCache.set(cacheKey, true);
+          return found;
+        } catch {
+          return false;
+        } finally {
+          if (probeSession) void invoke("close_ssh_session", { sessionId: probeSession });
+        }
+      },
+      isRiskyCommand: isRiskyShellCommand,
+      confirmRisky: (command) => window.confirm(`此命令可能改变服务器状态：\n\n${command}\n\n确认直接执行？`),
+      onCommand: (command) => {
+        sessionContextRef.current.push({ role: "user_command", content: command });
+        activeCommandRef.current = command;
+        activeCommandOutputRef.current = "";
+        void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${command}` }).catch(() => undefined);
+      },
+    });
+    processInputData = (data) => {
       if (data === "\r" || data === "\n") {
         const line = inputRef.current.trim(); inputRef.current = ""; render("\r\n");
         if (!line) { void write("\r"); return; }
-        if (pendingRef.current && line.toLowerCase() === "approve") { const approvedCommand = pendingRef.current; pendingRef.current = null; setPendingApproval(null); approveHandlerRef.current?.(approvedCommand); return; }
-        const forcedAi = line.startsWith("/ai ");
-        const command = line.startsWith("/cmd ") ? line.slice(5).trim() : line;
-        if (!forcedAi && looksLikeShellCommand(line)) {
-          if (isRiskyShellCommand(command) && !window.confirm(`此命令可能改变服务器状态：\n\n${command}\n\n确认直接执行？`)) return;
-          void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${command}` }).catch(() => undefined);
-          void write(`${command}\r`);
-          return;
-        }
-        void askAi(forcedAi ? line.slice(4).trim() : line, false);
+        void dispatcher.dispatch(line);
         return;
       }
-       if (data === "\x7f" || data === "\b" || data === "\x1b[3~") { if (!keyBackspaceHandled) eraseInputCharacter(); keyBackspaceHandled = false; return; }
+      if (data === "\x7f" || data === "\b" || data === "\x1b[3~") { if (!keyBackspaceHandled) eraseInputCharacter(); keyBackspaceHandled = false; return; }
        inputRef.current += data;
        // The remote PTY runs with echo disabled because natural-language input
        // is intercepted by AI-SSH. Echo the local line explicitly and refresh
        // the viewport after xterm's write queue drains; this avoids invisible
        // keystrokes when output and input arrive in the same frame.
        term.write(data, () => { term.scrollToBottom(); term.refresh(0, term.rows - 1); });
+    };
+    const input = term.onData((data) => {
+      if (data === "\x03") {
+        // Ctrl+C without an xterm selection is a real interrupt, not an AI
+        // message. Clear the local editable line and send ETX to the PTY.
+        inputRef.current = "";
+        void write("\x03");
+        return;
+      }
+      const accepted = imeGate.accept(data);
+      if (accepted !== null) processInputData(accepted);
     });
     const resize = () => { fit.fit(); void invoke("resize_interactive_ssh_terminal", { sessionId: sessionRef.current, columns: term.cols, rows: term.rows }).catch(() => undefined); };
+    const layoutChanged = () => {
+      resize();
+      term.focus();
+      window.setTimeout(() => { if (!disposed) { resize(); term.focus(); } }, 80);
+    };
+    window.addEventListener("opsnest-terminal-layout-changed", layoutChanged);
     const hostResizeObserver = new ResizeObserver(() => { resize(); term.scrollToBottom(); });
     hostResizeObserver.observe(host);
     window.addEventListener("resize", resize); resize();
@@ -1123,7 +1261,10 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       unlisten?.();
       hostResizeObserver.disconnect();
       window.removeEventListener("resize", resize);
+      window.removeEventListener("opsnest-terminal-layout-changed", layoutChanged);
+      window.removeEventListener("opsnest-focus-ssh-terminal", focusRequested);
       host.removeEventListener("mousedown", focusTerminal);
+      imeGate.dispose();
       const closingSession = sessionRef.current;
       // Persist the shared blackboard, but keep the PTY alive while the user
       // switches tabs. It is closed only by the explicit tab-close handler.

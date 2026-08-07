@@ -316,7 +316,10 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       if (target?.closest(".server-profile-banner .primary, .open-terminal-action, .open-manager-action")) setBottomOpen(true);
     };
     document.addEventListener("click", openTerminal, true);
-    const openSsh = () => setBottomOpen(true);
+    const openSsh = () => {
+      setBottomOpen(true);
+      window.setTimeout(() => window.dispatchEvent(new CustomEvent("opsnest-focus-ssh-terminal")), 0);
+    };
     const openManager = () => setBottomOpen(true);
     const closeSsh = () => { setBottomFullscreen(false); setBottomOpen(false); };
     const closeFiles = () => setRightOpen(false);
@@ -335,7 +338,9 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       if (!active) return;
       setLeftOpen(saved.leftOpen ?? true);
       setRightOpen(saved.rightOpen ?? false);
-      setBottomOpen(saved.bottomOpen ?? false);
+      // Always start with the bottom panel collapsed. Its open state is a
+      // transient session choice and should not surprise the user on launch.
+      setBottomOpen(false);
       setLeftWidth(saved.leftWidth ?? LEFT_DEFAULT);
       setRightWidth(saved.rightWidth ?? RIGHT_DEFAULT);
       setBottomHeight(saved.bottomHeight ?? BOTTOM_DEFAULT);
@@ -451,6 +456,17 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     if (!layoutLoaded) return;
     void writePortableJson(LAYOUT_FILE, { leftOpen, rightOpen, bottomOpen, leftWidth, rightWidth, bottomHeight } satisfies LayoutState).catch(() => undefined);
   }, [layoutLoaded, leftOpen, rightOpen, bottomOpen, leftWidth, rightWidth, bottomHeight]);
+
+  // xterm measures its host while the grid is still animating. Notify the
+  // mounted terminal after fullscreen/height changes so it can fit and place
+  // the input cursor against the final viewport instead of the old bounds.
+  useEffect(() => {
+    if (!bottomOpen) return;
+    const timers = [0, 120, 280].map((delay) => window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("opsnest-terminal-layout-changed"));
+    }, delay));
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [bottomOpen, bottomFullscreen, bottomHeight]);
 
   const layoutStyle = {
     "--left-width": leftOpen ? `${leftWidth}px` : "0px",
