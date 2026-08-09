@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { readPortableJson, writePortableJson } from "../services/portableStorage";
@@ -93,9 +94,10 @@ export function ShellNavigation({ language = "zh-CN", selected, onSelect, server
 
 function ServerNavGroup({ label, servers, selected, onSelect, onTogglePin, onRename = (id) => onSelect?.(`__rename:${id}`), onToggleConnection = (id) => onSelect?.(`__connect:${id}`), onDelete = (id) => onSelect?.(`__delete:${id}`), onOpenSsh, addLabel }: { label: string; servers: ServerSummary[]; selected?: string | null; onSelect?: (id: string) => void; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void; addLabel?: string }) {
   const [context, setContext] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [open, setOpen] = useState(true);
   useEffect(() => { const close = () => setContext(null); window.addEventListener("click", close); return () => window.removeEventListener("click", close); }, []);
   const target = context ? servers.find((server) => server.id === context.id) : undefined;
-  return <section className="server-nav-group"><div className="server-nav-heading"><span>{label}</span>{addLabel && <button className="nav-group-action" type="button" onClick={() => onSelect?.("server-add")} aria-label={addLabel}><Plus size={15} /></button>}</div>{servers.map((server) => <div className="server-nav-row" key={server.id}><button className={`nav-subitem ${selected === `server-${server.id}` ? "is-selected" : ""}`} type="button" onContextMenu={(event) => { event.preventDefault(); setContext({ id: server.id, x: event.clientX, y: event.clientY }); }} onClick={() => onSelect?.(`server-${server.id}`)}><span className={`server-status-dot ${server.connected ? "is-connected" : "is-disconnected"}`} /><span>{server.name}</span></button><button className={`server-pin-button ${server.pinned ? "is-pinned" : ""}`} type="button" onClick={() => onTogglePin?.(server.id)} aria-label={server.pinned ? "取消置顶" : "置顶"}><Pin size={13} /></button></div>)}{context && target && <div className="server-context-menu" style={{ left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}><button type="button" onClick={() => { onTogglePin?.(target.id); setContext(null); }}>{target.pinned ? "取消置顶" : "置顶"}</button><button type="button" onClick={() => { onRename?.(target.id); setContext(null); }}>编辑</button><button type="button" onClick={() => { onToggleConnection?.(target.id); setContext(null); }}>{target.connected ? "断开" : "连接"}</button><button type="button" onClick={() => { onSelect?.(`server-${target.id}`); onOpenSsh?.(target.id); setContext(null); }}>SSH</button><button className="is-danger" type="button" onClick={() => { onDelete?.(target.id); setContext(null); }}>删除</button></div>}</section>;
+  return <section className={`server-nav-group ${open ? "is-open" : "is-collapsed"}`}><div className="server-nav-heading"><button className="server-nav-heading-toggle" type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}><span>{label}</span><ChevronDown className="server-nav-heading-chevron" size={13} /></button>{addLabel && <button className="nav-group-action" type="button" onClick={() => onSelect?.("server-add")} aria-label={addLabel}><Plus size={15} /></button>}</div><div className="server-nav-group-content"><div className="server-nav-group-content-inner">{servers.map((server) => <div className="server-nav-row" key={server.id}><button className={`nav-subitem ${selected === `server-${server.id}` ? "is-selected" : ""}`} type="button" onContextMenu={(event) => { event.preventDefault(); setContext({ id: server.id, x: event.clientX, y: event.clientY }); }} onClick={() => onSelect?.(`server-${server.id}`)}><span className={`server-status-dot ${server.connected ? "is-connected" : "is-disconnected"}`} /><span>{server.name}</span></button><button className={`server-pin-button ${server.pinned ? "is-pinned" : ""}`} type="button" onClick={() => onTogglePin?.(server.id)} aria-label={server.pinned ? "取消置顶" : "置顶"}><Pin size={13} /></button></div>)}</div></div>{context && target && <div className="server-context-menu" style={{ left: context.x, top: context.y }} onClick={(event) => event.stopPropagation()}><button type="button" onClick={() => { onTogglePin?.(target.id); setContext(null); }}>{target.pinned ? "取消置顶" : "置顶"}</button><button type="button" onClick={() => { onRename?.(target.id); setContext(null); }}>编辑</button><button type="button" onClick={() => { onToggleConnection?.(target.id); setContext(null); }}>{target.connected ? "断开" : "连接"}</button><button type="button" onClick={() => { onSelect?.(`server-${target.id}`); onOpenSsh?.(target.id); setContext(null); }}>SSH</button><button className="is-danger" type="button" onClick={() => { onDelete?.(target.id); setContext(null); }}>删除</button></div>}</section>;
 }
 
 function LegacyServerNavGroup({ label, servers, selected, onSelect, onTogglePin, onRename, onToggleConnection, onDelete, addLabel }: { label: string; servers: ServerSummary[]; selected?: string | null; onSelect?: (id: string) => void; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void; addLabel?: string }) {
@@ -123,7 +125,10 @@ function NavGroup({ label, icon, open, onToggle, items, onSelect, groupId, selec
 }
 
 const LEFT_DEFAULT = 260;
-const RIGHT_DEFAULT = 300;
+const RIGHT_NARROW = 320;
+const RIGHT_STANDARD = 420;
+const RIGHT_EXPANDED_THRESHOLD = 600;
+const RIGHT_DEFAULT = RIGHT_STANDARD;
 const BOTTOM_DEFAULT = 210;
 const MIN_SIDE = 190;
 const MIN_BOTTOM = 120;
@@ -140,6 +145,10 @@ type LayoutState = {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function snapRightWidth(value: number) {
+  return value < (RIGHT_NARROW + RIGHT_STANDARD) / 2 ? RIGHT_NARROW : RIGHT_STANDARD;
 }
 
 function IconButton({ label, onClick, children, className = "" }: {
@@ -202,13 +211,13 @@ function SidebarFooter({ onSettings, language }: { onSettings: () => void; langu
           <CircleHelp size={15} strokeWidth={1.7} />
         </button>
       </div>
-      {aboutOpen && (
+      {aboutOpen && createPortal((
         <div className="about-backdrop" role="presentation" onMouseDown={() => setAboutOpen(false)}>
           <section className="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title" onMouseDown={(event) => event.stopPropagation()}>
             <button className="about-close" type="button" aria-label={isEnglish ? "Close" : "关闭"} onClick={() => setAboutOpen(false)}><X size={15} /></button>
             <div className="about-mark">ON</div>
             <h2 id="about-title">OpsNest</h2>
-            <p className="about-version">OpsNest 0.2.0-alpha.1</p>
+            <p className="about-version">OpsNest 0.2.0-alpha.3</p>
             <p className="about-credit">{isEnglish ? "AI-integrated server management." : "集成 AI 的服务器管理工具。"}</p>
             <a className="about-link" href="https://github.com/HANSHOJIN/opsnest" target="_blank" rel="noreferrer">github.com/HANSHOJIN/opsnest</a>
             <p className="about-license">{isEnglish ? "OpsNest is open source and free to use. Please keep the project name and source address when using it, so more people can discover the project. Thank you." : "OpsNest 是开源且免费的软件。使用或再发布时，请保留项目名称和源码地址，让更多人可以找到这个项目。谢谢。"}</p>
@@ -217,7 +226,7 @@ function SidebarFooter({ onSettings, language }: { onSettings: () => void; langu
             <p className="about-copyright">© 2026 OpsNest</p>
           </section>
         </div>
-      )}
+      ), document.body)}
     </div>
   );
 }
@@ -258,6 +267,8 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   const [isMaximized, setIsMaximized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<"appearance" | "model">("appearance");
+  const rightWidthRef = useRef(RIGHT_DEFAULT);
+  rightWidthRef.current = rightWidth;
   useEffect(() => {
     const windowHandle = getCurrentWindow();
     let disposed = false;
@@ -357,7 +368,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       // transient session choice and should not surprise the user on launch.
       setBottomOpen(false);
       setLeftWidth(saved.leftWidth ?? LEFT_DEFAULT);
-      setRightWidth(saved.rightWidth ?? RIGHT_DEFAULT);
+      setRightWidth(snapRightWidth(saved.rightWidth ?? RIGHT_DEFAULT));
       setBottomHeight(saved.bottomHeight ?? BOTTOM_DEFAULT);
       setLayoutLoaded(true);
     });
@@ -421,6 +432,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
         setRightFullscreenBottomOpen(false);
         setBottomOpen(false);
         setBottomFullscreen(false);
+        setRightWidth(RIGHT_STANDARD);
       }
       else {
         setBottomOpen(false);
@@ -455,10 +467,10 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       else if (event.key === "End") { setLeftOpen(true); setLeftWidth(420); }
       else handled = false;
     } else if (kind === "right") {
-      if (event.key === "ArrowLeft") setRightWidth((value) => clamp(value + step, MIN_SIDE, 440));
-      else if (event.key === "ArrowRight") setRightWidth((value) => clamp(value - step, MIN_SIDE, 440));
+      if (event.key === "ArrowLeft") setRightWidth((value) => clamp(value + step, RIGHT_NARROW, RIGHT_STANDARD));
+      else if (event.key === "ArrowRight") setRightWidth((value) => clamp(value - step, RIGHT_NARROW, RIGHT_STANDARD));
       else if (event.key === "Home") setRightOpen(false);
-      else if (event.key === "End") { setRightOpen(true); setRightWidth(440); }
+      else if (event.key === "End") { setRightOpen(true); setRightFullscreen(true); }
       else handled = false;
     } else {
       if (event.key === "ArrowUp") setBottomHeight((value) => clamp(value + step, MIN_BOTTOM, 600));
@@ -483,7 +495,14 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       if (dragging === "right") {
         const next = bounds.right - event.clientX;
         if (next < MIN_SIDE * 0.62) { setDragging(null); setRightOpen(false); }
-        else { setRightOpen(true); setRightWidth(clamp(next, MIN_SIDE, 440)); }
+        else {
+          setRightOpen(true);
+          setRightFullscreen(false);
+          // Follow the pointer continuously. The final width is snapped only
+          // when the pointer is released, so the panel does not jump between
+          // presets while dragging.
+          setRightWidth(clamp(next, RIGHT_NARROW, RIGHT_EXPANDED_THRESHOLD + 80));
+        }
       }
       if (dragging === "bottom") {
         const next = bounds.bottom - event.clientY;
@@ -497,7 +516,21 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
         }
       }
     };
-    const stop = () => setDragging(null);
+    const stop = () => {
+      if (dragging === "right") {
+        const width = rightWidthRef.current;
+        if (width >= RIGHT_EXPANDED_THRESHOLD) {
+          setRightFullscreen(true);
+          setRightFullscreenBottomOpen(false);
+          setBottomOpen(false);
+          setBottomFullscreen(false);
+        } else {
+          setRightFullscreen(false);
+          setRightWidth(snapRightWidth(width));
+        }
+      }
+      setDragging(null);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop, { once: true });
     window.addEventListener("pointercancel", stop, { once: true });
@@ -531,6 +564,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     "--right-width": rightOpen ? `${rightWidth}px` : "0px",
     "--bottom-height": bottomOpen ? `${bottomHeight}px` : "0px",
   } as React.CSSProperties;
+  const rightLayoutClass = rightFullscreen ? "right-layout-expanded" : rightWidth <= RIGHT_NARROW ? "right-layout-narrow" : "right-layout-standard";
 
   return (
     <div className="window-shell" style={layoutStyle}>
@@ -556,7 +590,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
           }}><X size={14} /></WindowButton>
         </div>
       </header>
-      <div ref={shellRef} className={`app-shell ${rightFullscreen ? "right-fullscreen" : ""} ${dragging ? `is-dragging drag-${dragging}` : ""}`}>
+      <div ref={shellRef} className={`app-shell ${rightFullscreen ? "right-fullscreen" : ""} ${rightLayoutClass} ${dragging ? `is-dragging drag-${dragging}` : ""}`}>
         <aside className={`panel left-panel ${leftOpen ? "is-open" : "is-closed"}`} aria-hidden={!leftOpen} inert={!leftOpen}>
           {settingsOpen ? (
             <SettingsSidebar onBack={() => setSettingsOpen(false)} language={language} section={settingsSection} onSectionChange={setSettingsSection} />

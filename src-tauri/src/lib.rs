@@ -438,6 +438,9 @@ pub fn run() {
             read_debug_log,
             clear_debug_log
             ,file_manager::list_local_directory
+            ,file_manager::list_remote_directory
+            ,file_manager::download_remote_file
+            ,file_manager::upload_remote_file
             ,file_manager::read_local_file_base64
             ,file_manager::write_local_file_base64
         ])

@@ -299,6 +299,25 @@ async fn connect(request: &SessionRequest) -> Result<Session, String> {
     Ok(session)
 }
 
+/// Opens a dedicated SFTP subsystem. File management must not share the
+/// interactive shell or emulate transfers with shell commands.
+pub async fn open_sftp_session(
+    request: &SessionRequest,
+) -> Result<russh_sftp::client::SftpSession, String> {
+    let session = connect(request).await?;
+    let channel = session
+        .channel_open_session()
+        .await
+        .map_err(|error| error.to_string())?;
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| error.to_string())?;
+    russh_sftp::client::SftpSession::new(channel.into_stream())
+        .await
+        .map_err(|error| format!("SFTP subsystem unavailable: {error}"))
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenSessionResult {

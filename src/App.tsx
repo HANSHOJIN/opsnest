@@ -1,6 +1,6 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Box, CircleGauge, Container, Database, Globe, Network, Server, SquareTerminal as TerminalGlyph, X } from "lucide-react";
+import { Box, ChevronDown, CircleGauge, Container, Database, Globe, Network, Server, SquareTerminal as TerminalGlyph, X } from "lucide-react";
 import ShellLayout, { ShellNavigation, type DiscoveredServiceSummary, type ServerSummary } from "./components/ShellLayout";
 import { ModelSettingsPanel } from "./components/ModelSettingsPanel";
 import { readPortableJson, writePortableJson } from "./services/portableStorage";
@@ -163,6 +163,7 @@ function FileManagerPanel({ server, servers, openSignal = 0, onEmpty }: { server
   const [showAddMenu, setShowAddMenu] = React.useState(false);
   const [selectedRemote, setSelectedRemote] = React.useState<RemoteFileEntry | null>(null);
   const [selectedLocal, setSelectedLocal] = React.useState<LocalFileEntry | null>(null);
+  const [localCollapsed, setLocalCollapsed] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [transfer, setTransfer] = React.useState<{ label: string; progress: number; rate: string } | null>(null);
   const activeServer = servers.find((item) => item.id === activeServerId) || server;
@@ -213,74 +214,117 @@ function FileManagerPanel({ server, servers, openSignal = 0, onEmpty }: { server
     return () => { add.removeEventListener("click", toggle, true); tabBar.querySelector(".file-manager-add-menu")?.remove(); };
   }, [showAddMenu, servers, openServerIds]);
 
-  const openSession = React.useCallback(async () => {
+  const connectionRequest = React.useCallback(async () => {
     const at = activeServer.host.indexOf("@");
     const username = at > 0 ? activeServer.host.slice(0, at) : "root";
     const host = at > 0 ? activeServer.host.slice(at + 1) : activeServer.host;
     const password = activeServer.password ?? await invoke<string | null>("load_server_credential", { serverId: activeServer.id }).catch(() => null);
-    return invoke<{ sessionId: string }>("open_ssh_session", { request: { host, port: activeServer.port, username, authMethod: activeServer.authMethod ?? "password", password, privateKeyPath: null, passphrase: null } });
+    return { host, port: activeServer.port, username, authMethod: activeServer.authMethod ?? "password", password, privateKeyPath: null, passphrase: null };
   }, [activeServer]);
 
+  const openSession = React.useCallback(async () => invoke<{ sessionId: string }>("open_ssh_session", { request: await connectionRequest() }), [connectionRequest]);
+
+  // Keep the refresh action on the same real SFTP path as the initial load.
+  // The file manager must never fall back to shell commands or Base64 parsing.
   const loadRemote = React.useCallback(async () => {
     setBusy(true);
-    let sessionId = "";
     try {
-      const opened = await openSession(); sessionId = opened.sessionId;
-      const raw = await invoke<string>("execute_ssh_command", { sessionId, command: `find ${shellQuote(remotePath)} -maxdepth 1 -mindepth 1 -printf '%f\\t%y\\t%s\\n' 2>/dev/null | sort`, approved: true });
-      const entries = raw.split(/\r?\n/).filter(Boolean).map((line) => { const [name, kind, size] = line.split("\t"); return { name, path: `${remotePath.replace(/\/$/, "")}/${name}`, isDir: kind === "d", size: Number(size) || 0 }; });
+      const entries = await invoke<RemoteFileEntry[]>("list_remote_directory", { request: await connectionRequest(), path: remotePath });
       setRemoteFiles(entries); setSelectedRemote(null);
-    } catch (error) { setRemoteFiles([]); } finally { if (sessionId) await invoke("close_ssh_session", { sessionId }).catch(() => undefined); setBusy(false); }
-  }, [openSession, remotePath]);
+    } catch { setRemoteFiles([]); } finally { setBusy(false); }
+  }, [connectionRequest, remotePath]);
+
+  // Directory reads use a dedicated Rust command so shell parsing and locale
+  // formatting cannot corrupt names or sizes in the file list.
+  const loadRemoteWithBackend = React.useCallback(async () => {
+    setBusy(true);
+    try {
+      const entries = await invoke<RemoteFileEntry[]>("list_remote_directory", { request: await connectionRequest(), path: remotePath });
+      setRemoteFiles(entries);
+      setSelectedRemote(null);
+    } catch {
+      setRemoteFiles([]);
+    } finally {
+      setBusy(false);
+    }
+  }, [connectionRequest, remotePath]);
 
   const loadLocal = React.useCallback(async () => {
-    try { const entries = await invoke<LocalFileEntry[]>("list_local_directory", { path: localPath || null }); setLocalFiles(entries); if (!localPath && entries[0]?.path) setLocalPath(entries[0].path.slice(0, Math.max(0, entries[0].path.lastIndexOf("\\")))); setSelectedLocal(null); } catch { setLocalFiles([]); }
+    try { const entries = await invoke<LocalFileEntry[]>("list_local_directory", { path: localPath || null }); setLocalFiles(entries); setSelectedLocal(null); } catch { setLocalFiles([]); }
   }, [localPath]);
 
-  React.useEffect(() => { if (openServerIds.length > 0) void loadRemote(); }, [loadRemote, openServerIds.length]);
+  React.useEffect(() => { if (openServerIds.length > 0) void loadRemoteWithBackend(); }, [loadRemoteWithBackend, openServerIds.length]);
   React.useEffect(() => { if (openServerIds.length > 0) void loadLocal(); }, [loadLocal, openServerIds.length]);
 
   const transferRemoteToLocal = async () => {
     if (!selectedRemote || selectedRemote.isDir || busy) return;
+    if (!localPath) {
+      setTransfer({ label: "下载失败：请先选择本地目标目录", progress: 0, rate: "" });
+      window.setTimeout(() => setTransfer(null), 6000);
+      return;
+    }
     setBusy(true); setTransfer({ label: `下载 ${selectedRemote.name}`, progress: 0, rate: "准备中" });
-    let sessionId = "";
     try {
-      const opened = await openSession(); sessionId = opened.sessionId;
+      const request = await connectionRequest();
       const started = performance.now();
-      const encoded = await invoke<string>("execute_ssh_command", { sessionId, command: `base64 -w0 -- ${shellQuote(selectedRemote.path)}`, approved: true });
-      setTransfer({ label: `下载 ${selectedRemote.name}`, progress: 75, rate: `${Math.max(1, Math.round(encoded.length / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s` });
       const target = `${localPath || "."}\\${selectedRemote.name}`;
-      await invoke("write_local_file_base64", { path: target, content: encoded.replace(/\s/g, "") });
-      setTransfer({ label: `下载 ${selectedRemote.name}`, progress: 100, rate: "完成" });
+      const size = await invoke<number>("download_remote_file", { request, remotePath: selectedRemote.path, localPath: target });
+      setTransfer({ label: `下载 ${selectedRemote.name}`, progress: 100, rate: `${Math.max(1, Math.round(size / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s` });
       await loadLocal();
-    } catch (error) { setTransfer({ label: `传输失败：${String(error)}`, progress: 0, rate: "" }); } finally { if (sessionId) await invoke("close_ssh_session", { sessionId }).catch(() => undefined); setBusy(false); window.setTimeout(() => setTransfer(null), 1400); }
+      window.setTimeout(() => setTransfer(null), 1400);
+    } catch (error) { setTransfer({ label: `下载失败：${String(error)}`, progress: 0, rate: "请检查连接、权限和目标目录" }); window.setTimeout(() => setTransfer(null), 6000); } finally { setBusy(false); }
   };
 
   const transferLocalToRemote = async () => {
     if (!selectedLocal || selectedLocal.isDir || busy) return;
     setBusy(true); setTransfer({ label: `上传 ${selectedLocal.name}`, progress: 0, rate: "准备中" });
-    let sessionId = "";
     try {
-      const opened = await openSession(); sessionId = opened.sessionId;
-      const encoded = await invoke<string>("read_local_file_base64", { path: selectedLocal.path });
+      const request = await connectionRequest();
       const target = `${remotePath.replace(/\/$/, "")}/${selectedLocal.name}`;
-      const chunkSize = 48000; const started = performance.now();
-      await invoke("execute_ssh_command", { sessionId, command: `: > ${shellQuote(target)}`, approved: true });
-      for (let offset = 0; offset < encoded.length; offset += chunkSize) {
-        const chunk = encoded.slice(offset, offset + chunkSize);
-        await invoke("execute_ssh_command", { sessionId, command: `printf '%s' '${chunk}' | base64 -d >> ${shellQuote(target)}`, approved: true });
-        const progress = Math.min(100, Math.round(((offset + chunk.length) / encoded.length) * 100));
-        const rate = `${Math.max(1, Math.round((offset + chunk.length) / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s`;
-        setTransfer({ label: `上传 ${selectedLocal.name}`, progress, rate });
-      }
-      await loadRemote();
-    } catch (error) { setTransfer({ label: `传输失败：${String(error)}`, progress: 0, rate: "" }); } finally { if (sessionId) await invoke("close_ssh_session", { sessionId }).catch(() => undefined); setBusy(false); window.setTimeout(() => setTransfer(null), 1400); }
+      const started = performance.now();
+      const size = await invoke<number>("upload_remote_file", { request, localPath: selectedLocal.path, remotePath: target });
+      setTransfer({ label: `上传 ${selectedLocal.name}`, progress: 100, rate: `${Math.max(1, Math.round(size / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s` });
+      await loadRemoteWithBackend();
+      window.setTimeout(() => setTransfer(null), 1400);
+    } catch (error) { setTransfer({ label: `上传失败：${String(error)}`, progress: 0, rate: "请检查连接、权限和文件路径" }); window.setTimeout(() => setTransfer(null), 6000); } finally { setBusy(false); }
   };
 
   const folder = (entry: { isDir: boolean; path: string }, remote: boolean) => { if (!entry.isDir) return; if (remote) setRemotePath(entry.path); else setLocalPath(entry.path); };
   const handleRemoteDrop = (event: React.DragEvent) => { event.preventDefault(); if (selectedLocal) void transferLocalToRemote(); };
   const handleLocalDrop = (event: React.DragEvent) => { event.preventDefault(); if (selectedRemote) void transferRemoteToLocal(); };
+  React.useEffect(() => {
+    const enterLocalDirectory = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      const button = target?.closest<HTMLButtonElement>(".file-manager-pane:nth-child(2) .file-manager-list > button");
+      if (!button) return;
+      const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>(".file-manager-pane:nth-child(2) .file-manager-list > button"));
+      const entry = localFiles[buttons.indexOf(button)];
+      if (entry?.isDir) folder(entry, false);
+    };
+    document.addEventListener("click", enterLocalDirectory, true);
+    return () => document.removeEventListener("click", enterLocalDirectory, true);
+  }, [localFiles]);
+  React.useEffect(() => {
+    const goParent = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      const path = target?.closest<HTMLElement>(".file-manager-pane .file-manager-path");
+      if (!path) return;
+      const pane = path.closest<HTMLElement>(".file-manager-pane");
+      const remote = pane?.matches(":first-child");
+      const current = remote ? remotePath : localPath;
+      if (!current || current === "/") return;
+      if (!remote && /^[A-Za-z]:\\?$/.test(current)) { setLocalPath(""); return; }
+      const normalized = current.replace(/[\\/]+$/, "");
+      const separator = remote ? "/" : "\\";
+      const index = normalized.lastIndexOf(separator);
+      const parent = index <= 0 ? (remote ? "/" : normalized.slice(0, 3)) : normalized.slice(0, index);
+      if (remote) setRemotePath(parent || "/"); else setLocalPath(parent || localPath);
+    };
+    document.addEventListener("click", goParent, true);
+    return () => document.removeEventListener("click", goParent, true);
+  }, [localPath, remotePath]);
   if (openServerIds.length === 0) return <div className="file-manager-panel"><div className="file-manager-tabs">{servers.map((item) => <button key={item.id} hidden type="button">{item.name}<span>×</span></button>)}<button type="button" className="file-manager-add" aria-label="添加服务器标签">＋</button></div></div>;
-  return <div className="file-manager-panel"><div className="file-manager-tabs">{servers.map((item) => <button key={item.id} className={item.id === activeServer.id ? "is-active" : ""} type="button" onClick={() => { setActiveServerId(item.id); setRemotePath("/root"); }}>{item.name}<span>×</span></button>)}<button type="button" className="file-manager-add" aria-label="添加服务器标签">＋</button></div><div className="file-manager-columns"><section className="file-manager-pane" onDragOver={(event) => event.preventDefault()} onDrop={handleRemoteDrop}><div className="file-manager-pane-heading"><strong>服务器</strong><button type="button" onClick={() => void loadRemote()} disabled={busy}>刷新</button></div><div className="file-manager-path">{remotePath}</div><div className="file-manager-list">{remoteFiles.map((entry) => <button draggable={!entry.isDir} key={entry.path} className={selectedRemote?.path === entry.path ? "is-selected" : ""} type="button" onClick={() => setSelectedRemote(entry)} onDragStart={() => setSelectedRemote(entry)} onDoubleClick={() => folder(entry, true)}><span>{entry.isDir ? "▰" : "▱"}</span>{entry.name}<small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small></button>)}</div></section><section className="file-manager-pane" onDragOver={(event) => event.preventDefault()} onDrop={handleLocalDrop}><div className="file-manager-pane-heading"><strong>本地电脑</strong><button type="button" onClick={() => void loadLocal()} disabled={busy}>刷新</button></div><div className="file-manager-path">{localPath || "当前目录"}</div><div className="file-manager-list">{localFiles.map((entry) => <button draggable={!entry.isDir} key={entry.path} className={selectedLocal?.path === entry.path ? "is-selected" : ""} type="button" onClick={() => setSelectedLocal(entry)} onDragStart={() => setSelectedLocal(entry)} onDoubleClick={() => folder(entry, false)}><span>{entry.isDir ? "▰" : "▱"}</span>{entry.name}<small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small></button>)}</div></section></div><div className="file-manager-actions"><button className="secondary" type="button" onClick={() => void transferRemoteToLocal()} disabled={!selectedRemote || selectedRemote.isDir || busy}>下载到本地</button><button className="primary" type="button" onClick={() => void transferLocalToRemote()} disabled={!selectedLocal || selectedLocal.isDir || busy}>上传到服务器</button></div>{transfer && <div className="file-manager-transfer"><div><span>{transfer.label}</span><strong>{transfer.progress}% · {transfer.rate}</strong></div><div className="file-manager-progress"><i style={{ width: `${transfer.progress}%` }} /></div></div>}</div>;
+  return <div className="file-manager-panel"><div className="file-manager-tabs">{servers.map((item) => <button key={item.id} className={item.id === activeServer.id ? "is-active" : ""} type="button" onClick={() => { setActiveServerId(item.id); setRemotePath("/root"); }}>{item.name}<span>×</span></button>)}<button type="button" className="file-manager-add" aria-label="添加服务器标签">＋</button></div><div className="file-manager-columns"><section className="file-manager-pane" onDragOver={(event) => event.preventDefault()} onDrop={handleRemoteDrop}><div className="file-manager-pane-heading"><strong>服务器</strong><button type="button" onClick={() => void loadRemote()} disabled={busy}>刷新</button></div><div className="file-manager-path">{remotePath}</div><div className="file-manager-list">{remoteFiles.map((entry) => <button draggable={!entry.isDir} key={entry.path} className={selectedRemote?.path === entry.path ? "is-selected" : ""} type="button" onClick={() => setSelectedRemote(entry)} onDragStart={() => setSelectedRemote(entry)} onDoubleClick={() => folder(entry, true)}><span>{entry.isDir ? "▰" : "▱"}</span>{entry.name}<small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small></button>)}</div></section><section className={`file-manager-pane local-pane${localCollapsed ? " is-collapsed" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={handleLocalDrop}><div className="file-manager-pane-heading"><strong>本地电脑</strong><span className="file-manager-pane-actions"><button type="button" onClick={() => void loadLocal()} disabled={busy}>刷新</button><button type="button" className="file-manager-collapse" onClick={() => setLocalCollapsed((value) => !value)} aria-label={localCollapsed ? "展开本地电脑" : "折叠本地电脑"}><ChevronDown className={`file-manager-collapse-chevron${localCollapsed ? " is-collapsed" : ""}`} size={13} /></button></span></div><div className="file-manager-pane-content"><div className="file-manager-path">{localPath || "当前目录"}</div><div className="file-manager-list">{localFiles.map((entry) => <button draggable={!entry.isDir} key={entry.path} className={selectedLocal?.path === entry.path ? "is-selected" : ""} type="button" onClick={() => setSelectedLocal(entry)} onDragStart={() => setSelectedLocal(entry)} onDoubleClick={() => folder(entry, false)}><span>{entry.isDir ? "▰" : "▱"}</span>{entry.name}<small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small></button>)}</div></div></section></div><div className="file-manager-actions"><button className="secondary" type="button" onClick={() => void transferRemoteToLocal()} disabled={!selectedRemote || selectedRemote.isDir || busy}>下载到本地</button><button className="primary" type="button" onClick={() => void transferLocalToRemote()} disabled={!selectedLocal || selectedLocal.isDir || busy}>上传到服务器</button></div>{transfer && <div className="file-manager-transfer"><div><span>{transfer.label}</span><strong>{transfer.progress}% · {transfer.rate}</strong></div><div className="file-manager-progress"><i style={{ width: `${transfer.progress}%` }} /></div></div>}</div>;
 }
 
 function FilesPlaceholder({ language }: { language: Language }) {

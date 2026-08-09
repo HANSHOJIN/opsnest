@@ -1,6 +1,6 @@
 [package]
 name = "opsnest"
-version = "0.2.0-alpha.1"
+version = "0.2.0-alpha.3"
 description = "A focused desktop shell"
 authors = ["OpsNest contributors"]
 edition = "2021"
@@ -20,4 +20,5 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["net", "sync", "time"] }
 russh = { version = "0.62.4", default-features = false, features = ["ring", "rsa"] }
+russh-sftp = "2.4.0"
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
