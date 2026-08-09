@@ -17,7 +17,9 @@ pub struct RemoteFileEntry {
 pub async fn list_remote_directory(request: SessionRequest, path: String) -> Result<Vec<RemoteFileEntry>, String> {
     let path = if path.trim().is_empty() { "/root" } else { path.trim() };
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
-    let mut entries = sftp.read_dir(path).await.map_err(|error| error.to_string())?
+    let result = sftp.read_dir(path).await.map_err(|error| error.to_string());
+    let _ = sftp.close().await;
+    let mut entries = result?
         .map(|entry| {
             let metadata = entry.metadata();
             RemoteFileEntry { name: entry.file_name(), path: entry.path(), is_dir: metadata.is_dir(), size: metadata.len() }
@@ -31,7 +33,10 @@ pub async fn download_remote_file(request: SessionRequest, remote_path: String, 
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let mut remote = sftp.open(remote_path).await.map_err(|error| error.to_string())?;
     let mut data = Vec::new();
-    remote.read_to_end(&mut data).await.map_err(|error| error.to_string())?;
+    let read_result = remote.read_to_end(&mut data).await.map_err(|error| error.to_string());
+    drop(remote);
+    let _ = sftp.close().await;
+    read_result?;
     fs::write(Path::new(&local_path), &data).map_err(|error| error.to_string())?;
     Ok(data.len() as u64)
 }
@@ -41,8 +46,16 @@ pub async fn upload_remote_file(request: SessionRequest, local_path: String, rem
     let data = fs::read(Path::new(&local_path)).map_err(|error| error.to_string())?;
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let mut remote = sftp.create(remote_path).await.map_err(|error| error.to_string())?;
-    remote.write_all(&data).await.map_err(|error| error.to_string())?;
-    remote.shutdown().await.map_err(|error| error.to_string())?;
+    let write_result = remote.write_all(&data).await.map_err(|error| error.to_string());
+    let shutdown_result = if write_result.is_ok() {
+        remote.shutdown().await.map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    drop(remote);
+    let _ = sftp.close().await;
+    write_result?;
+    shutdown_result?;
     Ok(data.len() as u64)
 }
 
