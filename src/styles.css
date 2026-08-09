@@ -164,6 +164,30 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   border-left: 1px solid var(--line);
 }
 .right-panel > .files-placeholder { height: calc(100% - 48px); }
+.right-panel.is-fullscreen {
+  grid-column: 2 / 4;
+  height: 100%;
+  margin-top: 0;
+  border-left: 0;
+  border-radius: 14px 0 0 0;
+}
+.right-panel.is-fullscreen > .files-placeholder {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.right-panel.is-fullscreen > .file-manager-panel {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+.app-shell.right-fullscreen .center-area { display: none; }
+.right-fullscreen-bottom {
+  flex: 0 0 var(--bottom-height);
+  min-height: 0;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
+}
 
 .panel-toolbar, .center-toolbar, .bottom-toolbar {
   height: 48px;

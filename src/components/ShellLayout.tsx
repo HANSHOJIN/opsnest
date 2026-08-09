@@ -14,8 +14,8 @@ import {
   CircleHelp,
   ChevronDown,
   MessageSquare,
-  PanelBottomClose,
-  PanelBottomOpen,
+  Maximize2,
+  Minimize2,
   Minus,
   PanelBottom,
   PanelLeft,
@@ -248,6 +248,8 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   const [layoutLoaded, setLayoutLoaded] = useState(false);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
+  const [rightFullscreen, setRightFullscreen] = useState(false);
+  const [rightFullscreenBottomOpen, setRightFullscreenBottomOpen] = useState(false);
   const [bottomOpen, setBottomOpen] = useState(false);
   const [bottomFullscreen, setBottomFullscreen] = useState(false);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
@@ -283,6 +285,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     if (bottom == null) {
       setBottomOpen(false);
       setBottomFullscreen(false);
+      setRightFullscreenBottomOpen(false);
     }
   }, [bottom]);
   const lastOpenBottomSignal = useRef(0);
@@ -296,14 +299,22 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   useEffect(() => {
     if (openRightSignal !== lastOpenRightSignal.current) {
       lastOpenRightSignal.current = openRightSignal;
-      if (openRightSignal > 0 && right != null) setRightOpen(true);
+      if (openRightSignal > 0 && right != null) {
+        setRightOpen(true);
+        setRightFullscreen(false);
+        setRightFullscreenBottomOpen(false);
+      }
     }
   }, [openRightSignal, right]);
   const lastCloseRightSignal = useRef(0);
   useEffect(() => {
     if (closeRightSignal !== lastCloseRightSignal.current) {
       lastCloseRightSignal.current = closeRightSignal;
-      if (closeRightSignal > 0) setRightOpen(false);
+      if (closeRightSignal > 0) {
+        setRightOpen(false);
+        setRightFullscreen(false);
+        setRightFullscreenBottomOpen(false);
+      }
     }
   }, [closeRightSignal]);
   useEffect(() => {
@@ -322,7 +333,11 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     };
     const openManager = () => setBottomOpen(true);
     const closeSsh = () => { setBottomFullscreen(false); setBottomOpen(false); };
-    const closeFiles = () => setRightOpen(false);
+    const closeFiles = () => {
+      setRightOpen(false);
+      setRightFullscreen(false);
+      setRightFullscreenBottomOpen(false);
+    };
     window.addEventListener("opsnest-open-ssh", openSsh);
     window.addEventListener("opsnest-open-manager", openManager);
     window.addEventListener("opsnest-close-ssh", closeSsh);
@@ -386,6 +401,49 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
     setDragging(kind);
   }, []);
+
+  const toggleBottomFullscreen = useCallback(() => {
+    if (bottomFullscreen) {
+      setBottomFullscreen(false);
+      setBottomHeight(BOTTOM_DEFAULT);
+      return;
+    }
+    const shellHeight = shellRef.current?.getBoundingClientRect().height ?? 600;
+    setBottomOpen(true);
+    setBottomFullscreen(true);
+    setBottomHeight(Math.max(MIN_BOTTOM, shellHeight - 44));
+  }, [bottomFullscreen]);
+
+  const toggleRightFullscreen = useCallback(() => {
+    setRightOpen(true);
+    setRightFullscreen((value) => {
+      if (value) {
+        setRightFullscreenBottomOpen(false);
+        setBottomOpen(false);
+        setBottomFullscreen(false);
+      }
+      else {
+        setBottomOpen(false);
+        setBottomFullscreen(false);
+      }
+      return !value;
+    });
+  }, []);
+
+  const toggleRightBottom = useCallback(() => {
+    if (rightFullscreen) {
+      setRightFullscreenBottomOpen((value) => {
+        const next = !value;
+        setBottomOpen(next);
+        if (!next) setBottomFullscreen(false);
+        return next;
+      });
+    }
+    else {
+      setBottomFullscreen(false);
+      setBottomOpen((value) => !value);
+    }
+  }, [rightFullscreen]);
 
   const resizeWithKeyboard = useCallback((kind: DragKind, event: React.KeyboardEvent) => {
     const step = event.shiftKey ? 32 : 8;
@@ -498,7 +556,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
           }}><X size={14} /></WindowButton>
         </div>
       </header>
-      <div ref={shellRef} className={`app-shell ${dragging ? `is-dragging drag-${dragging}` : ""}`}>
+      <div ref={shellRef} className={`app-shell ${rightFullscreen ? "right-fullscreen" : ""} ${dragging ? `is-dragging drag-${dragging}` : ""}`}>
         <aside className={`panel left-panel ${leftOpen ? "is-open" : "is-closed"}`} aria-hidden={!leftOpen} inert={!leftOpen}>
           {settingsOpen ? (
             <SettingsSidebar onBack={() => setSettingsOpen(false)} language={language} section={settingsSection} onSectionChange={setSettingsSection} />
@@ -519,21 +577,55 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
             {!settingsOpen && title && <span className="center-label">{title}</span>}
             <div className="toolbar-actions">
               <IconButton label={isEnglish ? (bottomOpen ? "Hide bottom panel" : "Show bottom panel") : (bottomOpen ? "收起底部面板" : "展开底部面板")} onClick={() => { setBottomFullscreen(false); setBottomOpen((value) => !value); }} className={bottomOpen ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
-              <IconButton label={isEnglish ? (rightOpen ? "Hide files panel" : "Show files panel") : (rightOpen ? "收起文件栏" : "展开文件栏")} onClick={() => setRightOpen((value) => !value)} className={rightOpen ? "is-active" : ""}><PanelRight size={15} /></IconButton>
+              <IconButton label={isEnglish ? (rightOpen ? "Hide files panel" : "Show files panel") : (rightOpen ? "收起文件栏" : "展开文件栏")} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen((value) => !value); }} className={rightOpen ? "is-active" : ""}><PanelRight size={15} /></IconButton>
             </div>
           </div>
           <section className="main-placeholder">{settingsOpen ? (settingsSection === "model" && modelSettings ? modelSettings : settings) : main}</section>
-          {bottomOpen && <div className="resize-handle horizontal bottom-handle" role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="调整底部面板高度" onPointerDown={(e) => startDrag("bottom", e)} onKeyDown={(e) => resizeWithKeyboard("bottom", e)} />}
-          <section className={`bottom-panel ${bottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen}>
-            <div className="bottom-toolbar" aria-label={isEnglish ? "Terminal controls" : "终端窗口操作"}><div className="bottom-toolbar-actions"><IconButton label={isEnglish ? "Minimize terminal" : "最小化终端"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}><PanelBottomClose size={14} /></IconButton><IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={() => { if (bottomFullscreen) { setBottomFullscreen(false); setBottomHeight(BOTTOM_DEFAULT); } else { setBottomOpen(true); setBottomFullscreen(true); setBottomHeight(1200); } }}><PanelBottomOpen size={14} /></IconButton></div></div>
+          {bottomOpen && !rightFullscreenBottomOpen && <div className="resize-handle horizontal bottom-handle" role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="调整底部面板高度" onPointerDown={(e) => startDrag("bottom", e)} onKeyDown={(e) => resizeWithKeyboard("bottom", e)} />}
+          <section className={`bottom-panel ${bottomOpen && !rightFullscreenBottomOpen ? "is-open" : "is-closed"}`} aria-hidden={!bottomOpen || rightFullscreenBottomOpen}>
+            <div className="bottom-toolbar" aria-label={isEnglish ? "Terminal controls" : "终端窗口操作"}>
+              <div className="toolbar-actions">
+                <IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={toggleBottomFullscreen} className={bottomFullscreen ? "is-active" : ""}>
+                  {bottomFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                </IconButton>
+                <IconButton label={isEnglish ? "Hide bottom panel" : "关闭底栏"} onClick={() => { setBottomFullscreen(false); setBottomOpen(false); }}>
+                  <PanelBottom size={15} />
+                </IconButton>
+              </div>
+            </div>
             {bottom}
           </section>
         </main>
 
-        {rightOpen && <div className="resize-handle vertical right-handle" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整右侧栏宽度" onPointerDown={(e) => startDrag("right", e)} onKeyDown={(e) => resizeWithKeyboard("right", e)} />}
-        <aside className={`panel right-panel ${rightOpen ? "is-open" : "is-closed"}`} aria-hidden={!rightOpen} inert={!rightOpen}>
-          <div className="panel-toolbar right-toolbar"><span>{isEnglish ? "Files" : "文件"}</span><IconButton label={isEnglish ? "Hide files panel" : "收起文件栏"} onClick={() => setRightOpen(false)}><PanelRight size={15} /></IconButton></div>
+        {rightOpen && !rightFullscreen && <div className="resize-handle vertical right-handle" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整右侧栏宽度" onPointerDown={(e) => startDrag("right", e)} onKeyDown={(e) => resizeWithKeyboard("right", e)} />}
+        <aside className={`panel right-panel ${rightOpen ? "is-open" : "is-closed"} ${rightFullscreen ? "is-fullscreen" : ""}`} aria-hidden={!rightOpen} inert={!rightOpen}>
+          <div className="panel-toolbar right-toolbar">
+            <span>{isEnglish ? "Files" : "文件"}</span>
+            <div className="toolbar-actions">
+              <IconButton label={rightFullscreen ? (isEnglish ? "Restore files panel" : "退出文件栏全屏") : (isEnglish ? "Maximize files panel" : "文件栏全屏")} onClick={() => {
+                if (!rightFullscreen) {
+                  // A right-panel fullscreen view owns the viewport. Clear the
+                  // ordinary bottom panel first so its content cannot remain
+                  // mounted underneath and steal the lower layout row.
+                  setBottomOpen(false);
+                  setBottomFullscreen(false);
+                }
+                toggleRightFullscreen();
+              }} className={rightFullscreen ? "is-active" : ""}>{rightFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</IconButton>
+              <IconButton label={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? (isEnglish ? "Hide bottom panel" : "收起底部面板") : (isEnglish ? "Show bottom panel" : "呼出底部面板")} onClick={toggleRightBottom} className={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
+              <IconButton label={isEnglish ? "Hide files panel" : "收起文件栏"} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen(false); }}><PanelRight size={15} /></IconButton>
+            </div>
+          </div>
           {right}
+          {rightFullscreen && rightFullscreenBottomOpen && <section className="right-fullscreen-bottom bottom-panel is-open">
+            <div className="bottom-toolbar" aria-label={isEnglish ? "Terminal controls" : "终端窗口操作"}>
+              <div className="toolbar-actions">
+                <IconButton label={isEnglish ? (bottomFullscreen ? "Restore terminal" : "Maximize terminal") : (bottomFullscreen ? "恢复终端" : "最大化终端")} onClick={toggleBottomFullscreen} className={bottomFullscreen ? "is-active" : ""}>{bottomFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</IconButton>
+                <IconButton label={isEnglish ? "Hide bottom panel" : "关闭底栏"} onClick={() => { setRightFullscreenBottomOpen(false); setBottomFullscreen(false); setBottomOpen(false); }}><PanelBottom size={15} /></IconButton>
+              </div>
+            </div>
+            {bottom}
+          </section>}
         </aside>
       </div>
     </div>
