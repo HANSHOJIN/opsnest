@@ -52,6 +52,12 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
 
 struct InteractiveShell {
     writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
+    // A PTY is an ordered byte stream.  AI tool calls and direct terminal
+    // input must never write into it concurrently, otherwise their command
+    // echoes and prompts become indistinguishable.  The gate is held for a
+    // complete AI command (including its completion marker), while ordinary
+    // keystrokes only hold it for the individual write.
+    execution: tokio::sync::Mutex<()>,
     output: Mutex<Vec<u8>>,
     notify: Notify,
     blackboard: Mutex<BlackboardState>,
@@ -383,6 +389,7 @@ pub async fn open_interactive_ssh_terminal(
         .map_err(|error| error.to_string())?;
     let shell = Arc::new(InteractiveShell {
         writer: tokio::sync::Mutex::new(writer),
+        execution: tokio::sync::Mutex::new(()),
         output: Mutex::new(Vec::new()),
         notify: Notify::new(),
         blackboard: new_blackboard(),
@@ -442,6 +449,13 @@ pub async fn write_interactive_ssh_terminal(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
+    // Ctrl+C is an interrupt and must be able to cancel an in-flight command;
+    // it is deliberately not blocked behind the command gate.
+    let _execution = if data == "\u{3}" {
+        None
+    } else {
+        Some(shell.execution.lock().await)
+    };
     touch_activity(&shell);
     let normalized = data.replace('\r', "").replace('\n', "");
     if !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
@@ -533,6 +547,9 @@ pub async fn run_interactive_command(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
+    // Keep the gate until the marker is observed. This prevents direct input
+    // and another AI tool call from interleaving with this command.
+    let _execution = shell.execution.lock().await;
     let marker = format!(
         "__OPSNEST_INTERACTIVE_END_{}__",
         SystemTime::now()

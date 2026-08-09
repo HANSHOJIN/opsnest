@@ -8,6 +8,8 @@ export type TerminalDispatchContext = {
   isRiskyCommand: (value: string) => boolean;
   confirmRisky: (command: string) => boolean | Promise<boolean>;
   onCommand: (command: string) => void;
+  isBusy?: () => boolean;
+  onBusy?: (busy: boolean) => void;
 };
 
 export class TerminalDispatcher {
@@ -21,11 +23,15 @@ export class TerminalDispatcher {
       this.context.approve(pending);
       return;
     }
+    if (this.context.isBusy?.()) {
+      return;
+    }
     const forcedAi = trimmed.startsWith("/ai ");
     const command = trimmed.startsWith("/cmd ") ? trimmed.slice(5).trim() : trimmed;
     if (!forcedAi && (this.context.looksLikeCommand(trimmed) || (this.context.probeCommand && await this.context.probeCommand(trimmed)))) {
       if (this.context.isRiskyCommand(command) && !await this.context.confirmRisky(command)) return;
       this.context.onCommand(command);
+      this.context.onBusy?.(true);
       this.context.writeCommand(command);
       return;
     }
