@@ -138,6 +138,11 @@ fn credential_entry(server_id: &str) -> Result<keyring::Entry, String> {
         .map_err(|error| format!("unable to access Windows Credential Manager: {error}"))
 }
 
+fn sudo_credential_entry(server_id: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new("OpsNest", &format!("server-sudo:{server_id}"))
+        .map_err(|error| format!("unable to access Windows Credential Manager: {error}"))
+}
+
 #[tauri::command]
 fn save_server_credential(server_id: String, password: String) -> Result<(), String> {
     credential_entry(&server_id)?
@@ -159,6 +164,32 @@ fn delete_server_credential(server_id: String) -> Result<(), String> {
     match credential_entry(&server_id)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(error) => Err(format!("unable to delete server credential: {error}")),
+    }
+}
+
+/// Stores the optional sudo escalation password separately from the SSH login
+/// credential. It is never persisted in the portable JSON data directory.
+#[tauri::command]
+fn save_server_sudo_credential(server_id: String, password: String) -> Result<(), String> {
+    sudo_credential_entry(&server_id)?
+        .set_password(&password)
+        .map_err(|error| format!("unable to save sudo credential: {error}"))
+}
+
+#[tauri::command]
+fn load_server_sudo_credential(server_id: String) -> Result<Option<String>, String> {
+    match sudo_credential_entry(&server_id)?.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!("unable to load sudo credential: {error}")),
+    }
+}
+
+#[tauri::command]
+fn delete_server_sudo_credential(server_id: String) -> Result<(), String> {
+    match sudo_credential_entry(&server_id)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("unable to delete sudo credential: {error}")),
     }
 }
 
@@ -416,6 +447,9 @@ pub fn run() {
             save_server_credential,
             load_server_credential,
             delete_server_credential,
+            save_server_sudo_credential,
+            load_server_sudo_credential,
+            delete_server_sudo_credential,
             read_opsnest_config,
             write_opsnest_config,
             test_model_connection,
@@ -423,6 +457,7 @@ pub fn run() {
             ssh_scan::inspect_linux_server,
             ssh_scan::discover_linux_services,
             ssh_session::open_ssh_session,
+            ssh_session::test_ssh_connection,
             ssh_session::open_interactive_ssh_terminal,
             ssh_session::write_interactive_ssh_terminal,
             ssh_session::get_ssh_session_blackboard,

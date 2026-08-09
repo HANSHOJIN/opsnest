@@ -237,7 +237,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-context-menu button:hover { background: var(--control-hover); color: var(--text-strong); }
 .server-context-menu button.is-danger { color: #ff8d97; }
 .server-context-menu button.is-danger:hover { background: color-mix(in srgb, #e06470 18%, transparent); }
-.rename-modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.48); }
+.rename-modal-backdrop { position: fixed; z-index: 1000; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(0,0,0,.58); }
 .rename-modal { width: min(430px, 100%); padding: 20px; border: 1px solid var(--elevated-border); border-radius: 12px; background: var(--elevated); box-shadow: 0 22px 60px rgba(0,0,0,.42); }
 .rename-modal h2 { margin: 0 0 15px; color: var(--text-strong); font-size: 16px; }
 .rename-modal input { width: 100%; min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--text); font: inherit; outline: none; }
@@ -424,7 +424,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   background: var(--paper);
   font-size: var(--ui-font-size);
 }
-.opsnest-home { width: 100%; height: 100%; overflow: auto; padding: 44px clamp(24px, 8vw, 96px) 72px; color: var(--text); background: var(--paper); }
+.opsnest-home { width: 100%; height: 100%; overflow: auto; padding: 44px clamp(24px, 8vw, 96px) 72px; color: var(--text); background: var(--paper); container-type: inline-size; container-name: opsnest-home; }
 .home-heading { max-width: 820px; margin: 0 auto 30px; display: flex; justify-content: space-between; gap: 18px; }
 .home-eyebrow, .home-section-label { color: var(--muted); font-size: 12px; }
 .home-heading h1 { margin: 5px 0 6px; font-size: 30px; line-height: 1.2; }
@@ -471,7 +471,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-form-card { max-width: 680px; padding-bottom: 18px; }
 .server-form-grid { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 12px; }
 .form-note { margin: 10px 0 0; color: var(--muted); font-size: 11px; }
-.server-home-page { width: 100%; height: 100%; overflow: auto; padding: 36px clamp(24px, 7vw, 86px) 28px; background: var(--paper); color: var(--text); }
+.server-home-page { width: 100%; height: 100%; overflow: auto; padding: 36px clamp(18px, 5cqw, 86px) 28px; background: var(--paper); color: var(--text); }
 .server-home-center { width: 100%; height: 100%; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--paper); }
 .server-home-center { container-type: inline-size; container-name: server-home; }
 .server-home-center .server-home-page { height: auto; min-height: 0; overflow: visible; }
@@ -479,10 +479,11 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-home-header h1 { margin: 4px 0 5px; font-size: 28px; line-height: 1.2; }
 .server-home-header p { margin: 0; color: var(--muted); font-size: 12px; }
 .home-status.is-connected { background: color-mix(in srgb, #58cc87 16%, transparent); color: #72d99a; }
-.server-profile-banner { max-width: 820px; margin: 0 auto 28px; padding: 16px 18px; display: flex; align-items: center; gap: 12px; border: 1px solid var(--line-soft); border-radius: 13px; background: var(--card); }
-.server-profile-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: #fff0f4; color: #a80030; overflow: hidden; }
-.server-profile-icon > * { display: block; max-width: 28px; max-height: 28px; }
-.server-profile-icon .system-alibaba { width: 28px; height: 28px; object-fit: contain; }
+.server-profile-banner { max-width: 820px; min-height: 92px; margin: 0 auto 28px; padding: 16px 18px; display: flex; align-items: center; gap: 16px; border: 1px solid var(--line-soft); border-radius: 13px; background: var(--card); }
+.server-profile-icon { width: 60px; height: 60px; flex: 0 0 60px; display: grid; place-items: center; border-radius: 12px; background: #fff0f4; color: #a80030; overflow: hidden; }
+.server-profile-icon > * { display: block; max-width: 44px; max-height: 44px; }
+.server-profile-icon > svg { width: 30px; height: 30px; }
+.server-profile-icon .system-alibaba { width: 44px; height: 44px; object-fit: contain; }
 
 .file-manager-panel { height: 100%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-1); }
 .file-manager-tabs { display: flex; align-items: center; gap: 4px; min-height: 38px; padding: 5px 8px; border-bottom: 1px solid var(--border); overflow: visible; z-index: 30; }
@@ -529,12 +530,28 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .file-manager-progress { height: 4px; margin-top: 6px; border-radius: 4px; background: var(--surface-3); overflow: hidden; }
 .file-manager-progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .15s ease; }
 .service-icon-image.system-debian { filter: brightness(0) saturate(100%) invert(16%) sepia(91%) saturate(4450%) hue-rotate(329deg) brightness(79%) contrast(101%); }
+.service-icon-image.system-openwrt { filter: none; border-radius: 3px; }
+.service-icon-image.system-istoreos { filter: none; border-radius: 3px; }
+.home-server-icon .service-icon-image.system-istoreos,
+.server-profile-icon .service-icon-image.system-istoreos { width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
+.system-istoreos-mark { display: block; width: 34px; height: 34px; min-width: 0; min-height: 0; border-radius: 0; object-fit: contain; background: transparent; }
+.server-profile-icon .system-istoreos-mark {
+  width: 60px;
+  height: 60px;
+  max-width: none;
+  max-height: none;
+  background-size: 60px auto;
+}
+.home-server-icon.is-istoreos,
+.server-profile-icon.is-istoreos { background: transparent; }
 .system-icon-badge { display: none; }
 .system-icon-badge-image { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
 .server-profile-banner div:nth-child(2) { flex: 1 1 auto; min-width: 0; }
-.server-profile-banner strong, .server-profile-banner span { display: block; }
+.server-profile-banner strong, .server-profile-banner span, .server-profile-banner small { display: block; }
 .server-profile-banner strong { color: var(--text-strong); font-size: 13px; }
-.server-profile-banner span { margin-top: 4px; color: var(--muted); font-size: 11px; }
+.server-profile-banner span { margin-top: 4px; color: var(--muted); font-size: 11px; white-space: pre-line; }
+.server-profile-banner:not(.router-profile-banner) small { display: none; }
+.server-profile-banner small { margin-top: 4px; color: var(--text-subtle); font-size: 11px; }
 .server-profile-banner .primary { min-height: 34px; padding: 0 12px; border: 1px solid var(--accent); border-radius: 7px; background: var(--accent); color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
 .server-profile-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .server-profile-actions .secondary { min-height: 34px; padding: 0 12px; }
@@ -552,6 +569,16 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-service-empty { min-height: 110px; padding: 22px; display: flex; flex-direction: column; justify-content: center; gap: 7px; border: 1px dashed var(--line); border-radius: 12px; }
 .server-service-empty strong { color: var(--text-strong); font-size: 13px; }
 .server-service-empty span { color: var(--muted); font-size: 12px; }
+.router-profile-banner { align-items: center; }
+.router-profile-banner small { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.router-status-group { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.router-network-badge { padding: 4px 7px; border-radius: 999px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); font-size: 10px; white-space: nowrap; }
+.router-network-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line-soft); border-radius: 12px; overflow: hidden; background: var(--card); }
+.router-network-grid > div { min-height: 72px; padding: 13px 15px; border-right: 1px solid var(--line-soft); }
+.router-network-grid > div:last-child { border-right: 0; }
+.router-network-grid span, .router-network-grid strong { display: block; }
+.router-network-grid span { color: var(--muted); font-size: 11px; }
+.router-network-grid strong { margin-top: 7px; color: var(--text-strong); font-size: 14px; overflow-wrap: anywhere; }
 .settings-page-header { display: flex; align-items: flex-start; gap: 12px; max-width: 760px; margin: 0 auto 34px; }
 .settings-eyebrow { color: var(--muted); font-size: 12px; }
 .settings-page h1 { margin: 3px 0 0; font-size: 28px; line-height: 1.2; letter-spacing: -.02em; }
@@ -753,6 +780,10 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .docker-service-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; color: #2f9ee9; background: color-mix(in srgb, #2f9ee9 16%, transparent); }
 .docker-service-status { flex: 0 0 auto; padding: 5px 9px; border-radius: 999px; color: #63d69a; background: rgba(48, 160, 103, .18); font-size: 11px; }
 .docker-service-status.is-off { color: var(--muted); background: var(--control-hover); }
+.docker-panel-actions { display: flex; align-items: center; gap: 9px; margin-top: 14px; }
+.docker-expand-button { min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--accent); background: var(--paper); font: inherit; font-size: 12px; cursor: pointer; }
+.docker-expand-button:hover { border-color: var(--accent); background: var(--control-hover); }
+.router-docker-card { width: 100%; margin: 0; }
 .docker-container-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
 .docker-container-row { display: flex; align-items: center; gap: 9px; min-width: 0; padding: 10px 11px; border: 1px solid var(--line-soft); border-radius: 8px; color: #2f9ee9; }
 .docker-container-row > div { min-width: 0; }
@@ -812,7 +843,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
    boundary instead of allowing action labels to wrap into vertical text. */
 @container server-home (max-width: 620px) {
   .server-profile-banner { flex-wrap: wrap; align-items: flex-start; }
-  .server-profile-banner > div:nth-child(2) { flex: 1 1 calc(100% - 60px); }
+  .server-profile-banner > div:nth-child(2) { flex: 1 1 calc(100% - 76px); min-width: 0; }
   .server-profile-banner > .primary,
   .server-profile-banner > .server-profile-files-action { flex: 1 1 0; min-width: 0; white-space: nowrap; }
   .server-metric-grid { grid-template-columns: 1fr; }
@@ -824,9 +855,61 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 
 @container server-home (max-width: 430px) {
   .server-home-page { padding-inline: 18px; }
-  .server-profile-banner { padding: 13px; gap: 9px; }
-  .server-profile-banner > div:nth-child(2) { flex-basis: calc(100% - 52px); }
+  .server-profile-banner { min-height: 84px; padding: 13px; gap: 10px; }
+  .server-profile-banner > div:nth-child(2) { flex: 1 1 calc(100% - 76px); min-width: 0; }
   .server-home-section-heading { align-items: flex-start; gap: 8px; }
+}
+
+@container server-home (max-width: 760px) {
+  .server-home-page { padding-inline: 24px; }
+  .server-home-header { gap: 10px; }
+  .router-status-group { max-width: 220px; }
+  .server-profile-actions { flex-wrap: wrap; }
+  .server-profile-actions .secondary { white-space: nowrap; }
+  .router-network-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .router-network-grid > div:nth-child(2) { border-right: 0; }
+  .router-network-grid > div:nth-child(-n+2) { border-bottom: 1px solid var(--line-soft); }
+  .router-network-grid > div:nth-child(3) { border-right: 1px solid var(--line-soft); }
+}
+
+@container server-home (max-width: 620px) {
+  .server-home-page { padding-inline: 18px; }
+  .server-profile-actions { width: 100%; margin-left: 0; }
+  .server-profile-actions { flex-wrap: nowrap; }
+  .server-profile-actions .secondary { flex: 1 1 0; min-width: 0; }
+  .router-status-group { max-width: 170px; }
+  .router-network-grid { grid-template-columns: 1fr; }
+  .router-network-grid > div,
+  .router-network-grid > div:nth-child(2),
+  .router-network-grid > div:nth-child(3) { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .router-network-grid > div:last-child { border-bottom: 0; }
+}
+
+/* The right panel can reduce the center area without reducing the window
+   itself.  Keep the home cards readable at that boundary instead of forcing
+   two very narrow columns whose labels wrap one character per line. */
+@container opsnest-home (max-width: 760px) {
+  .opsnest-home { padding: 28px 18px 48px; }
+  .home-heading { flex-direction: column; gap: 10px; margin-bottom: 22px; }
+  .home-status { align-self: flex-start; }
+  .home-guide, .home-section-heading, .home-empty-overview, .home-server-grid { max-width: none; }
+  .home-guide { flex-direction: column; align-items: stretch; gap: 16px; margin-bottom: 24px; }
+  .home-guide-actions { flex-basis: auto; width: 100%; }
+  .home-server-grid { grid-template-columns: minmax(0, 1fr); }
+  .home-server-card-actions { flex-wrap: wrap; }
+  .home-server-card-actions button { white-space: nowrap; }
+}
+
+@container opsnest-home (max-width: 430px) {
+  .home-server-card { padding: 14px; }
+  .home-server-card-top { gap: 8px; }
+  .home-server-icon { width: 40px; height: 40px; flex-basis: 40px; }
+  .home-server-icon svg, .home-server-icon .service-icon-image { width: 28px; height: 28px; }
+  .home-server-stats { grid-template-columns: 1fr; }
+  .home-server-stats div,
+  .home-server-stats div:nth-child(2n),
+  .home-server-stats div:nth-last-child(-n+2) { border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .home-server-stats div:last-child { border-bottom: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

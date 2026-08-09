@@ -1,0 +1,11 @@
+<svg role="img" width="400" height="400" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">
+  <title>iStoreOS</title>
+  <rect width="400" height="400" fill="#000"/>
+  <g transform="translate(1 31) scale(.84)" fill="none" stroke="#fff" stroke-linecap="round">
+    <path d="M191 92L259 160" stroke-width="54"/>
+    <path d="M150 126L244 220" stroke-width="62"/>
+    <path d="M128 245L207 324" stroke-width="62"/>
+    <circle cx="75" cy="191" r="25" fill="#fff" stroke="none"/>
+    <text x="286" y="333" fill="#fff" stroke="none" font-family="Arial, Helvetica, sans-serif" font-size="68">OS</text>
+  </g>
+</svg>

@@ -2,13 +2,13 @@ export type IconDirectory = "services" | "systems";
 
 export function iconDirectory(kind: string, name: string): IconDirectory {
   const key = `${kind} ${name}`.toLowerCase();
-  return key.includes("system") || key.includes("linux") || key.includes("debian") || key.includes("ubuntu") || key.includes("windows") ? "systems" : "services";
+  return key.includes("system") || key.includes("linux") || key.includes("debian") || key.includes("ubuntu") || key.includes("windows") || /openwrt|istoreos|immortalwrt|router|路由器/.test(key) ? "systems" : "services";
 }
 
 /** V2 keeps the V1 two-directory contract; individual keys live inside a directory. */
 export const ICON_CATALOG: Record<IconDirectory, readonly string[]> = {
   services: ["docker", "nginx", "apache", "mysql", "postgres", "redis", "mongodb", "web", "port", "generic"],
-  systems: ["linux", "debian", "ubuntu", "alibaba", "alpine", "openwrt", "nas", "windows", "generic"],
+  systems: ["linux", "debian", "ubuntu", "alibaba", "alpine", "istoreos", "openwrt", "nas", "windows", "generic"],
 };
 
 export function normalizeIconKey(value: string | undefined): string {

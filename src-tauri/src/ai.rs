@@ -35,6 +35,9 @@ pub struct AiSshRequest {
     pub prompt: String,
     pub approved: bool,
     pub context: Option<String>,
+    /// Kept outside model messages. This is read from the local system
+    /// credential store only when the user configured optional sudo access.
+    pub sudo_password: Option<String>,
 }
 
 fn summarize_execution(executed: &[Value]) -> String {
@@ -211,6 +214,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let system = format!(
         "{system}\nTerminal output is visible to the user in real time. Do not repeat raw command output, file listings, prompts, or banners unless the user explicitly asks for a quotation. If a read-only tool result already answers the request (for example ls, pwd, df, or system status), return no summary text; only report errors, anomalies, or an actionable conclusion."
     );
+    let system = if request.sudo_password.as_deref().is_some_and(|value| !value.is_empty()) {
+        format!(
+            "{system}\nThis server has a locally configured sudo credential. When elevation is genuinely required, use a command beginning with `sudo `. The credential is supplied locally after approval; never request, print, or transmit it."
+        )
+    } else {
+        system
+    };
     let mut messages = vec![
         serde_json::json!({"role":"system","content":system}),
         serde_json::json!({"role":"user","content":request.prompt}),
@@ -272,7 +282,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
             }
             let output =
-                match ssh_session::run_interactive_command(&request.session_id, &command, true)
+                match ssh_session::run_interactive_command(
+                    &request.session_id,
+                    &command,
+                    true,
+                    request.sudo_password.as_deref(),
+                )
                     .await
                 {
                     Ok(value) => value,
@@ -294,6 +309,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                         &request.session_id,
                         &verify_command,
                         true,
+                        request.sudo_password.as_deref(),
                     )
                     .await
                     {

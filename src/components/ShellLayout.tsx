@@ -57,7 +57,7 @@ export type ShellLayoutProps = {
 };
 
 export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string; customLabel?: string };
-export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; pinned?: boolean; connected?: boolean; system?: string; cpu?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[] };
+export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; sudoConfigured?: boolean; pinned?: boolean; connected?: boolean; system?: string; kernel?: string; cpu?: string; cpuModel?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[]; router?: { model?: string; firmware?: string; kernel?: string; wanIp?: string; lanIp?: string; lanClients?: string; wifiClients?: string } };
 
 export function ShellNavigation({ language = "zh-CN", selected, onSelect, servers: serverSummaries = [], onTogglePin, onRename, onToggleConnection, onDelete, onOpenSsh }: { language?: "zh-CN" | "en"; selected?: string | null; onSelect?: (id: string) => void; servers?: ServerSummary[]; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void }) {
   const isEnglish = language === "en";

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::Emitter;
+use tokio::io::{duplex, AsyncWriteExt};
 use tokio::sync::Notify;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -341,6 +342,16 @@ pub async fn open_ssh_session(request: SessionRequest) -> Result<OpenSessionResu
     Ok(OpenSessionResult { session_id: id })
 }
 
+/// Verifies that the supplied SSH credentials can authenticate successfully.
+/// This intentionally does not register a reusable session: a successful test
+/// only proves the credentials, it must never create a phantom "connected"
+/// terminal in the UI.
+#[tauri::command]
+pub async fn test_ssh_connection(request: SessionRequest) -> Result<String, String> {
+    let _session = connect(&request).await?;
+    Ok("SSH authentication successful".to_string())
+}
+
 #[tauri::command]
 pub async fn open_interactive_ssh_terminal(
     app: tauri::AppHandle,
@@ -461,6 +472,20 @@ pub fn record_session_event(
     Ok(())
 }
 
+/// Converts a leading `sudo` into a non-interactive sudo invocation while
+/// keeping the password out of the command string. Commands without an
+/// explicitly configured sudo credential retain their original behavior.
+fn prepare_sudo_command<'a>(command: &'a str, sudo_password: Option<&'a str>) -> (String, Option<&'a str>) {
+    let trimmed = command.trim();
+    let Some(password) = sudo_password.filter(|value| !value.is_empty()) else {
+        return (trimmed.to_string(), None);
+    };
+    let Some(rest) = trimmed.strip_prefix("sudo ") else {
+        return (trimmed.to_string(), None);
+    };
+    (format!("sudo -S -p '' {rest}"), Some(password))
+}
+
 #[tauri::command]
 pub fn get_ssh_session_blackboard(session_id: String) -> Result<BlackboardSnapshot, String> {
     let shell = interactive()
@@ -476,6 +501,7 @@ pub async fn run_interactive_command(
     session_id: &str,
     command: &str,
     approved: bool,
+    sudo_password: Option<&str>,
 ) -> Result<String, String> {
     let lowered = command.to_ascii_lowercase();
     let risky = [
@@ -515,6 +541,7 @@ pub async fn run_interactive_command(
             .as_nanos()
     );
     append_blackboard(&shell, "ai_command", command.trim().to_string());
+    let (command_to_run, sudo_password) = prepare_sudo_command(command, sudo_password);
     let start = shell
         .output
         .lock()
@@ -530,9 +557,18 @@ pub async fn run_interactive_command(
             // Sending them as two lines makes an interactive shell print a
             // prompt after the command and another prompt after the marker,
             // which leaks duplicate prompts into the terminal blackboard.
-            .data_bytes(format!("{}; rc=$?; printf '{} rc=%s\\n' \"$rc\"\n", command.trim(), marker).into_bytes())
+            .data_bytes(format!("{}; rc=$?; printf '{} rc=%s\\n' \"$rc\"\n", command_to_run, marker).into_bytes())
             .await
             .map_err(|error| error.to_string())?;
+        // `sudo -S` reads this directly from the PTY after the command has
+        // started. The password is not part of the shell command, terminal
+        // output, blackboard, model request, or portable JSON files.
+        if let Some(password) = sudo_password {
+            writer
+                .data_bytes(format!("{password}\n").into_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+        }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
@@ -563,8 +599,9 @@ pub async fn run_interactive_command(
 pub async fn execute_interactive_ssh_command(
     session_id: String,
     command: String,
+    sudo_password: Option<String>,
 ) -> Result<String, String> {
-    run_interactive_command(&session_id, &command, true).await
+    run_interactive_command(&session_id, &command, true, sudo_password.as_deref()).await
 }
 
 #[tauri::command]
@@ -608,6 +645,7 @@ pub async fn run_session_command(
     session_id: &str,
     command: &str,
     approved: bool,
+    sudo_password: Option<&str>,
 ) -> Result<String, String> {
     let lowered = command.to_ascii_lowercase();
     let risky = [
@@ -637,6 +675,7 @@ pub async fn run_session_command(
     if risky && !approved {
         return Err("This command requires explicit approval".into());
     }
+    let (command_to_run, sudo_password) = prepare_sudo_command(command, sudo_password);
     let session = sessions()
         .lock()
         .map_err(|_| "SSH session lock failed".to_string())?
@@ -648,9 +687,22 @@ pub async fn run_session_command(
         .await
         .map_err(|error| error.to_string())?;
     channel
-        .exec(true, command.trim())
+        .exec(true, command_to_run)
         .await
         .map_err(|error| error.to_string())?;
+    if let Some(password) = sudo_password {
+        let password_bytes = format!("{password}\n").into_bytes();
+        let (mut password_writer, password_reader) = duplex(password_bytes.len());
+        password_writer
+            .write_all(&password_bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        drop(password_writer);
+        channel
+            .data(password_reader)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
     let mut output = Vec::new();
     while let Some(message) = channel.wait().await {
         if let ChannelMsg::Data { data } = message {
@@ -665,8 +717,9 @@ pub async fn execute_ssh_command(
     session_id: String,
     command: String,
     approved: bool,
+    sudo_password: Option<String>,
 ) -> Result<String, String> {
-    run_session_command(&session_id, &command, approved).await
+    run_session_command(&session_id, &command, approved, sudo_password.as_deref()).await
 }
 
 #[tauri::command]
