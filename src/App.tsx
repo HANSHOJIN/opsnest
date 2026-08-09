@@ -1111,6 +1111,7 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
       return true;
     });
     const refreshPrompt = () => {
+      operationBusyRef.current = false;
       if (!promptRef.current) return;
       // Redraw the current local PTY line in place. Sending a carriage return
       // to the remote shell executes an empty command and creates an extra
