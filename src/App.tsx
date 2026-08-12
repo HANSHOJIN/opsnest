@@ -6095,6 +6095,23 @@ function App() {
     if (next.startsWith("__connect:")) {
       const id = next.slice(10);
       const target = servers.find((item) => item.id === id);
+      if (target?.connected) {
+        // The context-menu action is a real disconnect, not another
+        // connection probe. Closing the bottom terminal unmounts its panel
+        // and releases the interactive SSH session through its cleanup path.
+        window.dispatchEvent(
+          new CustomEvent("opsnest-disconnect-server", {
+            detail: { serverId: id },
+          }),
+        );
+        window.dispatchEvent(new Event("opsnest-close-ssh"));
+        setServers((current) =>
+          current.map((item) =>
+            item.id === id ? { ...item, connected: false } : item,
+          ),
+        );
+        return;
+      }
       if (target)
         void (async () => {
           const at = target.host.indexOf("@");
