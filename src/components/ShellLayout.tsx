@@ -397,7 +397,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
       }
 
       if (bottomOpen) {
-        setBottomHeight((value) => Math.min(value, Math.max(MIN_BOTTOM, bounds.height - 44)));
+        setBottomHeight((value) => Math.min(value, Math.max(MIN_BOTTOM, bounds.height - 52)));
       }
     };
 
@@ -422,7 +422,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     const shellHeight = shellRef.current?.getBoundingClientRect().height ?? 600;
     setBottomOpen(true);
     setBottomFullscreen(true);
-    setBottomHeight(Math.max(MIN_BOTTOM, shellHeight - 44));
+    setBottomHeight(Math.max(MIN_BOTTOM, shellHeight - 52));
   }, [bottomFullscreen]);
 
   const toggleRightFullscreen = useCallback(() => {
@@ -508,7 +508,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
         const next = bounds.bottom - event.clientY;
         if (next < MIN_BOTTOM * 0.62) { setDragging(null); setBottomOpen(false); }
         else {
-          const maxBottom = Math.max(MIN_BOTTOM, bounds.height - 44);
+          const maxBottom = Math.max(MIN_BOTTOM, bounds.height - 52);
           const snapped = next >= maxBottom - 64;
           setBottomOpen(true);
           setBottomFullscreen(snapped);
