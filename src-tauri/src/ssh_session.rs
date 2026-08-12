@@ -62,7 +62,12 @@ struct InteractiveShell {
 }
 static INTERACTIVE: OnceLock<Mutex<HashMap<String, Arc<InteractiveShell>>>> = OnceLock::new();
 static INTERACTIVE_REAPER: OnceLock<()> = OnceLock::new();
-const INTERACTIVE_IDLE_SECS: u64 = 30 * 60;
+// Keep the interactive PTY alive across ordinary panel collapse/tab switches.
+// The SSH transport has its own keepalive; reaping after 30 minutes made a
+// still-open user session unexpectedly turn into "SSH terminal is not
+// connected". Only reap sessions that have genuinely been abandoned for a
+// long period.
+const INTERACTIVE_IDLE_SECS: u64 = 8 * 60 * 60;
 fn interactive() -> &'static Mutex<HashMap<String, Arc<InteractiveShell>>> {
     INTERACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
 }
