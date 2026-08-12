@@ -4620,16 +4620,32 @@ function InteractiveTerminalPanel({
     };
     const schedulePromptRecovery = () => {
       // The PTY prompt can arrive in a later SSH event than the AI response.
-      // Check the actual xterm cursor line instead of a stale per-operation
-      // flag; a prompt may have arrived before the AI reply was rendered.
-      window.setTimeout(() => {
-        if (disposed || !promptRef.current) return;
-        const line =
-          term.buffer.active
-            .getLine(term.buffer.active.cursorY)
-            ?.translateToString(true) ?? "";
-        if (!line.includes(promptRef.current.trim())) refreshPrompt();
-      }, 350);
+      // Check several nearby lines and retry briefly: xterm writes are
+      // asynchronous, so a single timer can observe the cursor before the
+      // final AI chunk has been laid out.  Never add a prompt when one is
+      // already present in the cursor neighbourhood.
+      const delays = [120, 320, 700, 1200];
+      delays.forEach((delay) => {
+        window.setTimeout(() => {
+          if (disposed || !promptRef.current) return;
+          const buffer = term.buffer.active;
+          const prompt = promptRef.current.trim();
+          const start = Math.max(0, buffer.cursorY - 3);
+          const end = Math.min(buffer.length - 1, buffer.cursorY + 1);
+          for (let row = start; row <= end; row += 1) {
+            const line = buffer.getLine(row)?.translateToString(true) ?? "";
+            if (line.includes(prompt)) {
+              term.scrollToBottom();
+              return;
+            }
+          }
+          const currentLine = buffer.getLine(buffer.cursorY)?.translateToString(true) ?? "";
+          if (currentLine.trim()) term.write(`\r\n${prompt}`);
+          else term.write(prompt);
+          term.scrollToBottom();
+          term.refresh(0, term.rows - 1);
+        }, delay);
+      });
     };
     const askAi = async (prompt: string, approved: boolean) => {
       if (terminalOperationInFlight) {
