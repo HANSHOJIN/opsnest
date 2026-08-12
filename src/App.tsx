@@ -4618,20 +4618,22 @@ function InteractiveTerminalPanel({
         term.refresh(0, term.rows - 1),
       );
     };
+    let promptRecoveryGeneration = 0;
     const schedulePromptRecovery = () => {
       // The PTY prompt can arrive in a later SSH event than the AI response.
       // Check several nearby lines and retry briefly: xterm writes are
       // asynchronous, so a single timer can observe the cursor before the
       // final AI chunk has been laid out.  Never add a prompt when one is
       // already present in the cursor neighbourhood.
+      const generation = ++promptRecoveryGeneration;
       const delays = [120, 320, 700, 1200];
-      delays.forEach((delay) => {
+      delays.forEach((delay, index) => {
         window.setTimeout(() => {
-          if (disposed || !promptRef.current) return;
+          if (disposed || generation !== promptRecoveryGeneration || !promptRef.current) return;
           const buffer = term.buffer.active;
           const prompt = promptRef.current.trim();
-          const start = Math.max(0, buffer.cursorY - 3);
-          const end = Math.min(buffer.length - 1, buffer.cursorY + 1);
+          const start = Math.max(0, buffer.length - 12);
+          const end = buffer.length - 1;
           for (let row = start; row <= end; row += 1) {
             const line = buffer.getLine(row)?.translateToString(true) ?? "";
             if (line.includes(prompt)) {
@@ -4639,6 +4641,9 @@ function InteractiveTerminalPanel({
               return;
             }
           }
+          // Earlier checks only observe.  This prevents several timers from
+          // appending the same fallback prompt when xterm is still flushing.
+          if (index !== delays.length - 1) return;
           const currentLine = buffer.getLine(buffer.cursorY)?.translateToString(true) ?? "";
           if (currentLine.trim()) term.write(`\r\n${prompt}`);
           else term.write(prompt);
