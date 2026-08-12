@@ -4841,6 +4841,10 @@ function InteractiveTerminalPanel({
             setWorkStatus(null);
           }
         }, 1800);
+        // Approved-command continuation is an AI response too.  Its real PTY
+        // prompt may arrive before or after the response chunk, so use the
+        // same prompt recovery path as a normal AI turn.
+        schedulePromptRecovery();
       } catch (reason) {
         updateWorkStatus("error", "命令执行失败", false);
         render(`\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`);
@@ -5058,6 +5062,7 @@ function InteractiveTerminalPanel({
     });
     const resize = () => {
       fit.fit();
+      term.refresh(0, term.rows - 1);
       void invoke("resize_interactive_ssh_terminal", {
         sessionId: sessionRef.current,
         columns: term.cols,
@@ -5076,8 +5081,14 @@ function InteractiveTerminalPanel({
     };
     window.addEventListener("opsnest-terminal-layout-changed", layoutChanged);
     const hostResizeObserver = new ResizeObserver(() => {
-      resize();
-      term.scrollToBottom();
+      // Layout transitions can report the old width for one frame.  Measuring
+      // on the next animation frame keeps xterm's columns in sync with the
+      // visible panel and prevents long AI lines from being clipped.
+      window.requestAnimationFrame(() => {
+        if (disposed) return;
+        resize();
+        term.scrollToBottom();
+      });
     });
     hostResizeObserver.observe(host);
     window.addEventListener("resize", resize);
