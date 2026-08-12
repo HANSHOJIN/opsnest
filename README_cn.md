@@ -10,9 +10,11 @@ OpsNest，顾名思义，就是运维小窝。它是一款用于集中管理您�
 
 以下截图使用虚构的演示服务器和地址，仅用于展示界面，不包含真实服务器信息。
 
-![OpsNest 服务器首页演示](docs/assets/dashboard.png)
+![OpsNest 服务器首页演示](docs/assets/dashboard-v2.jpg)
 
-![OpsNest AI-SSH 终端演示](docs/assets/terminal.png)
+![OpsNest 路由器特色首页演示](docs/assets/router-home-v2.jpg)
+
+![OpsNest Linux 服务器首页演示](docs/assets/linux-home-v2.jpg)
 
 ## 核心功能
 

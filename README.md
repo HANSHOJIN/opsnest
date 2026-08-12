@@ -10,9 +10,11 @@ OpsNest is, as its name suggests, a small operations and maintenance nest. It is
 
 The screenshots below use fictional demo servers and addresses for illustration only. They contain no real server information.
 
-![OpsNest server home demo](docs/assets/dashboard-en.png)
+![OpsNest server home demo](docs/assets/dashboard-v2.jpg)
 
-![OpsNest AI-SSH terminal demo](docs/assets/terminal-en.png)
+![OpsNest router home demo](docs/assets/router-home-v2.jpg)
+
+![OpsNest Linux server home demo](docs/assets/linux-home-v2.jpg)
 
 ## Core features
 
