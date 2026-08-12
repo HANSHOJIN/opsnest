@@ -16,6 +16,8 @@ OpsNest，顾名思义，就是运维小窝。它是一款用于集中管理您�
 
 ![OpsNest Linux 服务器首页演示](docs/assets/linux-home-v2.jpg)
 
+![OpsNest AI-SSH 终端演示](docs/assets/terminal-v2-zh.png)
+
 ## 核心功能
 
 - 强大的 AI-SSH 功能：将 AI 与 SSH 终端结合。您不必记忆复杂的命令行，只需要用自然语言描述需求，AI 就会自动帮您完成工作。

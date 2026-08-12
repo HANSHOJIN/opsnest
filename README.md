@@ -16,6 +16,8 @@ The screenshots below use fictional demo servers and addresses for illustration 
 
 ![OpsNest Linux server home demo](docs/assets/linux-home-v2.jpg)
 
+![OpsNest AI-SSH terminal demo](docs/assets/terminal-v2-en.png)
+
 ## Core features
 
 - Powerful AI-SSH: AI is integrated directly into the SSH terminal. You do not need to memorize complicated command-line syntax; describe what you need in natural language and the AI will help you get the work done.
