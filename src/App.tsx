@@ -4324,6 +4324,29 @@ function looksLikeShellCommand(input: string) {
   const value = input.trim();
   if (!value) return false;
   if (value.startsWith("/cmd ")) return true;
+  // A pasted shell block must stay on the PTY path.  In particular, brace
+  // groups and control structures are valid commands even when their first
+  // line is only `{`, `if`, or `for` and therefore cannot be recognized by a
+  // single-token command whitelist.
+  if (value.includes("\n")) {
+    const lines = value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (
+      lines.some((line) => /^(?:\{|\}|\(|\)|if\b|then\b|elif\b|else\b|fi\b|for\b|while\b|until\b|do\b|done\b|case\b|esac\b)/.test(line))
+    )
+      return true;
+    const commandLines = lines.filter((line) => !/^(?:#|[{}()])/.test(line));
+    if (
+      commandLines.length > 1 &&
+      commandLines.every((line) => {
+        const first = line.split(/\s+/, 1)[0].toLowerCase();
+        return SHELL_COMMANDS.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(line);
+      })
+    )
+      return true;
+  }
   if (/^(?:[.!/~$][^\s]*|[A-Za-z]:\\[^\s]*)/.test(value)) return true;
   if (/[|;&<>`]|	/.test(value)) return true;
   const first = value.split(/\s+/, 1)[0].toLowerCase();
