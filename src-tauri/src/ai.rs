@@ -6,10 +6,45 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-static AI_SSH_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
+struct AiSshCancellation {
+    generation: u64,
+    sender: oneshot::Sender<()>,
+}
 
-fn ai_ssh_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
+static AI_SSH_CANCELLATIONS: OnceLock<Mutex<HashMap<String, AiSshCancellation>>> = OnceLock::new();
+static AI_SSH_CANCELLATION_GENERATION: OnceLock<Mutex<u64>> = OnceLock::new();
+
+fn ai_ssh_cancellations() -> &'static Mutex<HashMap<String, AiSshCancellation>> {
     AI_SSH_CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_ai_ssh_generation() -> u64 {
+    let counter = AI_SSH_CANCELLATION_GENERATION.get_or_init(|| Mutex::new(0));
+    match counter.lock() {
+        Ok(mut generation) => {
+            *generation = generation.wrapping_add(1);
+            *generation
+        }
+        Err(_) => 0,
+    }
+}
+
+struct AiSshCancellationGuard {
+    session_id: String,
+    generation: u64,
+}
+
+impl Drop for AiSshCancellationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ai_ssh_cancellations().lock() {
+            if active
+                .get(&self.session_id)
+                .is_some_and(|entry| entry.generation == self.generation)
+            {
+                active.remove(&self.session_id);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,12 +97,18 @@ fn summarize_execution(executed: &[Value]) -> String {
         .filter(|item| {
             item.get("output")
                 .and_then(Value::as_str)
-                .map(|value| value.contains("[command_error]"))
+                .map(|value| {
+                    value.contains("[command_error]")
+                        || value.contains("__OPSNEST_COMMAND_ERROR__")
+                })
                 .unwrap_or(false)
                 || item
                     .get("verification")
                     .and_then(Value::as_str)
-                    .map(|value| value.contains("[verification_error]"))
+                    .map(|value| {
+                        value.contains("[verification_error]")
+                            || value.contains("__OPSNEST_VERIFICATION_ERROR__")
+                    })
                     .unwrap_or(false)
         })
         .count();
@@ -226,12 +267,23 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         return Err("AI-SSH request is incomplete".into());
     }
     let (cancel_sender, mut cancel_receiver) = oneshot::channel();
+    let cancellation_generation = next_ai_ssh_generation();
     if let Ok(mut active) = ai_ssh_cancellations().lock() {
-        if let Some(previous) = active.insert(request.session_id.clone(), cancel_sender) {
-            let _ = previous.send(());
+        if let Some(previous) = active.insert(
+            request.session_id.clone(),
+            AiSshCancellation {
+                generation: cancellation_generation,
+                sender: cancel_sender,
+            },
+        ) {
+            let _ = previous.sender.send(());
         }
     }
     let session_id = request.session_id.clone();
+    let _cancellation_guard = AiSshCancellationGuard {
+        session_id: session_id.clone(),
+        generation: cancellation_generation,
+    };
     let board_context = ssh_session::session_context(&request.session_id, 12000);
     let conversation_history = ssh_session::conversation_history(&request.session_id, 12000);
     let _ = ssh_session::record_session_event(
@@ -274,7 +326,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
     if let Some(command) = approved_followup.as_deref() {
-        let output = match ssh_session::run_interactive_command(
+        let (output, terminal_marker) = match ssh_session::run_interactive_command_with_marker(
             &request.session_id,
             command,
             true,
@@ -282,15 +334,19 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         )
         .await
         {
-            Ok(value) => value,
-            Err(error) => format!("[command_error] {error}"),
+            Ok(value) => (value.output, Some(value.terminal_marker)),
+            Err(error) => (format!("__OPSNEST_COMMAND_ERROR__{error}"), None),
         };
         let _ = ssh_session::record_session_event(
             &request.session_id,
             "ai_tool_result",
             format!("命令：{}\n输出：{}", command, output),
         );
-        executed.push(serde_json::json!({"command":command,"output":output}));
+        executed.push(serde_json::json!({
+            "command": command,
+            "output": output,
+            "terminalMarker": terminal_marker
+        }));
         messages.push(serde_json::json!({
             "role":"user",
             "content": format!(
@@ -306,16 +362,26 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
             Ok(raw) => raw,
             Err(error) if error == "AI-SSH request cancelled" => {
-                if let Ok(mut active) = ai_ssh_cancellations().lock() {
-                    active.remove(&session_id);
-                }
-                return Err(error);
+                return Ok(serde_json::json!({
+                    "status": "cancelled",
+                    "content": "",
+                    "executed": executed
+                })
+                .to_string());
             }
             Err(error) if recovery_attempts < 1 => {
                 recovery_attempts += 1;
                 let _ = ssh_session::record_session_event(&request.session_id, "ai_recovery", format!("AI 请求失败，正在重试（第 {} 次）：{}", recovery_attempts, error));
                 tokio::time::sleep(Duration::from_millis(500 * u64::from(recovery_attempts))).await;
                 continue;
+            }
+            Err(error) if !executed.is_empty() => {
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "content": format!("AI 请求失败，重试后仍未恢复：{error}"),
+                    "executed": executed
+                })
+                .to_string());
             }
             Err(error) => return Err(format!("AI 请求失败，重试后仍未恢复：{error}")),
         };
@@ -361,8 +427,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             if !approved_for_this_turn && command_requires_approval(&command, &risk) {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
             }
-            let output =
-                match ssh_session::run_interactive_command(
+            let execution =
+                match ssh_session::run_interactive_command_with_marker(
                     &request.session_id,
                     &command,
                     true,
@@ -371,9 +437,16 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     .await
                 {
                     Ok(value) => value,
-                    Err(error) => format!("[command_error] {error}"),
+                    Err(error) => ssh_session::InteractiveCommandResult {
+                        output: format!("__OPSNEST_COMMAND_ERROR__{error}"),
+                        terminal_marker: String::new(),
+                    },
                 };
-            if output.contains("[command_error]") {
+            let output = execution.output;
+            let terminal_marker = execution.terminal_marker;
+            if output.contains("[command_error]")
+                || output.contains("__OPSNEST_COMMAND_ERROR__")
+            {
                 recovery_attempts = recovery_attempts.saturating_add(1);
                 let _ = ssh_session::record_session_event(
                     &request.session_id,
@@ -381,11 +454,11 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     format!("命令执行失败，已把错误返回给模型继续恢复：{}", output),
                 );
             }
-            let verification = if verify_command.is_empty() || verify_command == command {
-                None
+            let (verification, verification_marker) = if verify_command.is_empty() || verify_command == command {
+                (None, None)
             } else {
-                Some(
-                    match ssh_session::run_interactive_command(
+                let verification_execution =
+                    match ssh_session::run_interactive_command_with_marker(
                         &request.session_id,
                         &verify_command,
                         true,
@@ -394,8 +467,14 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     .await
                     {
                         Ok(value) => value,
-                        Err(error) => format!("[verification_error] {error}"),
-                    },
+                        Err(error) => ssh_session::InteractiveCommandResult {
+                            output: format!("__OPSNEST_VERIFICATION_ERROR__{error}"),
+                            terminal_marker: String::new(),
+                        },
+                    };
+                (
+                    Some(verification_execution.output),
+                    Some(verification_execution.terminal_marker),
                 )
             };
             let _ = ssh_session::record_session_event(
@@ -411,9 +490,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                         .unwrap_or_default()
                 ),
             );
-            executed.push(
-                serde_json::json!({"command":command,"output":output,"verification":verification}),
-            );
+            executed.push(serde_json::json!({
+                "command": command,
+                "output": output,
+                "verification": verification,
+                "terminalMarker": terminal_marker,
+                "verificationTerminalMarker": verification_marker
+            }));
             let tool_call_id = call
                 .get("id")
                 .and_then(Value::as_str)
@@ -451,7 +534,7 @@ pub fn cancel_ai_ssh_chat(session_id: String) -> Result<(), String> {
         .map_err(|_| "AI-SSH cancellation state is unavailable".to_string())?
         .remove(&session_id);
     if let Some(sender) = sender {
-        let _ = sender.send(());
+        let _ = sender.sender.send(());
     }
     Ok(())
 }

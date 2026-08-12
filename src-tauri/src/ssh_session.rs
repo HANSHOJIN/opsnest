@@ -213,16 +213,18 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
         // runner. Keep the surrounding output for the model, but never expose
         // the opaque marker token itself as useful terminal context.
         let mut text = event.text.clone();
-        while let Some(start) = text.find("__OPSNEST_INTERACTIVE_END_") {
-            let remainder = &text[start + "__OPSNEST_INTERACTIVE_END_".len()..];
-            if let Some(end) = remainder.find("__") {
-                text.replace_range(
-                    start..start + "__OPSNEST_INTERACTIVE_END_".len() + end + 2,
-                    "",
-                );
-            } else {
-                text.truncate(start);
-                break;
+        for prefix in [
+            "__OPSNEST_INTERACTIVE_START_",
+            "__OPSNEST_INTERACTIVE_END_",
+        ] {
+            while let Some(start) = text.find(prefix) {
+                let remainder = &text[start + prefix.len()..];
+                if let Some(end) = remainder.find("__") {
+                    text.replace_range(start..start + prefix.len() + end + 2, "");
+                } else {
+                    text.truncate(start);
+                    break;
+                }
             }
         }
         lines.push(format!("[{}] {}", event.kind, text));
@@ -448,7 +450,6 @@ pub async fn open_interactive_ssh_terminal(
                         output.extend_from_slice(&data);
                     }
                     append_blackboard(&shell, "terminal_output", text.clone());
-                    shell.notify.notify_waiters();
                     let _ = app.emit(
                         "ssh-terminal-output",
                         TerminalEvent {
@@ -457,6 +458,10 @@ pub async fn open_interactive_ssh_terminal(
                             closed: false,
                         },
                     );
+                    // Publish the visible PTY bytes before waking the AI tool
+                    // waiter. This preserves terminal ordering when the tool
+                    // result immediately starts a model summary request.
+                    shell.notify.notify_waiters();
                 }
                 ChannelMsg::Close => break,
                 _ => {}
@@ -550,12 +555,21 @@ pub fn get_ssh_session_blackboard(session_id: String) -> Result<BlackboardSnapsh
     Ok(snapshot_blackboard(&shell, &session_id))
 }
 
-pub async fn run_interactive_command(
+pub struct InteractiveCommandResult {
+    pub output: String,
+    pub terminal_marker: String,
+}
+
+fn command_result_error(error: impl ToString) -> String {
+    format!("__OPSNEST_COMMAND_ERROR__{}", error.to_string())
+}
+
+pub async fn run_interactive_command_with_marker(
     session_id: &str,
     command: &str,
     approved: bool,
     sudo_password: Option<&str>,
-) -> Result<String, String> {
+) -> Result<InteractiveCommandResult, String> {
     let lowered = command.to_ascii_lowercase();
     let risky = [
         "sudo ",
@@ -586,16 +600,23 @@ pub async fn run_interactive_command(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
+    let marker_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let start_marker = format!("__OPSNEST_INTERACTIVE_START_{marker_id}__");
+    let marker = format!("__OPSNEST_INTERACTIVE_END_{marker_id}__");
     // Keep the completion marker and the following real shell prompt atomic
     // relative to direct input and other tool commands.
-    let _execution = shell.execution.lock().await;
-    let marker = format!(
-        "__OPSNEST_INTERACTIVE_END_{}__",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    );
+    let _execution = match tokio::time::timeout(Duration::from_secs(120), shell.execution.lock()).await {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Ok(InteractiveCommandResult {
+                output: command_result_error("Interactive command queue timed out"),
+                terminal_marker: String::new(),
+            })
+        }
+    };
     append_blackboard(&shell, "ai_command", command.trim().to_string());
     let (command_to_run, sudo_password) = prepare_sudo_command(command, sudo_password);
     let start = shell
@@ -605,7 +626,7 @@ pub async fn run_interactive_command(
         .len();
     {
         let writer = shell.writer.lock().await;
-        writer
+        if let Err(error) = writer
             // Emit a self-contained completion record. The command's exit
             // code is captured before the marker, so completion never depends
             // on a prompt arriving within an arbitrary timing window.
@@ -613,17 +634,36 @@ pub async fn run_interactive_command(
             // Sending them as two lines makes an interactive shell print a
             // prompt after the command and another prompt after the marker,
             // which leaks duplicate prompts into the terminal blackboard.
-            .data_bytes(format!("{}; rc=$?; printf '{} rc=%s\\n' \"$rc\"\n", command_to_run, marker).into_bytes())
+            // Remote echo is disabled. The start/end records turn the PTY
+            // stream into an explicit transaction, so the UI never has to
+            // clear rows or guess where the previous prompt ended.
+            .data_bytes(
+                format!(
+                    "printf '\\r\\n{}\\r\\n'; {}; rc=$?; printf '{} rc=%s\\n' \"$rc\"\n",
+                    start_marker, command_to_run, marker
+                )
+                .into_bytes(),
+            )
             .await
-            .map_err(|error| error.to_string())?;
+        {
+            return Ok(InteractiveCommandResult {
+                output: command_result_error(error),
+                terminal_marker: String::new(),
+            });
+        }
         // `sudo -S` reads this directly from the PTY after the command has
         // started. The password is not part of the shell command, terminal
         // output, blackboard, model request, or portable JSON files.
         if let Some(password) = sudo_password {
-            writer
+            if let Err(error) = writer
                 .data_bytes(format!("{password}\n").into_bytes())
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                return Ok(InteractiveCommandResult {
+                    output: command_result_error(error),
+                    terminal_marker: String::new(),
+                });
+            }
         }
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
@@ -640,15 +680,40 @@ pub async fn run_interactive_command(
             // Return only command output. The marker line is the protocol
             // boundary; the following shell prompt remains in the PTY stream
             // and is rendered once by the terminal listener.
-            return Ok(text[..index].trim_end_matches(['\r', '\n']).to_string());
+            let output_start = text
+                .find(&start_marker)
+                .map(|start_index| start_index + start_marker.len())
+                .unwrap_or_default();
+            return Ok(InteractiveCommandResult {
+                output: text[output_start..index]
+                    .trim_matches(['\r', '\n'])
+                    .to_string(),
+                terminal_marker: marker,
+            });
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err("Interactive command timed out".into());
+            return Ok(InteractiveCommandResult {
+                output: command_result_error("Interactive command timed out"),
+                terminal_marker: marker,
+            });
         }
         tokio::time::timeout(Duration::from_secs(2), shell.notify.notified())
             .await
             .ok();
     }
+}
+
+pub async fn run_interactive_command(
+    session_id: &str,
+    command: &str,
+    approved: bool,
+    sudo_password: Option<&str>,
+) -> Result<String, String> {
+    Ok(
+        run_interactive_command_with_marker(session_id, command, approved, sudo_password)
+            .await?
+            .output,
+    )
 }
 
 #[tauri::command]

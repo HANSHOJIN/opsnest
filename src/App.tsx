@@ -4368,10 +4368,45 @@ function isRiskyShellCommand(input: string) {
   return RISKY_SHELL_PARTS.some((part) => value.includes(part));
 }
 const terminalBuffers = new Map<string, string>();
+const terminalPrompts = new Map<string, string>();
 const remoteCommandCache = new Map<string, boolean>();
 const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
   return `opsnest-terminal-buffer:${sessionId}`;
+}
+function terminalPromptStorageKey(sessionId: string) {
+  return `opsnest-terminal-prompt:${sessionId}`;
+}
+function readTerminalOutput(sessionId: string) {
+  const cached = terminalBuffers.get(sessionId);
+  if (cached) return cached;
+  try {
+    const stored = window.sessionStorage.getItem(terminalBufferStorageKey(sessionId)) ?? "";
+    if (stored) terminalBuffers.set(sessionId, stored);
+    return stored;
+  } catch {
+    return "";
+  }
+}
+function readTerminalPrompt(sessionId: string) {
+  const cached = terminalPrompts.get(sessionId);
+  if (cached) return cached;
+  try {
+    const stored = window.sessionStorage.getItem(terminalPromptStorageKey(sessionId)) ?? "";
+    if (stored) terminalPrompts.set(sessionId, stored);
+    return stored;
+  } catch {
+    return "";
+  }
+}
+function rememberTerminalPrompt(sessionId: string, prompt: string) {
+  if (!prompt) return;
+  terminalPrompts.set(sessionId, prompt);
+  try {
+    window.sessionStorage.setItem(terminalPromptStorageKey(sessionId), prompt);
+  } catch {
+    /* storage is best effort */
+  }
 }
 function rememberTerminalOutput(sessionId: string, data: string) {
   if (!data) return;
@@ -4386,8 +4421,10 @@ function rememberTerminalOutput(sessionId: string, data: string) {
 }
 function clearTerminalOutput(sessionId: string) {
   terminalBuffers.delete(sessionId);
+  terminalPrompts.delete(sessionId);
   try {
     window.sessionStorage.removeItem(terminalBufferStorageKey(sessionId));
+    window.sessionStorage.removeItem(terminalPromptStorageKey(sessionId));
   } catch {
     /* storage is best effort */
   }
@@ -4434,7 +4471,7 @@ function InteractiveTerminalPanel({
   // bytes and ANSI control sequences on the native xterm path until Ctrl+C.
   const rawPtyModeRef = React.useRef(false);
   const rawPtyExitRequestedRef = React.useRef(false);
-  const promptRef = React.useRef("");
+  const promptRef = React.useRef(readTerminalPrompt(server.id));
   const promptVersionRef = React.useRef(0);
   const pendingRef = React.useRef<string | null>(null);
   const sessionContextRef = React.useRef<SessionContextItem[]>([]);
@@ -4443,6 +4480,7 @@ function InteractiveTerminalPanel({
   const approveHandlerRef = React.useRef<((command: string) => void) | null>(
     null,
   );
+  const stopHandlerRef = React.useRef<(() => void) | null>(null);
   const [pendingApproval, setPendingApproval] = React.useState<string | null>(
     null,
   );
@@ -4506,31 +4544,87 @@ function InteractiveTerminalPanel({
     }));
     const focusRequested = () => term.focus();
     window.addEventListener("opsnest-focus-ssh-terminal", focusRequested);
-    let promptSeenSinceOperation = false;
     let renderEndsWithNewline = false;
     // Do not let a second user line silently queue behind an AI/tool operation
     // on the same PTY. The backend also serializes writes for this session.
     let terminalOperationInFlight = false;
+    let aiOrchestrationActive = false;
+    let aiSummaryFinished = false;
+    let aiConclusionRendered = false;
+    let noToolDecisionReady = false;
+    let aiOperationHadTools = false;
+    let awaitingPromptAfterMarker = false;
+    let deferredPromptTail = "";
+    let promptTailSettleTimer: number | undefined;
+    let finalPromptWaitTimer: number | undefined;
+    let toolRaceGraceTimer: number | undefined;
+    let suppressLatePromptOnce = false;
+    let orchestrationGeneration = 0;
+    let pendingAiConclusion = "";
+    let restorePromptAfterConclusion = false;
+    const expectedToolMarkers = new Set<string>();
+    const startedToolMarkers = new Set<string>();
+    const completedToolMarkers = new Set<string>();
+    let sshClosed = false;
     const focusTerminal = () => term.focus();
     host.addEventListener("mousedown", focusTerminal);
-    const render = (data: string, persist = true) => {
+    const stripTerminalControl = (data: string) =>
+      data
+        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+        .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+    const extractTrailingPrompt = (data: string) => {
+      const plain = stripTerminalControl(data);
+      const promptText = plain.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const prompt = promptText.match(
+        /(?:^|\n)([^\n]{1,240}(?:#|\$|%|\u276f|\u279c)\s?)$/u,
+      );
+      if (prompt?.[1] && !prompt[1].includes("AI 正在处理")) return prompt[1];
+      const lastLine = promptText.split("\n").at(-1) ?? "";
+      if (promptRef.current && lastLine.trim() === promptRef.current.trim())
+        return lastLine;
+      return null;
+    };
+    const detectTrailingPrompt = (data: string) => {
+      const prompt = extractTrailingPrompt(data);
+      if (!prompt) return null;
+      promptRef.current = prompt;
+      rememberTerminalPrompt(server.id, prompt);
+      promptVersionRef.current += 1;
+      return prompt;
+    };
+    const splitKnownTrailingPrompt = (data: string) => {
+      const trailingBreak = data.match(/(?:\r?\n)+$/)?.[0] ?? "";
+      const body = trailingBreak ? data.slice(0, -trailingBreak.length) : data;
+      const prompt = extractTrailingPrompt(body);
+      if (!prompt) return null;
+      const lineStart = body.lastIndexOf("\n") + 1;
+      const candidate = body.slice(lineStart);
+      if (stripTerminalControl(candidate).replace(/\r/g, "").trim() !== prompt.trim())
+        return null;
+      return { before: body.slice(0, lineStart), prompt: candidate };
+    };
+    const splitStructuralPromptTail = (data: string) => {
+      const trailingBreak = data.match(/(?:\r?\n)+$/)?.[0] ?? "";
+      const body = trailingBreak ? data.slice(0, -trailingBreak.length) : data;
+      const lineStart = body.lastIndexOf("\n") + 1;
+      const candidate = body.slice(lineStart);
+      const plain = stripTerminalControl(candidate).replace(/\r/g, "");
+      if (!plain.trim() || plain.length > 240) return null;
+      return { before: body.slice(0, lineStart), prompt: candidate, plain };
+    };
+    const render = (data: string, persist = true, observePrompt = false) => {
       // Keep the last shell prompt locally. AI-SSH must not send an empty
       // carriage return to the remote shell just to redraw it: bash treats
       // that as an empty command and emits a duplicate prompt.
       const plain = data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
       const promptText = plain.replace(/\r/g, "\n");
       if (persist) rememberTerminalOutput(server.id, data);
-      const prompt = promptText.match(/(?:^|\n)([^\n]{1,160}(?:#|\$)\s?)$/);
-      if (prompt?.[1] && !prompt[1].includes("AI 正在处理")) {
-        promptRef.current = prompt[1];
-        promptVersionRef.current += 1;
-        promptSeenSinceOperation = true;
-      }
-      if (activeCommandRef.current && plain.trim()) {
+      const prompt = observePrompt ? detectTrailingPrompt(data) : null;
+      if (observePrompt && activeCommandRef.current && plain.trim()) {
         activeCommandOutputRef.current += `${promptText}\n`;
-        if (prompt?.[1]) {
+        if (prompt) {
           const result = activeCommandOutputRef.current
-            .replace(prompt[1], "")
+            .replace(prompt, "")
             .trim();
           sessionContextRef.current.push({
             role: "result",
@@ -4543,13 +4637,13 @@ function InteractiveTerminalPanel({
       if (
         data.includes("AI 正在处理") ||
         data.includes("• ") ||
-        (prompt?.[1] && data.includes(prompt[1]))
+        (prompt && data.includes(prompt))
       ) {
         void writeDebugLog("debug", "AI-SSH terminal render", {
           serverId: server.id,
           length: data.length,
           hasProcessing: data.includes("AI 正在处理"),
-          hasPrompt: Boolean(prompt?.[1]),
+          hasPrompt: Boolean(prompt),
         });
       }
       // Several sources (Enter handling, AI status, and PTY output) can each
@@ -4563,27 +4657,182 @@ function InteractiveTerminalPanel({
     };
     const renderRawPty = (data: string, persist = true) => {
       if (persist) rememberTerminalOutput(server.id, data);
+      detectTrailingPrompt(data);
       term.write(data, () => {
         term.scrollToBottom();
         term.refresh(0, term.rows - 1);
       });
     };
-    const separateIncomingPrompt = (data: string) => {
-      const prompt = promptRef.current.trim();
-      if (!prompt || !/(?:^|\r?\n)[^\r\n]{1,160}(?:#|\$)\s*$/.test(
-        data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, ""),
-      )) return;
-      const currentLine =
-        term.buffer.active
-          .getLine(term.buffer.active.cursorY)
-          ?.translateToString(true) ?? "";
-      // The local AI editor echoes input while the remote shell echoes its
-      // next prompt separately. Preserve every existing row and only insert
-      // a line break when that prompt would otherwise be appended to input.
-      if (currentLine.includes(prompt) && currentLine.trim() !== prompt)
-        term.write("\r\n");
+    const clearPromptTailSettleTimer = () => {
+      if (promptTailSettleTimer !== undefined) {
+        window.clearTimeout(promptTailSettleTimer);
+        promptTailSettleTimer = undefined;
+      }
     };
-    const previous = terminalBuffers.get(server.id);
+    const clearFinalizationTimers = () => {
+      clearPromptTailSettleTimer();
+      if (finalPromptWaitTimer !== undefined) {
+        window.clearTimeout(finalPromptWaitTimer);
+        finalPromptWaitTimer = undefined;
+      }
+      if (toolRaceGraceTimer !== undefined) {
+        window.clearTimeout(toolRaceGraceTimer);
+        toolRaceGraceTimer = undefined;
+      }
+    };
+    const resetAiOrchestration = () => {
+      clearFinalizationTimers();
+      aiOrchestrationActive = false;
+      aiSummaryFinished = false;
+      aiConclusionRendered = false;
+      noToolDecisionReady = false;
+      aiOperationHadTools = false;
+      awaitingPromptAfterMarker = false;
+      deferredPromptTail = "";
+      pendingAiConclusion = "";
+      restorePromptAfterConclusion = false;
+      expectedToolMarkers.clear();
+      startedToolMarkers.clear();
+      completedToolMarkers.clear();
+      terminalOperationInFlight = false;
+    };
+    const observeSettledPromptTail = (data: string) => {
+      if (detectTrailingPrompt(data) || /(?:\r\n|\n)$/.test(data)) return;
+      const split = splitStructuralPromptTail(data);
+      if (!split) return;
+      promptRef.current = split.plain;
+      rememberTerminalPrompt(server.id, split.plain);
+      promptVersionRef.current += 1;
+    };
+    const flushDeferredPromptTail = () => {
+      if (
+        !aiOrchestrationActive ||
+        !aiConclusionRendered ||
+        !awaitingPromptAfterMarker ||
+        !deferredPromptTail
+      )
+        return;
+      const promptTail = deferredPromptTail;
+      const confirmedPrompt = Boolean(
+        extractTrailingPrompt(promptTail) ||
+          (!/(?:\r\n|\n)$/.test(promptTail) &&
+            splitStructuralPromptTail(promptTail)),
+      );
+      if (confirmedPrompt) observeSettledPromptTail(promptTail);
+      resetAiOrchestration();
+      if (!confirmedPrompt) suppressLatePromptOnce = true;
+      render(promptTail, true, false);
+    };
+    const armPromptTailSettle = () => {
+      clearPromptTailSettleTimer();
+      if (
+        !aiOrchestrationActive ||
+        !aiConclusionRendered ||
+        !awaitingPromptAfterMarker ||
+        !deferredPromptTail
+      )
+        return;
+      const generation = orchestrationGeneration;
+      promptTailSettleTimer = window.setTimeout(() => {
+        promptTailSettleTimer = undefined;
+        if (generation !== orchestrationGeneration) return;
+        flushDeferredPromptTail();
+      }, 1200);
+    };
+    const toolBarrierSatisfied = () => {
+      const markers = new Set([...expectedToolMarkers, ...startedToolMarkers]);
+      if (markers.size > 0)
+        return [...markers].every((marker) =>
+          completedToolMarkers.has(marker),
+        );
+      return false;
+    };
+    let tryFinalizeAiConclusion = () => undefined;
+    const armFinalPromptWait = () => {
+      if (finalPromptWaitTimer !== undefined) return;
+      const generation = orchestrationGeneration;
+      finalPromptWaitTimer = window.setTimeout(() => {
+        finalPromptWaitTimer = undefined;
+        // Never synthesize a prompt. If a shell does not emit one, release the
+        // input lock and let any genuinely late PTY bytes render normally.
+        if (
+          aiOrchestrationActive &&
+          generation === orchestrationGeneration &&
+          aiConclusionRendered &&
+          awaitingPromptAfterMarker &&
+          !deferredPromptTail
+        ) {
+          const restoredPrompt = promptRef.current;
+          resetAiOrchestration();
+          if (restoredPrompt) {
+            render(restoredPrompt);
+            suppressLatePromptOnce = true;
+          }
+        }
+      }, 2200);
+    };
+    tryFinalizeAiConclusion = () => {
+      if (!aiOrchestrationActive || !aiSummaryFinished) return;
+      if (aiOperationHadTools && !toolBarrierSatisfied()) return;
+      if (!aiOperationHadTools && !noToolDecisionReady) return;
+      if (!aiConclusionRendered) {
+        if (pendingAiConclusion) render(pendingAiConclusion);
+        aiConclusionRendered = true;
+      }
+      if (!aiOperationHadTools) {
+        const restorePrompt = restorePromptAfterConclusion && promptRef.current;
+        resetAiOrchestration();
+        if (restorePrompt) render(restorePrompt);
+        return;
+      }
+      if (!awaitingPromptAfterMarker) return;
+      if (deferredPromptTail) {
+        if (extractTrailingPrompt(deferredPromptTail)) flushDeferredPromptTail();
+        else armPromptTailSettle();
+      } else {
+        armFinalPromptWait();
+      }
+    };
+    const finishAiSummary = (
+      hadTools: boolean,
+      restoreLocalPrompt: boolean,
+      conclusion = "",
+      definitiveNoTools = true,
+    ) => {
+      aiSummaryFinished = true;
+      aiOperationHadTools ||= hadTools;
+      pendingAiConclusion = conclusion;
+      restorePromptAfterConclusion = restoreLocalPrompt;
+      noToolDecisionReady = definitiveNoTools || aiOperationHadTools;
+      if (!noToolDecisionReady && toolRaceGraceTimer === undefined) {
+        const generation = orchestrationGeneration;
+        toolRaceGraceTimer = window.setTimeout(() => {
+          toolRaceGraceTimer = undefined;
+          if (generation !== orchestrationGeneration) return;
+          noToolDecisionReady = true;
+          tryFinalizeAiConclusion();
+        }, 300);
+      }
+      tryFinalizeAiConclusion();
+    };
+    const beginAiOrchestration = () => {
+      clearFinalizationTimers();
+      orchestrationGeneration += 1;
+      aiOrchestrationActive = true;
+      aiSummaryFinished = false;
+      aiConclusionRendered = false;
+      noToolDecisionReady = false;
+      aiOperationHadTools = false;
+      awaitingPromptAfterMarker = false;
+      deferredPromptTail = "";
+      pendingAiConclusion = "";
+      restorePromptAfterConclusion = false;
+      expectedToolMarkers.clear();
+      startedToolMarkers.clear();
+      completedToolMarkers.clear();
+      terminalOperationInFlight = true;
+    };
+    const previous = readTerminalOutput(server.id);
     if (previous) render(previous, false);
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
@@ -4668,6 +4917,7 @@ function InteractiveTerminalPanel({
         // let xterm emit the erase byte to the remote PTY.
         if (rawPtyModeRef.current) return true;
         event.preventDefault();
+        if (terminalOperationInFlight) return false;
         keyBackspaceHandled = true;
         eraseInputCharacter();
         window.setTimeout(() => {
@@ -4688,79 +4938,6 @@ function InteractiveTerminalPanel({
       }
       return true;
     });
-    const refreshPrompt = () => {
-      if (!promptRef.current) return;
-      // Redraw the current local PTY line in place. Sending a carriage return
-      // to the remote shell executes an empty command and creates an extra
-      // prompt; adding a newline here would also leave a blank line before it.
-      term.write(`\r\x1b[2K${promptRef.current}`, () =>
-        term.refresh(0, term.rows - 1),
-      );
-    };
-    let promptRecoveryGeneration = 0;
-    const schedulePromptRecovery = () => {
-      // The PTY prompt is authoritative. A local fallback prompt can race
-      // with delayed PTY chunks and create repeated prompts, so never append
-      // synthetic prompts here.
-      return;
-      /*
-      // The PTY prompt can arrive in a later SSH event than the AI response.
-      // Check several nearby lines and retry briefly: xterm writes are
-      // asynchronous, so a single timer can observe the cursor before the
-      // final AI chunk has been laid out.  Never add a prompt when one is
-      // already present in the cursor neighbourhood.
-      const generation = ++promptRecoveryGeneration;
-      const delays = [120, 320, 700, 1200];
-      delays.forEach((delay, index) => {
-        window.setTimeout(() => {
-          if (disposed || generation !== promptRecoveryGeneration || !promptRef.current) return;
-          const buffer = term.buffer.active;
-          const prompt = promptRef.current.trim();
-          // Only inspect the cursor neighbourhood. Looking through the last
-          // dozen history rows can find an old prompt from before the AI
-          // response and incorrectly conclude that the active prompt exists.
-          const start = Math.max(0, buffer.cursorY - 2);
-          const end = Math.min(buffer.length - 1, buffer.cursorY + 1);
-          let promptRow = -1;
-          for (let row = start; row <= end; row += 1) {
-            const line = buffer.getLine(row)?.translateToString(true) ?? "";
-            if (line.trim() === prompt) {
-              term.scrollToBottom();
-              return;
-            }
-            if (line.includes(prompt)) promptRow = row;
-          }
-          // A locally echoed line can leave the prompt and submitted input on
-          // the same xterm row (for example `root# cd ..root#`). Clear that
-          // stale row before restoring the prompt; otherwise Backspace appears
-          // to delete the second prompt because it is only visual residue.
-          if (promptRow >= 0) {
-            term.write(`\r\x1b[2K${prompt}`);
-            term.scrollToBottom();
-            term.refresh(0, term.rows - 1);
-            return;
-          }
-          // Earlier checks only observe.  This prevents several timers from
-          // appending the same fallback prompt when xterm is still flushing.
-          if (index !== delays.length - 1) return;
-          const currentLine = buffer.getLine(buffer.cursorY)?.translateToString(true) ?? "";
-          if (currentLine.trim() === prompt) {
-            term.scrollToBottom();
-            return;
-          }
-          if (currentLine.includes(prompt)) {
-            term.write(`\r\x1b[2K${prompt}`);
-            term.scrollToBottom();
-            term.refresh(0, term.rows - 1);
-            return;
-          }
-          if (currentLine.trim()) term.write(`\r\n${prompt}`);
-          else term.write(prompt);
-          term.scrollToBottom();
-          term.refresh(0, term.rows - 1);
-        }, delay);
-      }); */
-    };
     const askAi = async (prompt: string, approved: boolean) => {
       if (terminalOperationInFlight) {
         render("\r\n\x1b[38;5;220mAI is still handling the previous request. Please wait.\x1b[0m\r\n");
@@ -4777,10 +4954,11 @@ function InteractiveTerminalPanel({
       });
       if (!currentModel.baseUrl.trim() || !currentModel.model.trim()) {
         render("\r\n\x1b[31mAI 模型尚未配置\x1b[0m\r\n");
-        refreshPrompt();
+        terminalOperationInFlight = false;
+        if (promptRef.current) render(promptRef.current);
         return;
       }
-      promptSeenSinceOperation = false;
+      beginAiOrchestration();
       render("\r\n\x1b[38;5;114m• AI 正在处理…\x1b[0m\r\n");
       sessionContextRef.current.push({
         role: "user_question",
@@ -4820,20 +4998,53 @@ function InteractiveTerminalPanel({
             sudoPassword,
           },
         });
-        if (cancelRequestedRef.current) return;
         const result = JSON.parse(raw) as {
           status?: string;
           command?: string;
           content?: string;
           summary?: string;
-          executed?: Array<{ command: string; output: string }>;
+          executed?: Array<{
+            command: string;
+            output: string;
+            terminalMarker?: string;
+            verificationTerminalMarker?: string;
+          }>;
         };
+        const completedMarkers = (result.executed ?? []).flatMap((item) =>
+          [item.terminalMarker, item.verificationTerminalMarker].filter(
+            (marker): marker is string => Boolean(marker),
+          ),
+        );
+        if (completedMarkers.length) {
+          aiOperationHadTools = true;
+          completedMarkers.forEach((marker) => expectedToolMarkers.add(marker));
+        }
+        if (cancelRequestedRef.current) {
+          updateWorkStatus("stopped", "已停止", false);
+          finishAiSummary(
+            completedMarkers.length > 0,
+            completedMarkers.length === 0,
+            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            true,
+          );
+          return;
+        }
         void writeDebugLog("debug", "AI-SSH model response received", {
           serverId: server.id,
           status: result.status ?? "unknown",
           hasContent: Boolean(result.content),
           executed: result.executed?.length ?? 0,
         });
+        if (result.status === "cancelled") {
+          updateWorkStatus("stopped", "已停止", false);
+          finishAiSummary(
+            completedMarkers.length > 0,
+            completedMarkers.length === 0,
+            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            true,
+          );
+          return;
+        }
         if (result.status === "approval_required" && result.command) {
           updateWorkStatus("approval", "等待确认执行", false);
           const command = result.command;
@@ -4846,15 +5057,16 @@ function InteractiveTerminalPanel({
             `AI 请求执行以下命令：\n\n${command}\n\n确认执行？`,
           );
           if (approved) {
-            // Release the analysis guard before starting the approval
-            // continuation. The continuation is a new AI request that
-            // executes the exact approved command and receives its result.
-            terminalOperationInFlight = false;
             pendingRef.current = null;
             setPendingApproval(null);
-            approveHandlerRef.current?.(command);
+            await executeApprovedCommand(command, true);
           } else {
-            render("\r\n\x1b[38;5;220m• 已取消 AI 命令执行\x1b[0m\r\n");
+            finishAiSummary(
+              completedMarkers.length > 0,
+              completedMarkers.length === 0,
+              "\r\n\x1b[38;5;220m• 已取消 AI 命令执行\x1b[0m\r\n",
+              true,
+            );
           }
           return;
         }
@@ -4874,38 +5086,54 @@ function InteractiveTerminalPanel({
               detail: `$ ${item.command}\n${item.output}`,
             }).catch(() => undefined);
           }
+        const resultFailed = result.status === "error";
+        let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({
             role: "ai_reply",
             content: result.content,
           });
-          render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`);
+          conclusion = resultFailed
+            ? `\r\n\x1b[31m${result.content}\x1b[0m\r\n`
+            : `\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`;
           void appendActivity({
             category: "ai",
             title: `AI-SSH · ${server.name}`,
             detail: `AI: ${result.content}`,
           }).catch(() => undefined);
         }
-        updateWorkStatus("done", "AI 已完成", false);
+        finishAiSummary(
+          completedMarkers.length > 0,
+          completedMarkers.length === 0,
+          conclusion,
+          true,
+        );
+        updateWorkStatus(
+          resultFailed ? "error" : "done",
+          resultFailed ? "AI 请求失败" : "AI 已完成",
+          false,
+        );
         window.setTimeout(() => {
-          if (workStatusRef.current?.kind === "done") {
+          if (
+            workStatusRef.current?.kind === "done" ||
+            workStatusRef.current?.kind === "error"
+          ) {
             workStatusRef.current = null;
             setWorkStatus(null);
           }
         }, 1800);
         pendingRef.current = null;
-        // The PTY may emit its prompt in a separate chunk. Restore it locally
-        // after every AI conclusion without sending another remote command.
-        // A tool execution waits for the real PTY prompt in Rust, so do not
-        // redraw it locally (that would create a second prompt). Only plain
-        // AI replies need the local fallback.
-        // Keep the real PTY prompt as the source of truth. The recovery check
-        // only redraws when the current xterm line lacks that prompt; it never
-        // sends an empty carriage return, so it cannot execute a blank command.
-        schedulePromptRecovery();
       } catch (reason) {
         if (cancelRequestedRef.current) {
           updateWorkStatus("stopped", "已停止", false);
+          if (sshClosed) resetAiOrchestration();
+          else
+            finishAiSummary(
+              aiOperationHadTools,
+              !aiOperationHadTools,
+              "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+              false,
+            );
           return;
         }
         updateWorkStatus("error", "AI 请求失败", false);
@@ -4913,19 +5141,32 @@ function InteractiveTerminalPanel({
           serverId: server.id,
           error: String(reason),
         });
-        render(`\r\n\x1b[31mAI-SSH 请求失败：${String(reason)}\x1b[0m\r\n`);
-        refreshPrompt();
+        if (sshClosed) resetAiOrchestration();
+        else
+          finishAiSummary(
+            aiOperationHadTools,
+            !aiOperationHadTools,
+            `\r\n\x1b[31mAI-SSH 请求失败：${String(reason)}\x1b[0m\r\n`,
+            false,
+          );
       } finally {
-        terminalOperationInFlight = false;
+        if (!aiOrchestrationActive) terminalOperationInFlight = false;
       }
     };
-    const executeApprovedCommand = async (command: string) => {
-      if (terminalOperationInFlight) return;
-      terminalOperationInFlight = true;
+    const executeApprovedCommand = async (command: string, continuation = false) => {
+      if (terminalOperationInFlight && !continuation) return;
       cancelRequestedRef.current = false;
+      if (!continuation) beginAiOrchestration();
+      else {
+        clearFinalizationTimers();
+        aiSummaryFinished = false;
+        aiConclusionRendered = false;
+        noToolDecisionReady = false;
+        pendingAiConclusion = "";
+        restorePromptAfterConclusion = false;
+      }
       updateWorkStatus("executing", "正在执行命令");
       try {
-        promptSeenSinceOperation = false;
         const sudoPassword = await invoke<string | null>(
           "load_server_sudo_credential",
           { serverId: server.id },
@@ -4944,22 +5185,64 @@ function InteractiveTerminalPanel({
             sudoPassword,
           },
         });
-        if (cancelRequestedRef.current) return;
         const result = JSON.parse(raw) as {
+          status?: string;
           content?: string;
-          executed?: Array<{ command: string; output: string }>;
+          executed?: Array<{
+            command: string;
+            output: string;
+            terminalMarker?: string;
+            verificationTerminalMarker?: string;
+          }>;
         };
+        const completedMarkers = (result.executed ?? []).flatMap((item) =>
+          [item.terminalMarker, item.verificationTerminalMarker].filter(
+            (marker): marker is string => Boolean(marker),
+          ),
+        );
+        completedMarkers.forEach((marker) => expectedToolMarkers.add(marker));
+        if (completedMarkers.length) aiOperationHadTools = true;
+        if (cancelRequestedRef.current) {
+          updateWorkStatus("stopped", "已停止", false);
+          finishAiSummary(
+            aiOperationHadTools,
+            !aiOperationHadTools,
+            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            true,
+          );
+          return;
+        }
+        if (result.status === "cancelled") {
+          updateWorkStatus("stopped", "已停止", false);
+          finishAiSummary(
+            aiOperationHadTools,
+            !aiOperationHadTools,
+            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            true,
+          );
+          return;
+        }
         pendingRef.current = null;
         setPendingApproval(null);
+        const resultFailed = result.status === "error";
+        let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({ role: "ai_reply", content: result.content });
-          render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`);
+          conclusion = resultFailed
+            ? `\r\n\x1b[31m${result.content}\x1b[0m\r\n`
+            : `\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`;
           void appendActivity({
             category: "ai",
             title: `AI-SSH · ${server.name}`,
             detail: `AI: ${result.content}`,
           }).catch(() => undefined);
         }
+        finishAiSummary(
+          aiOperationHadTools,
+          !aiOperationHadTools,
+          conclusion,
+          true,
+        );
         // The interactive command already consumes the remote prompt. Never
         // send an empty carriage return just to make it visible.
         // The approved command path also waits for the real prompt.
@@ -4968,67 +5251,251 @@ function InteractiveTerminalPanel({
           title: `AI-SSH · ${server.name}`,
           detail: `$ ${command}\n${result.executed?.[0]?.output ?? ""}`,
         }).catch(() => undefined);
-        updateWorkStatus("done", "命令已完成", false);
+        updateWorkStatus(
+          resultFailed ? "error" : "done",
+          resultFailed ? "AI 请求失败" : "命令已完成",
+          false,
+        );
         window.setTimeout(() => {
-          if (workStatusRef.current?.kind === "done") {
+          if (
+            workStatusRef.current?.kind === "done" ||
+            workStatusRef.current?.kind === "error"
+          ) {
             workStatusRef.current = null;
             setWorkStatus(null);
           }
         }, 1800);
-        // Approved-command continuation is an AI response too.  Its real PTY
-        // prompt may arrive before or after the response chunk, so use the
-        // same prompt recovery path as a normal AI turn.
-        schedulePromptRecovery();
       } catch (reason) {
         if (cancelRequestedRef.current) {
           updateWorkStatus("stopped", "已停止", false);
+          if (sshClosed) resetAiOrchestration();
+          else
+            finishAiSummary(
+              aiOperationHadTools,
+              !aiOperationHadTools,
+              "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+              false,
+            );
           return;
         }
         updateWorkStatus("error", "命令执行失败", false);
-        render(`\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`);
-        refreshPrompt();
+        if (sshClosed) resetAiOrchestration();
+        else
+          finishAiSummary(
+            aiOperationHadTools,
+            !aiOperationHadTools,
+            `\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`,
+            false,
+          );
       } finally {
-        terminalOperationInFlight = false;
+        if (!aiOrchestrationActive) terminalOperationInFlight = false;
       }
     };
     approveHandlerRef.current = (command: string) => {
       void executeApprovedCommand(command);
     };
+    stopHandlerRef.current = () => {
+      const status = workStatusRef.current;
+      if (!status || !status.cancellable) return;
+      cancelRequestedRef.current = true;
+      void invoke("cancel_ai_ssh_chat", {
+        sessionId: sessionRef.current,
+      }).catch(() => undefined);
+      if (status.kind === "executing") void write("\x03");
+      updateWorkStatus("stopped", "已请求停止", false);
+      window.setTimeout(() => {
+        if (workStatusRef.current?.kind === "stopped") {
+          workStatusRef.current = null;
+          setWorkStatus(null);
+        }
+      }, 1800);
+    };
     let unlisten: (() => void) | undefined;
     let markerCarry = "";
-    const cleanInteractiveMarker = (data: string) => {
-      const prefix = "__OPSNEST_INTERACTIVE_END_";
-      let text = markerCarry + data;
-      markerCarry = "";
-      const markerStart = text.indexOf(prefix);
-      if (markerStart >= 0) {
-        // The completion record is one whole line (`marker rc=N`). Remove
-        // that line only; anything after it, including the real shell prompt,
-        // must remain visible. Waiting for the line ending also handles a
-        // marker split across multiple SSH output chunks.
-        const lineEnd = text.indexOf("\n", markerStart);
-        if (lineEnd >= 0)
-          text = `${text.slice(0, markerStart)}${text.slice(lineEnd + 1)}`;
-        else {
-          markerCarry = text.slice(markerStart);
-          text = text.slice(0, markerStart);
-        }
-      } else {
+    let markerCarryTimer: number | undefined;
+    const startMarkerPrefix = "__OPSNEST_INTERACTIVE_START_";
+    const endMarkerPrefix = "__OPSNEST_INTERACTIVE_END_";
+    type TerminalProtocolRecord = {
+      index: number;
+      length: number;
+      kind: "start" | "end";
+      marker: string;
+    };
+    const findNextProtocolRecord = (text: string): TerminalProtocolRecord | null => {
+      const start = /__OPSNEST_INTERACTIVE_START_(\d+)__(?:\r?\n)/.exec(text);
+      const end = /__OPSNEST_INTERACTIVE_END_(\d+)__ rc=-?\d+(?:\r?\n)/.exec(text);
+      const match = !start
+        ? end
+        : !end || start.index <= end.index
+          ? start
+          : end;
+      if (!match) return null;
+      const kind = match === start ? "start" : "end";
+      return {
+        index: match.index,
+        length: match[0].length,
+        kind,
+        marker:
+          kind === "start"
+            ? `${startMarkerPrefix}${match[1]}__`
+            : `${endMarkerPrefix}${match[1]}__`,
+      };
+    };
+    const potentialMarkerSuffixLength = (text: string) => {
+      let best = 0;
+      for (const prefix of [startMarkerPrefix, endMarkerPrefix]) {
         for (
           let length = Math.min(prefix.length - 1, text.length);
-          length > 0;
+          length > best;
           length -= 1
         ) {
-          if (prefix.endsWith(text.slice(-length))) {
-            markerCarry = text.slice(-length);
-            text = text.slice(0, -length);
+          if (prefix.startsWith(text.slice(-length))) {
+            best = length;
             break;
           }
         }
       }
+      return best;
+    };
+    const releaseIntermediatePromptTail = () => {
+      const tail = deferredPromptTail;
+      deferredPromptTail = "";
+      awaitingPromptAfterMarker = false;
+      if (!tail) return "";
+      const knownPrompt = splitKnownTrailingPrompt(tail);
+      const structuralPrompt = knownPrompt
+        ? null
+        : splitStructuralPromptTail(tail);
+      const split = knownPrompt ?? structuralPrompt;
+      if (!split) return tail;
+      if (!detectTrailingPrompt(split.prompt) && structuralPrompt) {
+        promptRef.current = structuralPrompt.plain;
+        rememberTerminalPrompt(server.id, structuralPrompt.plain);
+        promptVersionRef.current += 1;
+      }
+      const before = split.before;
+      return before && !/(?:\r\n|\n)$/.test(before) ? `${before}\r\n` : before;
+    };
+    const clearMarkerCarryTimer = () => {
+      if (markerCarryTimer !== undefined) {
+        window.clearTimeout(markerCarryTimer);
+        markerCarryTimer = undefined;
+      }
+    };
+    const holdMarkerCarry = (value: string) => {
+      clearMarkerCarryTimer();
+      markerCarry = value;
+      markerCarryTimer = window.setTimeout(() => {
+        markerCarryTimer = undefined;
+        if (!markerCarry) return;
+        const ordinaryOutput = markerCarry;
+        markerCarry = "";
+        if (aiOrchestrationActive) {
+          aiSummaryFinished = true;
+          if (!aiConclusionRendered && pendingAiConclusion)
+            render(pendingAiConclusion);
+          aiConclusionRendered = true;
+          resetAiOrchestration();
+        }
+        render(ordinaryOutput, true, true);
+      }, 15000);
+    };
+    const suppressLatePrompt = (data: string) => {
+      if (!suppressLatePromptOnce || !data) return data;
+      const split = splitKnownTrailingPrompt(data);
+      if (!split) {
+        if (/\r?\n/.test(data)) suppressLatePromptOnce = false;
+        return data;
+      }
+      suppressLatePromptOnce = false;
+      detectTrailingPrompt(split.prompt);
+      return split.before;
+    };
+    const cleanInteractiveMarker = (data: string) => {
+      clearMarkerCarryTimer();
+      let text = markerCarry + data;
+      markerCarry = "";
+      let visible = "";
+      const routePlainBytes = (bytes: string) => {
+        if (!bytes) return;
+        if (awaitingPromptAfterMarker) {
+          clearPromptTailSettleTimer();
+          if (finalPromptWaitTimer !== undefined) {
+            window.clearTimeout(finalPromptWaitTimer);
+            finalPromptWaitTimer = undefined;
+          }
+          deferredPromptTail += bytes;
+        } else {
+          visible += bytes;
+        }
+      };
+      while (text) {
+        const record = findNextProtocolRecord(text);
+        if (record) {
+          routePlainBytes(text.slice(0, record.index));
+          text = text.slice(record.index + record.length);
+          if (record.kind === "start") {
+            if (awaitingPromptAfterMarker)
+              visible += releaseIntermediatePromptTail();
+            startedToolMarkers.add(record.marker.replace("_START_", "_END_"));
+            if (aiOrchestrationActive) {
+              aiOperationHadTools = true;
+              updateWorkStatus("executing", "正在执行命令");
+            }
+          } else {
+            if (awaitingPromptAfterMarker) visible += releaseIntermediatePromptTail();
+            const visibleEndsWithLineBreak = visible
+              ? /(?:\r\n|\n)$/.test(visible)
+              : renderEndsWithNewline;
+            if (!visibleEndsWithLineBreak) visible += "\r\n";
+            completedToolMarkers.add(record.marker);
+            if (aiOrchestrationActive) {
+              aiOperationHadTools = true;
+              if (!aiSummaryFinished)
+                updateWorkStatus("waiting", "等待 AI 分析执行结果…");
+              awaitingPromptAfterMarker = true;
+              deferredPromptTail = "";
+            } else {
+              awaitingPromptAfterMarker = false;
+              deferredPromptTail = "";
+            }
+          }
+          continue;
+        }
+        const prefixIndexes = [
+          text.indexOf(startMarkerPrefix),
+          text.indexOf(endMarkerPrefix),
+        ].filter((index) => index >= 0);
+        const incompleteIndex = prefixIndexes.length
+          ? Math.min(...prefixIndexes)
+          : -1;
+        if (incompleteIndex >= 0) {
+          const lineEnd = text.indexOf("\n", incompleteIndex);
+          if (lineEnd < 0) {
+            routePlainBytes(text.slice(0, incompleteIndex));
+            const candidate = text.slice(incompleteIndex);
+            if (candidate.length > 160) routePlainBytes(candidate);
+            else holdMarkerCarry(candidate);
+            break;
+          }
+          // A line that resembles a marker but does not match the protocol is
+          // ordinary server output. Fail open and preserve it byte-for-byte.
+          routePlainBytes(text.slice(0, lineEnd + 1));
+          text = text.slice(lineEnd + 1);
+          continue;
+        }
+        const suffixLength = potentialMarkerSuffixLength(text);
+        if (suffixLength) {
+          routePlainBytes(text.slice(0, -suffixLength));
+          holdMarkerCarry(text.slice(-suffixLength));
+        } else {
+          routePlainBytes(text);
+        }
+        break;
+      }
       // `stty -echo` is an internal bootstrap command. The PTY may echo it
       // once before echo mode is disabled; keep the real login banner clean.
-      return text.replace(/stty -echo/g, "");
+      return visible.replace(/stty -echo/g, "");
     };
     // Register the output listener before opening the remote shell. A fast SSH
     // login can emit its first prompt immediately; subscribing afterwards
@@ -5039,7 +5506,10 @@ function InteractiveTerminalPanel({
       (event) => {
         if (event.payload.sessionId !== sessionRef.current) return;
         if (event.payload.closed) {
+          sshClosed = true;
+          resetAiOrchestration();
           clearTerminalOutput(server.id);
+          promptRef.current = "";
           if (!intentionallyClosedSessions.has(sessionRef.current))
             window.dispatchEvent(
               new CustomEvent("opsnest-server-connection-state", {
@@ -5065,9 +5535,11 @@ function InteractiveTerminalPanel({
           }
         }
         else {
-          const cleaned = cleanInteractiveMarker(event.payload.data);
-          separateIncomingPrompt(cleaned);
-          render(cleaned);
+          const cleaned = suppressLatePrompt(
+            cleanInteractiveMarker(event.payload.data),
+          );
+          if (cleaned) render(cleaned, true, true);
+          tryFinalizeAiConclusion();
         }
       },
     )
@@ -5077,6 +5549,7 @@ function InteractiveTerminalPanel({
           return null;
         }
         unlisten = dispose;
+        sshClosed = false;
         intentionallyClosedSessions.delete(sessionRef.current);
         return invoke<boolean>("open_interactive_ssh_terminal", {
           request,
@@ -5193,6 +5666,12 @@ function InteractiveTerminalPanel({
         void write(data);
         return;
       }
+      if (terminalOperationInFlight) {
+        // The visible prompt is deliberately withheld while OpsNest orders
+        // tool output and the AI conclusion. Do not let local keystrokes race
+        // a late real prompt and create another same-line collision.
+        return;
+      }
       // Bracketed paste delivers the whole clipboard payload in one onData
       // event. Preserve its line structure and submit it as one dispatcher
       // request when the payload ends with a newline; do not dispatch each
@@ -5246,6 +5725,10 @@ function InteractiveTerminalPanel({
     };
     const input = term.onData((data) => {
       if (data === "\x03") {
+        if (terminalOperationInFlight && !rawPtyModeRef.current) {
+          stopHandlerRef.current?.();
+          return;
+        }
         // Ctrl+C without an xterm selection is a real interrupt, not an AI
         // message. Clear the local editable line and send ETX to the PTY.
         inputRef.current = "";
@@ -5291,7 +5774,10 @@ function InteractiveTerminalPanel({
     resize();
     return () => {
       disposed = true;
+      clearFinalizationTimers();
+      clearMarkerCarryTimer();
       approveHandlerRef.current = null;
+      stopHandlerRef.current = null;
       void writeDebugLog("debug", "AI-SSH terminal unmounted", {
         serverId: server.id,
       });
@@ -5352,23 +5838,7 @@ function InteractiveTerminalPanel({
     setPendingApproval(null);
   };
   const stopWork = () => {
-    const status = workStatusRef.current;
-    if (!status || !status.cancellable) return;
-    cancelRequestedRef.current = true;
-    void invoke("cancel_ai_ssh_chat", { sessionId: sessionRef.current }).catch(() => undefined);
-    if (status.kind === "executing" || status.kind === "waiting") {
-      void invoke("write_interactive_ssh_terminal", {
-        sessionId: sessionRef.current,
-        data: "\x03",
-      });
-    }
-    updateWorkStatus("stopped", "已请求停止", false);
-    window.setTimeout(() => {
-      if (workStatusRef.current?.kind === "stopped") {
-        workStatusRef.current = null;
-        setWorkStatus(null);
-      }
-    }, 1800);
+    stopHandlerRef.current?.();
   };
   return (
     <section className="interactive-terminal-panel">
