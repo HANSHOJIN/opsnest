@@ -4675,6 +4675,17 @@ function InteractiveTerminalPanel({
         }, 0);
         return false;
       }
+      if (
+        event.type === "keydown" &&
+        !rawPtyModeRef.current &&
+        ["ArrowLeft", "ArrowRight", "Home", "End", "Delete"].includes(event.key)
+      ) {
+        // The AI editor is a single append-only line. Do not let xterm move
+        // its cursor independently of inputRef; interactive programs keep
+        // the native cursor behavior through raw PTY mode.
+        event.preventDefault();
+        return false;
+      }
       return true;
     });
     const refreshPrompt = () => {
@@ -4688,6 +4699,11 @@ function InteractiveTerminalPanel({
     };
     let promptRecoveryGeneration = 0;
     const schedulePromptRecovery = () => {
+      // The PTY prompt is authoritative. A local fallback prompt can race
+      // with delayed PTY chunks and create repeated prompts, so never append
+      // synthetic prompts here.
+      return;
+      /*
       // The PTY prompt can arrive in a later SSH event than the AI response.
       // Check several nearby lines and retry briefly: xterm writes are
       // asynchronous, so a single timer can observe the cursor before the
@@ -4743,7 +4759,7 @@ function InteractiveTerminalPanel({
           term.scrollToBottom();
           term.refresh(0, term.rows - 1);
         }, delay);
-      });
+      }); */
     };
     const askAi = async (prompt: string, approved: boolean) => {
       if (terminalOperationInFlight) {
@@ -5212,6 +5228,10 @@ function InteractiveTerminalPanel({
       if (data === "\x7f" || data === "\b" || data === "\x1b[3~") {
         if (!keyBackspaceHandled) eraseInputCharacter();
         keyBackspaceHandled = false;
+        return;
+      }
+      if (!rawPtyModeRef.current && /^\x1b(?:\[[0-9;?]*[ -/]*[@-~]|O.)$/.test(data)) {
+        // Ignore xterm cursor/navigation sequences in the local AI editor.
         return;
       }
       inputRef.current += data;
