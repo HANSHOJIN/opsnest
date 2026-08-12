@@ -4848,6 +4848,10 @@ function InteractiveTerminalPanel({
         // sends an empty carriage return, so it cannot execute a blank command.
         schedulePromptRecovery();
       } catch (reason) {
+        if (cancelRequestedRef.current) {
+          updateWorkStatus("stopped", "已停止", false);
+          return;
+        }
         updateWorkStatus("error", "AI 请求失败", false);
         void writeDebugLog("error", "AI-SSH request failed", {
           serverId: server.id,
@@ -4920,6 +4924,10 @@ function InteractiveTerminalPanel({
         // same prompt recovery path as a normal AI turn.
         schedulePromptRecovery();
       } catch (reason) {
+        if (cancelRequestedRef.current) {
+          updateWorkStatus("stopped", "已停止", false);
+          return;
+        }
         updateWorkStatus("error", "命令执行失败", false);
         render(`\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`);
         refreshPrompt();
@@ -5283,6 +5291,7 @@ function InteractiveTerminalPanel({
     const status = workStatusRef.current;
     if (!status || !status.cancellable) return;
     cancelRequestedRef.current = true;
+    void invoke("cancel_ai_ssh_chat", { sessionId: sessionRef.current }).catch(() => undefined);
     if (status.kind === "executing" || status.kind === "waiting") {
       void invoke("write_interactive_ssh_terminal", {
         sessionId: sessionRef.current,

@@ -469,6 +469,7 @@ pub fn run() {
             ai::chat_completion,
             ai::chat_completion_with_tools,
             ai::ai_ssh_chat,
+            ai::cancel_ai_ssh_chat,
             append_debug_log,
             read_debug_log,
             clear_debug_log

@@ -1,7 +1,16 @@
 use crate::ssh_session;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::oneshot;
+
+static AI_SSH_CANCELLATIONS: OnceLock<Mutex<HashMap<String, oneshot::Sender<()>>>> = OnceLock::new();
+
+fn ai_ssh_cancellations() -> &'static Mutex<HashMap<String, oneshot::Sender<()>>> {
+    AI_SSH_CANCELLATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,6 +106,7 @@ async fn post_chat(
     api_key: &str,
     body: Value,
     timeout: Duration,
+    mut cancel: Option<&mut oneshot::Receiver<()>>,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(timeout)
@@ -111,9 +121,23 @@ async fn post_chat(
     if !api_key.trim().is_empty() {
         call = call.bearer_auth(api_key.trim());
     }
-    let response = call.send().await.map_err(|error| error.to_string())?;
+    let response = if let Some(cancel) = cancel.as_deref_mut() {
+        tokio::select! {
+            result = call.send() => result.map_err(|error| error.to_string())?,
+            _ = cancel => return Err("AI-SSH request cancelled".into()),
+        }
+    } else {
+        call.send().await.map_err(|error| error.to_string())?
+    };
     let status = response.status();
-    let raw = response.text().await.map_err(|error| error.to_string())?;
+    let raw = if let Some(cancel) = cancel.as_deref_mut() {
+        tokio::select! {
+            result = response.text() => result.map_err(|error| error.to_string())?,
+            _ = cancel => return Err("AI-SSH request cancelled".into()),
+        }
+    } else {
+        response.text().await.map_err(|error| error.to_string())?
+    };
     if !status.is_success() {
         return Err(format!(
             "{} {}",
@@ -139,7 +163,7 @@ pub async fn chat_completion(request: AiChatRequest) -> Result<String, String> {
         serde_json::json!({ "role": "system", "content": request.system }),
     );
     messages.push(serde_json::json!({ "role": "user", "content": request.prompt }));
-    let raw = post_chat(&request.base_url, &request.api_key, serde_json::json!({ "model": request.model.trim(), "temperature": 0.2, "messages": messages }), Duration::from_secs(90)).await?;
+    let raw = post_chat(&request.base_url, &request.api_key, serde_json::json!({ "model": request.model.trim(), "temperature": 0.2, "messages": messages }), Duration::from_secs(90), None).await?;
     let payload: Value =
         serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
     payload
@@ -184,6 +208,7 @@ pub async fn chat_completion_with_tools(request: AiToolChatRequest) -> Result<St
         &request.api_key,
         body,
         Duration::from_secs(120),
+        None,
     )
     .await?;
     serde_json::from_str::<Value>(&raw)
@@ -200,6 +225,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     {
         return Err("AI-SSH request is incomplete".into());
     }
+    let (cancel_sender, mut cancel_receiver) = oneshot::channel();
+    if let Ok(mut active) = ai_ssh_cancellations().lock() {
+        if let Some(previous) = active.insert(request.session_id.clone(), cancel_sender) {
+            let _ = previous.send(());
+        }
+    }
+    let session_id = request.session_id.clone();
     let board_context = ssh_session::session_context(&request.session_id, 12000);
     let conversation_history = ssh_session::conversation_history(&request.session_id, 12000);
     let _ = ssh_session::record_session_event(
@@ -271,8 +303,14 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let mut recovery_attempts = 0u8;
     for _round in 0..8 {
         let tool_choice = if approved_followup.is_some() { "none" } else { "auto" };
-        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60)).await {
+        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
             Ok(raw) => raw,
+            Err(error) if error == "AI-SSH request cancelled" => {
+                if let Ok(mut active) = ai_ssh_cancellations().lock() {
+                    active.remove(&session_id);
+                }
+                return Err(error);
+            }
             Err(error) if recovery_attempts < 1 => {
                 recovery_attempts += 1;
                 let _ = ssh_session::record_session_event(&request.session_id, "ai_recovery", format!("AI 请求失败，正在重试（第 {} 次）：{}", recovery_attempts, error));
@@ -404,6 +442,18 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
     }
     Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed}).to_string())
+}
+
+#[tauri::command]
+pub fn cancel_ai_ssh_chat(session_id: String) -> Result<(), String> {
+    let sender = ai_ssh_cancellations()
+        .lock()
+        .map_err(|_| "AI-SSH cancellation state is unavailable".to_string())?
+        .remove(&session_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+    Ok(())
 }
 
 fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
