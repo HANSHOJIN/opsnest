@@ -4647,6 +4647,10 @@ function InteractiveTerminalPanel({
         event.key === "Backspace" &&
         !event.isComposing
       ) {
+        // Interactive programs own their own line editor (readline, Hermes,
+        // Python, etc.). Do not consume Backspace in the AI-SSH local editor;
+        // let xterm emit the erase byte to the remote PTY.
+        if (rawPtyModeRef.current) return true;
         event.preventDefault();
         keyBackspaceHandled = true;
         eraseInputCharacter();
