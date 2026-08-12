@@ -4433,6 +4433,7 @@ function InteractiveTerminalPanel({
   // Once an interactive CLI (for example `hermes chat`) owns the PTY, keep
   // bytes and ANSI control sequences on the native xterm path until Ctrl+C.
   const rawPtyModeRef = React.useRef(false);
+  const rawPtyExitRequestedRef = React.useRef(false);
   const promptRef = React.useRef("");
   const promptVersionRef = React.useRef(0);
   const pendingRef = React.useRef<string | null>(null);
@@ -4982,7 +4983,23 @@ function InteractiveTerminalPanel({
               }),
             );
           render("\r\n\x1b[31m[SSH connection closed]\x1b[0m\r\n");
-        } else if (rawPtyModeRef.current) renderRawPty(event.payload.data);
+        } else if (rawPtyModeRef.current) {
+          const rawData = event.payload.data;
+          renderRawPty(rawData);
+          // Ctrl+C may produce several redraw/control chunks before the
+          // shell prompt returns. Keep raw PTY rendering active until that
+          // prompt is actually observed; switching modes immediately
+          // reinterprets the remaining redraw bytes as extra newlines.
+          if (
+            rawPtyExitRequestedRef.current &&
+            /(?:^|\r?\n)[^\r\n]{1,160}(?:#|\$)\s*$/.test(
+              rawData.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, ""),
+            )
+          ) {
+            rawPtyExitRequestedRef.current = false;
+            rawPtyModeRef.current = false;
+          }
+        }
         else render(cleanInteractiveMarker(event.payload.data));
       },
     )
@@ -5161,7 +5178,7 @@ function InteractiveTerminalPanel({
         // message. Clear the local editable line and send ETX to the PTY.
         inputRef.current = "";
         void write("\x03");
-        if (rawPtyModeRef.current) rawPtyModeRef.current = false;
+        if (rawPtyModeRef.current) rawPtyExitRequestedRef.current = true;
         return;
       }
       const accepted = imeGate.accept(data);
