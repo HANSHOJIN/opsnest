@@ -5044,6 +5044,27 @@ function InteractiveTerminalPanel({
       },
     });
     processInputData = (data) => {
+      // Bracketed paste delivers the whole clipboard payload in one onData
+      // event. Preserve its line structure and submit it as one dispatcher
+      // request when the payload ends with a newline; do not dispatch each
+      // pasted line independently.
+      if (data.length > 1 && /[\r\n]/.test(data)) {
+        const normalized = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        const submits = normalized.endsWith("\n");
+        const body = submits ? normalized.slice(0, -1) : normalized;
+        inputRef.current += body;
+        term.write(body.replace(/\n/g, "\r\n"), () => {
+          term.scrollToBottom();
+          term.refresh(0, term.rows - 1);
+        });
+        if (submits) {
+          const block = inputRef.current.trim();
+          inputRef.current = "";
+          term.write("\r\n");
+          if (block) void dispatcher.dispatch(block);
+        }
+        return;
+      }
       if (data === "\r" || data === "\n") {
         const line = inputRef.current.trim();
         inputRef.current = "";
