@@ -749,7 +749,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .interactive-terminal-status-elapsed { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .interactive-terminal-status button { border: 1px solid color-mix(in srgb,#e06470 55%,var(--line)); border-radius: 999px; padding: 3px 8px; background: rgba(120,42,52,.18); color: #f0a0a8; font: inherit; cursor: pointer; }
 .interactive-terminal-status button:hover { background: rgba(120,42,52,.34); color: #fff; }
-.interactive-terminal-host { flex: 1; min-height: 0; padding: 10px 12px; overflow: hidden; }
+.interactive-terminal-host { flex: 1; min-height: 0; box-sizing: border-box; padding: 10px 12px 26px; overflow: hidden; }
 .interactive-terminal-host .xterm { height: 100%; }
 .interactive-terminal-host .xterm .composition-view { background: #0d0d0f !important; color: #e7e7e7 !important; }
 .interactive-terminal-host .xterm .xterm-viewport { background: #0d0d0f; scrollbar-color: #3b3b42 #0d0d0f; }
