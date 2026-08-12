@@ -1153,6 +1153,10 @@ function InteractiveTerminalPanel({ server, model, onConnectionState }: { server
         // Rendering the returned tool result again duplicates prompts and banners.
         if (result.executed?.length) for (const item of result.executed) { sessionContextRef.current.push({ role: "tool_result", content: `$ ${item.command}\n${item.output}` }); void appendActivity({ category: "task", title: `AI-SSH · ${server.name}`, detail: `$ ${item.command}\n${item.output}` }).catch(() => undefined); }
         if (result.content) { sessionContextRef.current.push({ role: "ai_reply", content: result.content }); render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`); void appendActivity({ category: "ai", title: `AI-SSH · ${server.name}`, detail: `AI: ${result.content}` }).catch(() => undefined); }
+        // A pure conversational reply does not produce another PTY prompt.
+        // Restore the editable prompt locally in that case; tool executions
+        // already deliver the real prompt through the PTY event.
+        if (!promptSeenSinceOperation) refreshPrompt();
         pendingRef.current = null;
         operationBusyRef.current = false;
         // The PTY may emit its prompt in a separate chunk. Restore it locally
