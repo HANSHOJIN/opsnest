@@ -244,6 +244,65 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
     }
 }
 
+/// Return the durable conversational part of the terminal blackboard in
+/// OpenAI-compatible message order.  Terminal bytes remain in the system
+/// blackboard context, while user/assistant/tool events become real messages
+/// so a later turn does not depend on the model parsing a transcript blob.
+pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, String)> {
+    let Some(shell) = interactive()
+        .lock()
+        .ok()
+        .and_then(|items| items.get(session_id).cloned())
+    else {
+        return Vec::new();
+    };
+    let Ok(state) = shell.blackboard.lock() else {
+        return Vec::new();
+    };
+    let mut history = Vec::new();
+    let mut used = 0usize;
+    // Walk backwards so a large older terminal/tool event cannot prevent the
+    // newest conversational turns from reaching the model.
+    for event in state.events.iter().rev() {
+        let role = match event.kind.as_str() {
+            "user_message" | "user_question" => "user",
+            "ai_message" => "assistant",
+            "ai_tool_result" => "assistant",
+            _ => continue,
+        };
+        let mut text = event.text.trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        // Tool output is already visible in the terminal. Keep enough for
+        // continuity and diagnosis without allowing a large ls/log result to
+        // crowd out the actual conversation.
+        if text.chars().count() > 4000 {
+            text = text
+                .chars()
+                .rev()
+                .take(4000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+        }
+        let cost = text.chars().count();
+        if used + cost > max_chars {
+            break;
+        }
+        used += cost;
+        history.push((role.to_string(), text));
+    }
+    // Keep the most recent turns when the event deque contains a long run of
+    // small messages.
+    if history.len() > 24 {
+        history.truncate(24);
+    }
+    history.reverse();
+    history
+}
+
 async fn connect(request: &SessionRequest) -> Result<Session, String> {
     let host = request.host.trim();
     if host.is_empty() || request.username.trim().is_empty() {

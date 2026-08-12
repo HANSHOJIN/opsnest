@@ -197,6 +197,10 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         return Err("AI-SSH request is incomplete".into());
     }
     let board_context = ssh_session::session_context(&request.session_id, 12000);
+    // Capture prior turns before recording this request.  These are sent as
+    // structured messages below; the blackboard transcript remains available
+    // in the system prompt for terminal state and non-conversational events.
+    let conversation_history = ssh_session::conversation_history(&request.session_id, 12000);
     let _ = ssh_session::record_session_event(
         &request.session_id,
         "user_message",
@@ -223,8 +227,11 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     };
     let mut messages = vec![
         serde_json::json!({"role":"system","content":system}),
-        serde_json::json!({"role":"user","content":request.prompt}),
     ];
+    for (role, content) in conversation_history {
+        messages.push(serde_json::json!({"role":role,"content":content}));
+    }
+    messages.push(serde_json::json!({"role":"user","content":request.prompt}));
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
     let mut recovery_attempts = 0u8;
