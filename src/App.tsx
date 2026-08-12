@@ -4690,19 +4690,37 @@ function InteractiveTerminalPanel({
           // response and incorrectly conclude that the active prompt exists.
           const start = Math.max(0, buffer.cursorY - 2);
           const end = Math.min(buffer.length - 1, buffer.cursorY + 1);
+          let promptRow = -1;
           for (let row = start; row <= end; row += 1) {
             const line = buffer.getLine(row)?.translateToString(true) ?? "";
-            if (line.includes(prompt)) {
+            if (line.trim() === prompt) {
               term.scrollToBottom();
               return;
             }
+            if (line.includes(prompt)) promptRow = row;
+          }
+          // A locally echoed line can leave the prompt and submitted input on
+          // the same xterm row (for example `root# cd ..root#`). Clear that
+          // stale row before restoring the prompt; otherwise Backspace appears
+          // to delete the second prompt because it is only visual residue.
+          if (promptRow >= 0) {
+            term.write(`\r\x1b[2K${prompt}`);
+            term.scrollToBottom();
+            term.refresh(0, term.rows - 1);
+            return;
           }
           // Earlier checks only observe.  This prevents several timers from
           // appending the same fallback prompt when xterm is still flushing.
           if (index !== delays.length - 1) return;
           const currentLine = buffer.getLine(buffer.cursorY)?.translateToString(true) ?? "";
-          if (currentLine.includes(prompt)) {
+          if (currentLine.trim() === prompt) {
             term.scrollToBottom();
+            return;
+          }
+          if (currentLine.includes(prompt)) {
+            term.write(`\r\x1b[2K${prompt}`);
+            term.scrollToBottom();
+            term.refresh(0, term.rows - 1);
             return;
           }
           if (currentLine.trim()) term.write(`\r\n${prompt}`);
