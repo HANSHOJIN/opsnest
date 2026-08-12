@@ -12,7 +12,4 @@ export const initialServerForm: ServerForm = {
   privateKeyPath: "",
   passphrase: "",
   rememberCredentials: true,
-  connectionType: "direct",
-  tunnelRelayServerId: "",
-  tunnelRemotePort: "22224",
 };
