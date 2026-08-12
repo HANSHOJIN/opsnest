@@ -4352,6 +4352,17 @@ function looksLikeShellCommand(input: string) {
   const first = value.split(/\s+/, 1)[0].toLowerCase();
   return SHELL_COMMANDS.has(first);
 }
+// These programs own the PTY after they start.  Their cursor movement,
+// carriage returns and alternate-screen sequences must be interpreted by
+// xterm itself, rather than by the AI-SSH line dispatcher/transcript cleaner.
+function isInteractiveShellCommand(input: string) {
+  const first = input.trim().replace(/^sudo\s+/, "").split(/\s+/, 1)[0]?.toLowerCase();
+  return Boolean(first && new Set([
+    "hermes", "python", "python3", "node", "bash", "sh", "zsh", "fish",
+    "top", "htop", "vim", "nvim", "nano", "less", "more", "mysql",
+    "psql", "tmux", "screen", "ssh",
+  ]).has(first));
+}
 function isRiskyShellCommand(input: string) {
   const value = input.trim().toLowerCase();
   return RISKY_SHELL_PARTS.some((part) => value.includes(part));
@@ -4419,6 +4430,9 @@ function InteractiveTerminalPanel({
     modelRef.current = model;
   }, [model]);
   const inputRef = React.useRef("");
+  // Once an interactive CLI (for example `hermes chat`) owns the PTY, keep
+  // bytes and ANSI control sequences on the native xterm path until Ctrl+C.
+  const rawPtyModeRef = React.useRef(false);
   const promptRef = React.useRef("");
   const promptVersionRef = React.useRef(0);
   const pendingRef = React.useRef<string | null>(null);
@@ -4462,7 +4476,11 @@ function InteractiveTerminalPanel({
       serverId: server.id,
     });
     const term = new Terminal({
-      convertEol: true,
+      // Keep PTY control bytes untouched.  In particular, full-screen
+      // programs such as Hermes use carriage returns and cursor movement;
+      // xterm must interpret those sequences instead of converting every LF
+      // into another visual line.
+      convertEol: false,
       cursorBlink: true,
       scrollback: 10000,
       fontSize: 13,
@@ -4541,6 +4559,13 @@ function InteractiveTerminalPanel({
         displayData = displayData.slice(2);
       renderEndsWithNewline = /(?:\r\n|\n)$/.test(displayData);
       transcript.writePty(displayData);
+    };
+    const renderRawPty = (data: string, persist = true) => {
+      if (persist) rememberTerminalOutput(server.id, data);
+      term.write(data, () => {
+        term.scrollToBottom();
+        term.refresh(0, term.rows - 1);
+      });
     };
     const previous = terminalBuffers.get(server.id);
     if (previous) render(previous, false);
@@ -4953,7 +4978,8 @@ function InteractiveTerminalPanel({
               }),
             );
           render("\r\n\x1b[31m[SSH connection closed]\x1b[0m\r\n");
-        } else render(cleanInteractiveMarker(event.payload.data));
+        } else if (rawPtyModeRef.current) renderRawPty(event.payload.data);
+        else render(cleanInteractiveMarker(event.payload.data));
       },
     )
       .then((dispose) => {
@@ -4998,6 +5024,10 @@ function InteractiveTerminalPanel({
       });
     const dispatcher = new TerminalDispatcher({
       writeCommand: (command) => {
+        if (isInteractiveShellCommand(command)) {
+          rawPtyModeRef.current = true;
+          inputRef.current = "";
+        }
         void write(`${command}\r`);
       },
       askAi: (prompt) => {
@@ -5067,6 +5097,13 @@ function InteractiveTerminalPanel({
       },
     });
     processInputData = (data) => {
+      if (rawPtyModeRef.current) {
+        // Do not interpret line endings, backspace or paste while an
+        // interactive program owns the PTY. xterm/PTY must receive the exact
+        // byte stream so readline, Hermes and full-screen apps can handle it.
+        void write(data);
+        return;
+      }
       // Bracketed paste delivers the whole clipboard payload in one onData
       // event. Preserve its line structure and submit it as one dispatcher
       // request when the payload ends with a newline; do not dispatch each
@@ -5120,6 +5157,7 @@ function InteractiveTerminalPanel({
         // message. Clear the local editable line and send ETX to the PTY.
         inputRef.current = "";
         void write("\x03");
+        if (rawPtyModeRef.current) rawPtyModeRef.current = false;
         return;
       }
       const accepted = imeGate.accept(data);
