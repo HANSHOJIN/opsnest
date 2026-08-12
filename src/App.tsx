@@ -4568,6 +4568,21 @@ function InteractiveTerminalPanel({
         term.refresh(0, term.rows - 1);
       });
     };
+    const separateIncomingPrompt = (data: string) => {
+      const prompt = promptRef.current.trim();
+      if (!prompt || !/(?:^|\r?\n)[^\r\n]{1,160}(?:#|\$)\s*$/.test(
+        data.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, ""),
+      )) return;
+      const currentLine =
+        term.buffer.active
+          .getLine(term.buffer.active.cursorY)
+          ?.translateToString(true) ?? "";
+      // The local AI editor echoes input while the remote shell echoes its
+      // next prompt separately. Preserve every existing row and only insert
+      // a line break when that prompt would otherwise be appended to input.
+      if (currentLine.includes(prompt) && currentLine.trim() !== prompt)
+        term.write("\r\n");
+    };
     const previous = terminalBuffers.get(server.id);
     if (previous) render(previous, false);
     const at = server.host.indexOf("@");
@@ -5033,7 +5048,11 @@ function InteractiveTerminalPanel({
             rawPtyModeRef.current = false;
           }
         }
-        else render(cleanInteractiveMarker(event.payload.data));
+        else {
+          const cleaned = cleanInteractiveMarker(event.payload.data);
+          separateIncomingPrompt(cleaned);
+          render(cleaned);
+        }
       },
     )
       .then((dispose) => {
