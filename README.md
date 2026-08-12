@@ -1,11 +1,33 @@
-# OpsNest V2
+# OpsNest
 
-OpsNest V2 is a fresh server-management application built on the CodexShell desktop shell.
+[简体中文](README_cn.md) · English
 
-## Baselines
+## What is OpsNest?
 
-- Shell source: `../codexShell`
-- OpsNest capability reference: `../ai-server-manager/artifacts-release-0.1.2-alpha.1/OpsNest_0.1.2-alpha.1_x64-portable.zip`
-- Older snapshot for historical comparison only: `../opsnest-snapshots/OpsNest-refactor-baseline-0.1.1-alpha.2-20260730-085426.zip`
+OpsNest is, as its name suggests, a small operations and maintenance nest. It is a management application for centrally managing the terminals you own, including servers, routers, NAS devices, and more.
 
-The old OpsNest build is reference material, not a UI or codebase to copy wholesale. V2 keeps the proven behavior where it is useful and rebuilds the product inside the CodexShell layout.
+## Virtual screenshots
+
+The screenshots below use fictional demo servers and addresses for illustration only. They contain no real server information.
+
+![OpsNest server home demo](docs/assets/dashboard-en.png)
+
+![OpsNest AI-SSH terminal demo](docs/assets/terminal-en.png)
+
+## Core features
+
+- Powerful AI-SSH: AI is integrated directly into the SSH terminal. You do not need to memorize complicated command-line syntax; describe what you need in natural language and the AI will help you get the work done.
+- A true Agent, not just an advisory assistant: the integrated AI can analyze a task, execute it, and provide a summary report.
+- A familiar native SSH experience: the interface preserves the look and feel of a real SSH terminal.
+
+## Highlights
+
+1. **Server Manager**: a traditional AI chat interface for managing all your servers. It can help modify the application interface, add or remove server connections, and execute other Agent commands.
+2. **Specialized home pages**: each terminal connection is automatically identified according to its capabilities as a general Linux server, an OpenWrt router, or a NAS. OpsNest then presents the appropriate home-page design. For example, a router home page can show connection counts and other router-specific information.
+3. **Service discovery**: automatically scans ports that expose Web services and presents them as quick-open cards. Open a service with one click instead of remembering every port number, and add custom entries when needed.
+
+## Development goals
+
+- Support more types of terminals
+- File management
+- Online file editing
