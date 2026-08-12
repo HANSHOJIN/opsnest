@@ -4383,6 +4383,12 @@ function InteractiveTerminalPanel({
   model: ModelPreferences;
   onConnectionState?: (serverId: string, connected: boolean) => void;
 }) {
+  type WorkStatus = {
+    kind: "thinking" | "approval" | "executing" | "waiting" | "done" | "error" | "stopped";
+    label: string;
+    startedAt: number;
+    cancellable: boolean;
+  };
   const hostRef = React.useRef<HTMLDivElement>(null);
   const termRef = React.useRef<Terminal | null>(null);
   const modelRef = React.useRef(model);
@@ -4402,6 +4408,24 @@ function InteractiveTerminalPanel({
   const [pendingApproval, setPendingApproval] = React.useState<string | null>(
     null,
   );
+  const [workStatus, setWorkStatus] = React.useState<WorkStatus | null>(null);
+  const workStatusRef = React.useRef<WorkStatus | null>(null);
+  const cancelRequestedRef = React.useRef(false);
+  const [statusNow, setStatusNow] = React.useState(() => Date.now());
+  const updateWorkStatus = React.useCallback(
+    (kind: WorkStatus["kind"], label: string, cancellable = true) => {
+      const next = { kind, label, startedAt: Date.now(), cancellable };
+      workStatusRef.current = next;
+      setWorkStatus(next);
+      setStatusNow(next.startedAt);
+    },
+    [],
+  );
+  React.useEffect(() => {
+    if (!workStatus) return;
+    const timer = window.setInterval(() => setStatusNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [workStatus]);
   // Each mounted terminal gets its own backend session. Reusing the server id
   // lets a delayed close event from the previous PTY appear in the new tab.
   // One long-lived PTY per server. Switching the bottom tabs only changes the
@@ -4613,6 +4637,8 @@ function InteractiveTerminalPanel({
         return;
       }
       terminalOperationInFlight = true;
+      cancelRequestedRef.current = false;
+      updateWorkStatus("thinking", "AI 正在分析…");
       const currentModel = modelRef.current;
       void writeDebugLog("debug", "AI-SSH input received", {
         serverId: server.id,
@@ -4664,6 +4690,7 @@ function InteractiveTerminalPanel({
             sudoPassword,
           },
         });
+        if (cancelRequestedRef.current) return;
         const result = JSON.parse(raw) as {
           status?: string;
           command?: string;
@@ -4678,6 +4705,7 @@ function InteractiveTerminalPanel({
           executed: result.executed?.length ?? 0,
         });
         if (result.status === "approval_required" && result.command) {
+          updateWorkStatus("approval", "等待确认执行", false);
           const command = result.command;
           void appendActivity({
             category: "ai",
@@ -4697,6 +4725,7 @@ function InteractiveTerminalPanel({
           return;
         }
         const executedToolCount = result.executed?.length ?? 0;
+        if (executedToolCount) updateWorkStatus("waiting", "等待服务器响应…");
         // The command and its output already arrive through the live PTY event.
         // Rendering the returned tool result again duplicates prompts and banners.
         if (executedToolCount)
@@ -4723,6 +4752,13 @@ function InteractiveTerminalPanel({
             detail: `AI: ${result.content}`,
           }).catch(() => undefined);
         }
+        updateWorkStatus("done", "AI 已完成", false);
+        window.setTimeout(() => {
+          if (workStatusRef.current?.kind === "done") {
+            workStatusRef.current = null;
+            setWorkStatus(null);
+          }
+        }, 1800);
         pendingRef.current = null;
         // The PTY may emit its prompt in a separate chunk. Restore it locally
         // after every AI conclusion without sending another remote command.
@@ -4734,6 +4770,7 @@ function InteractiveTerminalPanel({
         // sends an empty carriage return, so it cannot execute a blank command.
         schedulePromptRecovery();
       } catch (reason) {
+        updateWorkStatus("error", "AI 请求失败", false);
         void writeDebugLog("error", "AI-SSH request failed", {
           serverId: server.id,
           error: String(reason),
@@ -4747,6 +4784,8 @@ function InteractiveTerminalPanel({
     const executeApprovedCommand = async (command: string) => {
       if (terminalOperationInFlight) return;
       terminalOperationInFlight = true;
+      cancelRequestedRef.current = false;
+      updateWorkStatus("executing", "正在执行命令");
       try {
         promptSeenSinceOperation = false;
         const sudoPassword = await invoke<string | null>(
@@ -4758,6 +4797,7 @@ function InteractiveTerminalPanel({
           command,
           sudoPassword,
         });
+        if (cancelRequestedRef.current) return;
         pendingRef.current = null;
         setPendingApproval(null);
         if (!output.trim()) {
@@ -4771,7 +4811,15 @@ function InteractiveTerminalPanel({
           title: `AI-SSH · ${server.name}`,
           detail: `$ ${command}\n${output}`,
         }).catch(() => undefined);
+        updateWorkStatus("done", "命令已完成", false);
+        window.setTimeout(() => {
+          if (workStatusRef.current?.kind === "done") {
+            workStatusRef.current = null;
+            setWorkStatus(null);
+          }
+        }, 1800);
       } catch (reason) {
+        updateWorkStatus("error", "命令执行失败", false);
         render(`\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`);
         refreshPrompt();
       } finally {
@@ -5073,8 +5121,40 @@ function InteractiveTerminalPanel({
     pendingRef.current = null;
     setPendingApproval(null);
   };
+  const stopWork = () => {
+    const status = workStatusRef.current;
+    if (!status || !status.cancellable) return;
+    cancelRequestedRef.current = true;
+    if (status.kind === "executing" || status.kind === "waiting") {
+      void invoke("write_interactive_ssh_terminal", {
+        sessionId: sessionRef.current,
+        data: "\x03",
+      });
+    }
+    updateWorkStatus("stopped", "已请求停止", false);
+    window.setTimeout(() => {
+      if (workStatusRef.current?.kind === "stopped") {
+        workStatusRef.current = null;
+        setWorkStatus(null);
+      }
+    }, 1800);
+  };
   return (
     <section className="interactive-terminal-panel">
+      {workStatus && (
+        <div className={`interactive-terminal-status is-${workStatus.kind}`} role="status">
+          <span className="interactive-terminal-status-dot" />
+          <span>{workStatus.label}</span>
+          {workStatus.kind !== "done" && workStatus.kind !== "error" && workStatus.kind !== "stopped" && (
+            <span className="interactive-terminal-status-elapsed">
+              {Math.floor(Math.max(0, statusNow - workStatus.startedAt) / 1000)}s
+            </span>
+          )}
+          {workStatus.cancellable && (
+            <button type="button" onClick={stopWork}>停止</button>
+          )}
+        </div>
+      )}
       <div ref={hostRef} className="interactive-terminal-host" />
       {pendingApproval && (
         <div className="interactive-terminal-approval" role="alert">

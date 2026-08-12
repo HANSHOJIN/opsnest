@@ -741,6 +741,14 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .terminal-tabs .terminal-tab-add { margin-left: auto; width: 28px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
 .terminal-tabs .terminal-tab-add:hover { border-color: var(--accent); background: var(--control-hover); color: var(--text-strong); }
 .interactive-terminal-panel { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0d0d0f; }
+.interactive-terminal-status { position: absolute; top: 10px; right: 14px; z-index: 8; display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,20,23,.88); color: var(--muted); font-size: 11px; line-height: 1; box-shadow: 0 4px 14px rgba(0,0,0,.22); pointer-events: auto; }
+.interactive-terminal-status-dot { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: #f0bd45; box-shadow: 0 0 0 2px rgba(240,189,69,.15); }
+.interactive-terminal-status.is-executing .interactive-terminal-status-dot, .interactive-terminal-status.is-waiting .interactive-terminal-status-dot { background: #39b9e9; box-shadow: 0 0 0 2px rgba(57,185,233,.15); }
+.interactive-terminal-status.is-done .interactive-terminal-status-dot { background: #58cc87; }
+.interactive-terminal-status.is-error .interactive-terminal-status-dot { background: #e06470; }
+.interactive-terminal-status-elapsed { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.interactive-terminal-status button { border: 1px solid color-mix(in srgb,#e06470 55%,var(--line)); border-radius: 999px; padding: 3px 8px; background: rgba(120,42,52,.18); color: #f0a0a8; font: inherit; cursor: pointer; }
+.interactive-terminal-status button:hover { background: rgba(120,42,52,.34); color: #fff; }
 .interactive-terminal-host { flex: 1; min-height: 0; padding: 10px 12px; overflow: hidden; }
 .interactive-terminal-host .xterm { height: 100%; }
 .interactive-terminal-host .xterm .composition-view { background: #0d0d0f !important; color: #e7e7e7 !important; }
