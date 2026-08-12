@@ -4685,8 +4685,11 @@ function InteractiveTerminalPanel({
           if (disposed || generation !== promptRecoveryGeneration || !promptRef.current) return;
           const buffer = term.buffer.active;
           const prompt = promptRef.current.trim();
-          const start = Math.max(0, buffer.length - 12);
-          const end = buffer.length - 1;
+          // Only inspect the cursor neighbourhood. Looking through the last
+          // dozen history rows can find an old prompt from before the AI
+          // response and incorrectly conclude that the active prompt exists.
+          const start = Math.max(0, buffer.cursorY - 2);
+          const end = Math.min(buffer.length - 1, buffer.cursorY + 1);
           for (let row = start; row <= end; row += 1) {
             const line = buffer.getLine(row)?.translateToString(true) ?? "";
             if (line.includes(prompt)) {
@@ -4698,6 +4701,10 @@ function InteractiveTerminalPanel({
           // appending the same fallback prompt when xterm is still flushing.
           if (index !== delays.length - 1) return;
           const currentLine = buffer.getLine(buffer.cursorY)?.translateToString(true) ?? "";
+          if (currentLine.includes(prompt)) {
+            term.scrollToBottom();
+            return;
+          }
           if (currentLine.trim()) term.write(`\r\n${prompt}`);
           else term.write(prompt);
           term.scrollToBottom();
