@@ -12,8 +12,8 @@ export class TranscriptRuntime {
 
   constructor(private readonly write: (data: string) => void) {}
 
-  writePty(data: string) {
-    this.write(this.normalize(data));
+  writePty(data: string, preserveBoundary = false) {
+    this.write(this.normalize(data, preserveBoundary));
   }
 
   writeAi(text: string, color = "38;5;114") {
@@ -27,10 +27,11 @@ export class TranscriptRuntime {
   }
 
   /** Collapse only duplicate transport line breaks at a chunk boundary. */
-  private normalize(data: string) {
+  private normalize(data: string, preserveBoundary = false) {
     if (!data) return "";
     let value = data.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-    if (this.endsWithLineBreak && value.startsWith("\n")) value = value.slice(1);
+    if (!preserveBoundary && this.endsWithLineBreak && value.startsWith("\n"))
+      value = value.slice(1);
     this.endsWithLineBreak = value.endsWith("\n");
     return value.replace(/\n/g, "\r\n");
   }

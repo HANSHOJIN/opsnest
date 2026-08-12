@@ -4346,6 +4346,11 @@ function looksLikeShellCommand(input: string) {
       })
     )
       return true;
+    // Do not let punctuation in arbitrary pasted prose (for example a
+    // Markdown table, quoted text, or a tab-indented document) route the whole
+    // block into the remote shell. A multiline block is a command only when
+    // its structure or each executable-looking line positively identifies it.
+    return false;
   }
   if (/^(?:[.!/~$][^\s]*|[A-Za-z]:\\[^\s]*)/.test(value)) return true;
   if (/[|;&<>`]|	/.test(value)) return true;
@@ -4650,10 +4655,15 @@ function InteractiveTerminalPanel({
       // prepend CRLF for the same line break. Collapse only a boundary CRLF
       // so the terminal keeps one real line break without hiding shell data.
       let displayData = data;
-      if (renderEndsWithNewline && displayData.startsWith("\r\n"))
+      const explicitLineBreak = data === "\r\n" || data === "\n";
+      if (
+        !explicitLineBreak &&
+        renderEndsWithNewline &&
+        displayData.startsWith("\r\n")
+      )
         displayData = displayData.slice(2);
       renderEndsWithNewline = /(?:\r\n|\n)$/.test(displayData);
-      transcript.writePty(displayData);
+      transcript.writePty(displayData, explicitLineBreak);
     };
     const renderRawPty = (data: string, persist = true) => {
       if (persist) rememberTerminalOutput(server.id, data);
