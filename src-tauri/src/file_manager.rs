@@ -31,7 +31,13 @@ pub async fn list_remote_directory(request: SessionRequest, path: String) -> Res
 #[tauri::command]
 pub async fn download_remote_file(request: SessionRequest, remote_path: String, local_path: String) -> Result<u64, String> {
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
-    let mut remote = sftp.open(remote_path).await.map_err(|error| error.to_string())?;
+    let mut remote = match sftp.open(remote_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = sftp.close().await;
+            return Err(error.to_string());
+        }
+    };
     let mut data = Vec::new();
     let read_result = remote.read_to_end(&mut data).await.map_err(|error| error.to_string());
     drop(remote);
@@ -45,7 +51,13 @@ pub async fn download_remote_file(request: SessionRequest, remote_path: String, 
 pub async fn upload_remote_file(request: SessionRequest, local_path: String, remote_path: String) -> Result<u64, String> {
     let data = fs::read(Path::new(&local_path)).map_err(|error| error.to_string())?;
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
-    let mut remote = sftp.create(remote_path).await.map_err(|error| error.to_string())?;
+    let mut remote = match sftp.create(remote_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = sftp.close().await;
+            return Err(error.to_string());
+        }
+    };
     let write_result = remote.write_all(&data).await.map_err(|error| error.to_string());
     let shutdown_result = if write_result.is_ok() {
         remote.shutdown().await.map_err(|error| error.to_string())
