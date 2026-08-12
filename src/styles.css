@@ -412,17 +412,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .center-toolbar .icon-button:active { transform: scale(.95); }
 .center-toolbar .icon-button.is-active { color: var(--text-strong); }
 
-.main-placeholder {
-  grid-row: 2;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  /* The center panel can be narrowed independently of the window when the
-     files panel is open. Container queries keep page content responsive to
-     that actual width instead of the viewport width. */
-  container-type: inline-size;
-  container-name: main-panel;
-}
+.main-placeholder { grid-row: 2; min-height: 0; overflow: hidden; }
 .menu-selection-placeholder { padding: 28px 32px; color: var(--text-strong); font-size: 16px; font-weight: 600; }
 
 .settings-page {
@@ -453,7 +443,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .home-empty-overview strong { color: var(--text-strong); font-size: 14px; }
 .home-empty-overview span { font-size: 12px; }
 .home-empty-icon { color: var(--accent); font-size: 28px; }
-.home-server-grid { width: 100%; max-width: 820px; margin: 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.home-server-grid { max-width: 820px; margin: 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .home-server-card { min-height: 250px; padding: 18px; display: flex; flex-direction: column; gap: 14px; border: 1px solid var(--line-soft); border-radius: 14px; background: var(--card); }
 .home-server-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .home-server-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -846,19 +836,6 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   .docker-container-list { grid-template-columns: 1fr; }
   .discovered-service-list { grid-template-columns: 1fr; }
   .custom-service-form { grid-template-columns: 1fr 1fr; }
-}
-
-/* The viewport may still be wide while the center panel is narrow because
-   the right files panel is open. Keep the home cards readable at that
-   boundary instead of letting two cards collapse into vertical text. */
-@container main-panel (max-width: 760px) {
-  .opsnest-home .home-server-grid { grid-template-columns: 1fr; max-width: 100%; }
-  .opsnest-home .home-heading,
-  .opsnest-home .home-section-heading,
-  .opsnest-home .home-guide,
-  .opsnest-home .home-empty-overview { max-width: 100%; }
-  .opsnest-home .home-guide { align-items: stretch; flex-direction: column; }
-  .opsnest-home .home-guide-actions { flex: 0 0 auto; }
 }
 
 /* The center panel can become narrow while the window itself is still wide

@@ -3,13 +3,13 @@ export type TerminalDispatchContext = {
   askAi: (prompt: string) => void;
   approve: (command: string) => void;
   pendingCommand: () => string | null;
+  isBusy?: () => boolean;
+  onBusy?: () => void;
   looksLikeCommand: (value: string) => boolean;
   probeCommand?: (value: string) => Promise<boolean>;
   isRiskyCommand: (value: string) => boolean;
   confirmRisky: (command: string) => boolean | Promise<boolean>;
   onCommand: (command: string) => void;
-  isBusy?: () => boolean;
-  onBusy?: (busy: boolean) => void;
 };
 
 export class TerminalDispatcher {
@@ -24,6 +24,7 @@ export class TerminalDispatcher {
       return;
     }
     if (this.context.isBusy?.()) {
+      this.context.onBusy?.();
       return;
     }
     const forcedAi = trimmed.startsWith("/ai ");
@@ -31,7 +32,6 @@ export class TerminalDispatcher {
     if (!forcedAi && (this.context.looksLikeCommand(trimmed) || (this.context.probeCommand && await this.context.probeCommand(trimmed)))) {
       if (this.context.isRiskyCommand(command) && !await this.context.confirmRisky(command)) return;
       this.context.onCommand(command);
-      this.context.onBusy?.(true);
       this.context.writeCommand(command);
       return;
     }

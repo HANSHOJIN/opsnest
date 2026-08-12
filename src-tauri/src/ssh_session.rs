@@ -52,11 +52,8 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
 
 struct InteractiveShell {
     writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
-    // A PTY is an ordered byte stream.  AI tool calls and direct terminal
-    // input must never write into it concurrently, otherwise their command
-    // echoes and prompts become indistinguishable.  The gate is held for a
-    // complete AI command (including its completion marker), while ordinary
-    // keystrokes only hold it for the individual write.
+    // One interactive PTY has one input stream. The direct terminal and AI
+    // tool loop must not write to it concurrently.
     execution: tokio::sync::Mutex<()>,
     output: Mutex<Vec<u8>>,
     notify: Notify,
@@ -244,10 +241,9 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
     }
 }
 
-/// Return the durable conversational part of the terminal blackboard in
-/// OpenAI-compatible message order.  Terminal bytes remain in the system
-/// blackboard context, while user/assistant/tool events become real messages
-/// so a later turn does not depend on the model parsing a transcript blob.
+/// Return durable user/assistant turns from the shared terminal blackboard so
+/// follow-up AI requests keep their conversational context after a new UI
+/// render or terminal tab mount.
 pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, String)> {
     let Some(shell) = interactive()
         .lock()
@@ -261,44 +257,23 @@ pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, 
     };
     let mut history = Vec::new();
     let mut used = 0usize;
-    // Walk backwards so a large older terminal/tool event cannot prevent the
-    // newest conversational turns from reaching the model.
     for event in state.events.iter().rev() {
         let role = match event.kind.as_str() {
             "user_message" | "user_question" => "user",
-            "ai_message" => "assistant",
-            "ai_tool_result" => "assistant",
+            "ai_message" | "ai_tool_result" => "assistant",
             _ => continue,
         };
         let mut text = event.text.trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        // Tool output is already visible in the terminal. Keep enough for
-        // continuity and diagnosis without allowing a large ls/log result to
-        // crowd out the actual conversation.
+        if text.is_empty() { continue; }
         if text.chars().count() > 4000 {
-            text = text
-                .chars()
-                .rev()
-                .take(4000)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
+            text = text.chars().rev().take(4000).collect::<String>().chars().rev().collect();
         }
         let cost = text.chars().count();
-        if used + cost > max_chars {
-            break;
-        }
+        if used + cost > max_chars { break; }
         used += cost;
         history.push((role.to_string(), text));
     }
-    // Keep the most recent turns when the event deque contains a long run of
-    // small messages.
-    if history.len() > 24 {
-        history.truncate(24);
-    }
+    if history.len() > 24 { history.truncate(24); }
     history.reverse();
     history
 }
@@ -508,18 +483,18 @@ pub async fn write_interactive_ssh_terminal(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
-    // Ctrl+C is an interrupt and must be able to cancel an in-flight command;
-    // it is deliberately not blocked behind the command gate.
-    let _execution = if data == "\u{3}" {
-        None
-    } else {
-        Some(shell.execution.lock().await)
-    };
     touch_activity(&shell);
     let normalized = data.replace('\r', "").replace('\n', "");
     if !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
         append_blackboard(&shell, "user_input", normalized);
     }
+    // Ctrl+C must still interrupt an in-flight remote command. Ordinary
+    // terminal input waits until an AI command owns and releases the PTY.
+    let _execution = if data == "\x03" {
+        None
+    } else {
+        Some(shell.execution.lock().await)
+    };
     let result = shell
         .writer
         .lock()
@@ -606,8 +581,8 @@ pub async fn run_interactive_command(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
-    // Keep the gate until the marker is observed. This prevents direct input
-    // and another AI tool call from interleaving with this command.
+    // Keep the completion marker and the following real shell prompt atomic
+    // relative to direct input and other tool commands.
     let _execution = shell.execution.lock().await;
     let marker = format!(
         "__OPSNEST_INTERACTIVE_END_{}__",
