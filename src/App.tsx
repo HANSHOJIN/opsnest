@@ -4716,6 +4716,10 @@ function InteractiveTerminalPanel({
             `AI 请求执行以下命令：\n\n${command}\n\n确认执行？`,
           );
           if (approved) {
+            // Release the analysis guard before starting the approval
+            // continuation. The continuation is a new AI request that
+            // executes the exact approved command and receives its result.
+            terminalOperationInFlight = false;
             pendingRef.current = null;
             setPendingApproval(null);
             approveHandlerRef.current?.(command);
@@ -4792,16 +4796,35 @@ function InteractiveTerminalPanel({
           "load_server_sudo_credential",
           { serverId: server.id },
         ).catch(() => null);
-        const output = await invoke<string>("execute_interactive_ssh_command", {
-          sessionId: sessionRef.current,
-          command,
-          sudoPassword,
+        const currentModel = modelRef.current;
+        const raw = await invoke<string>("ai_ssh_chat", {
+          request: {
+            baseUrl: currentModel.baseUrl,
+            apiKey: currentModel.apiKey,
+            model: currentModel.model,
+            sessionId: sessionRef.current,
+            prompt: `用户已确认执行命令：${command}。请根据真实终端输出继续回复，不要重复执行该命令。`,
+            approved: true,
+            approvedCommand: command,
+            context: `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}`,
+            sudoPassword,
+          },
         });
         if (cancelRequestedRef.current) return;
+        const result = JSON.parse(raw) as {
+          content?: string;
+          executed?: Array<{ command: string; output: string }>;
+        };
         pendingRef.current = null;
         setPendingApproval(null);
-        if (!output.trim()) {
-          render("\r\n\x1b[38;5;114m• 命令执行完成（无输出）\x1b[0m\r\n");
+        if (result.content) {
+          sessionContextRef.current.push({ role: "ai_reply", content: result.content });
+          render(`\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`);
+          void appendActivity({
+            category: "ai",
+            title: `AI-SSH · ${server.name}`,
+            detail: `AI: ${result.content}`,
+          }).catch(() => undefined);
         }
         // The interactive command already consumes the remote prompt. Never
         // send an empty carriage return just to make it visible.
@@ -4809,7 +4832,7 @@ function InteractiveTerminalPanel({
         void appendActivity({
           category: "task",
           title: `AI-SSH · ${server.name}`,
-          detail: `$ ${command}\n${output}`,
+          detail: `$ ${command}\n${result.executed?.[0]?.output ?? ""}`,
         }).catch(() => undefined);
         updateWorkStatus("done", "命令已完成", false);
         window.setTimeout(() => {

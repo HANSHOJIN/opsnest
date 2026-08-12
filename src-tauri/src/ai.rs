@@ -38,6 +38,10 @@ pub struct AiSshRequest {
     /// Kept outside model messages. This is read from the local system
     /// credential store only when the user configured optional sudo access.
     pub sudo_password: Option<String>,
+    /// Set when the user has approved a previously proposed command. The
+    /// backend executes this exact command once, then asks the model to
+    /// interpret the real terminal result instead of starting a second plan.
+    pub approved_command: Option<String>,
 }
 
 fn summarize_execution(executed: &[Value]) -> String {
@@ -229,11 +233,45 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
     messages.push(serde_json::json!({"role":"user","content":request.prompt}));
+    let approved_followup = request
+        .approved_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
+    if let Some(command) = approved_followup.as_deref() {
+        let output = match ssh_session::run_interactive_command(
+            &request.session_id,
+            command,
+            true,
+            request.sudo_password.as_deref(),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => format!("[command_error] {error}"),
+        };
+        let _ = ssh_session::record_session_event(
+            &request.session_id,
+            "ai_tool_result",
+            format!("命令：{}\n输出：{}", command, output),
+        );
+        executed.push(serde_json::json!({"command":command,"output":output}));
+        messages.push(serde_json::json!({
+            "role":"user",
+            "content": format!(
+                "用户已确认执行命令 `{}`。命令已经在真实终端执行，下面是原始输出：\n{}\n请根据这个结果继续回复用户，不要再次执行同一命令。",
+                command,
+                executed.last().and_then(|item| item.get("output")).and_then(Value::as_str).unwrap_or_default()
+            )
+        }));
+    }
     let mut recovery_attempts = 0u8;
     for _round in 0..8 {
-        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":"auto"}), Duration::from_secs(60)).await {
+        let tool_choice = if approved_followup.is_some() { "none" } else { "auto" };
+        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60)).await {
             Ok(raw) => raw,
             Err(error) if recovery_attempts < 1 => {
                 recovery_attempts += 1;
