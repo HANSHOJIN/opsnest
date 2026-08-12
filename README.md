@@ -4,7 +4,7 @@
 
 ## What is OpsNest?
 
-OpsNest is, as its name suggests, a small operations and maintenance nest. It is a management application for centrally managing the terminals you own, including servers, routers, NAS devices, and more.
+OpsNest is, as its name suggests, a small operations and maintenance nest. It is a management application for centrally managing the terminal devices you own, including servers, routers, NAS devices, and more.
 
 ## Virtual screenshots
 
@@ -32,6 +32,15 @@ The screenshots below use fictional demo servers and addresses for illustration 
 
 ## Development goals
 
-- Support more types of terminals
-- File management
+- More terminal types and more product-specific home pages
+- File management (a first version is already implemented, but it is still basic)
 - Online file editing
+
+## Special thanks
+
+- [CodexShell](https://github.com/HANSHOJIN/codex-shell) for providing the UI shell.
+- Core technologies: [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Vite](https://vite.dev/), [xterm.js](https://xtermjs.org/), [russh](https://github.com/warp-tech/russh), and the wider open-source community.
+
+## Recommended free AI deployment software
+
+- [FreeLLMApi](https://github.com/tashfeenahmed/freellmapi)
