@@ -5174,11 +5174,7 @@ function InteractiveTerminalPanel({
         if (submits) {
           const block = inputRef.current.trim();
           inputRef.current = "";
-          // Remove the locally echoed prompt+input row before moving down.
-          // The remote PTY may emit its next prompt with only a carriage
-          // return; leaving the old row intact makes it appear as
-          // `root# commandroot#`.
-          term.write("\r\x1b[2K\r\n");
+          term.write("\r\n");
           if (block) void dispatcher.dispatch(block);
         }
         return;
@@ -5186,10 +5182,7 @@ function InteractiveTerminalPanel({
       if (data === "\r" || data === "\n") {
         const line = inputRef.current.trim();
         inputRef.current = "";
-        // Clear the locally echoed editable row before submitting. The remote
-        // shell has echo disabled, so its next prompt must start on a clean
-        // row rather than being appended after the local input.
-        term.write("\r\x1b[2K\r\n");
+        render("\r\n");
         if (!line) {
           void write("\r");
           return;
