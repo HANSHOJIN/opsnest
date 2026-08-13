@@ -5474,7 +5474,7 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             completedMarkers.length > 0,
             completedMarkers.length === 0,
-            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            formatAiConclusion("已停止", term.cols, "stopped"),
             true,
           );
           return;
@@ -5490,7 +5490,7 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             completedMarkers.length > 0,
             completedMarkers.length === 0,
-            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            formatAiConclusion("已停止", term.cols, "stopped"),
             true,
           );
           return;
@@ -5514,7 +5514,7 @@ function InteractiveTerminalPanel({
             finishAiSummary(
               completedMarkers.length > 0,
               completedMarkers.length === 0,
-              "\r\n\x1b[38;5;220m• 已取消 AI 命令执行\x1b[0m\r\n",
+              formatAiConclusion("已取消 AI 命令执行", term.cols, "stopped"),
               true,
             );
           }
@@ -5583,7 +5583,7 @@ function InteractiveTerminalPanel({
             finishAiSummary(
               aiOperationHadTools,
               !aiOperationHadTools,
-              "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+              formatAiConclusion("已停止", term.cols, "stopped"),
               false,
             );
           return;
@@ -5598,7 +5598,11 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             aiOperationHadTools,
             !aiOperationHadTools,
-            `\r\n\x1b[31mAI-SSH 请求失败：${String(reason)}\x1b[0m\r\n`,
+            formatAiConclusion(
+              `AI-SSH 请求失败：${String(reason)}`,
+              term.cols,
+              "error",
+            ),
             false,
           );
       } finally {
@@ -5659,7 +5663,7 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             aiOperationHadTools,
             !aiOperationHadTools,
-            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            formatAiConclusion("已停止", term.cols, "stopped"),
             true,
           );
           return;
@@ -5669,7 +5673,7 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             aiOperationHadTools,
             !aiOperationHadTools,
-            "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+            formatAiConclusion("已停止", term.cols, "stopped"),
             true,
           );
           return;
@@ -5727,7 +5731,7 @@ function InteractiveTerminalPanel({
             finishAiSummary(
               aiOperationHadTools,
               !aiOperationHadTools,
-              "\r\n\x1b[38;5;220m• 已停止\x1b[0m\r\n",
+              formatAiConclusion("已停止", term.cols, "stopped"),
               false,
             );
           return;
@@ -5738,7 +5742,11 @@ function InteractiveTerminalPanel({
           finishAiSummary(
             aiOperationHadTools,
             !aiOperationHadTools,
-            `\r\n\x1b[31m执行已批准命令失败：${String(reason)}\x1b[0m\r\n`,
+            formatAiConclusion(
+              `执行已批准命令失败：${String(reason)}`,
+              term.cols,
+              "error",
+            ),
             false,
           );
       } finally {

@@ -21,7 +21,8 @@ function isCombining(codePoint: number) {
 
 function characterWidth(character: string) {
   const codePoint = character.codePointAt(0) ?? 0;
-  if (isCombining(codePoint)) return 0;
+  if (isCombining(codePoint) || codePoint === 0x200b || codePoint === 0x200d)
+    return 0;
   return codePoint >= 0x1100 &&
     (codePoint <= 0x115f ||
       codePoint === 0x2329 ||
@@ -47,7 +48,10 @@ function stripTerminalControl(value: string) {
   return value
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
     .replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u0080-\u009f]/g, "")
+    // A model response is text, not a PTY stream. Expand tabs so the
+    // width-aware wrapper agrees with xterm's visual columns.
+    .replace(/\t/g, "    ");
 }
 
 function stripInlineMarkdown(value: string) {
@@ -85,7 +89,9 @@ function wrapLine(value: string, width: number) {
 
 function splitTableRow(value: string) {
   const source = value.trim().replace(/^\|/, "").replace(/\|$/, "");
-  return source.split(/(?<!\\)\|/u).map((cell) => stripInlineMarkdown(cell));
+  return source
+    .split(/(?<!\\)\|/u)
+    .map((cell) => stripInlineMarkdown(cell).replace(/\\\|/g, "|"));
 }
 
 function isTableSeparator(value: string) {
@@ -105,7 +111,8 @@ function formatTable(rows: string[], width: number) {
   );
   const naturalWidth = widths.reduce((sum, item) => sum + item, 0) + columns * 3 + 1;
   if (naturalWidth > width) {
-    return body.flatMap((row) => {
+    const rowsToDescribe = body.length ? body : [header];
+    return rowsToDescribe.flatMap((row) => {
       const values = row
         .map((cell, index) => `${header[index] || `列 ${index + 1}`}: ${cell}`)
         .filter((item) => !/:\s*$/.test(item));
@@ -140,7 +147,9 @@ export function formatAiConclusion(
 ) {
   const source = stripTerminalControl(input).replace(/\r\n?/g, "\n").trim();
   if (!source) return "";
-  const width = Math.max(36, Math.min(120, Math.max(36, columns - 4)));
+  // Leave two terminal columns as breathing room. Do not use a large minimum:
+  // a split/side panel can legitimately be only a few dozen columns wide.
+  const width = Math.max(16, Math.min(120, Math.max(16, columns - 2)));
   const output: string[] = [];
   let inCode = false;
   let codeLanguage = "";
@@ -150,13 +159,21 @@ export function formatAiConclusion(
     const fence = line.trim().match(/^```\s*([\w+-]*)\s*$/);
     if (fence) {
       inCode = !inCode;
-      codeLanguage = inCode ? fence[1] ?? "" : "";
-      if (inCode) output.push(`${MUTED}┌─ code${codeLanguage ? ` · ${codeLanguage}` : ""} ─${RESET}`);
+      codeLanguage = inCode ? (fence[1] ?? "").slice(0, Math.max(0, width - 12)) : "";
+      if (inCode) {
+        const codeHeader = `┌─ code${codeLanguage ? ` · ${codeLanguage}` : ""} ─`;
+        output.push(`${MUTED}${wrapLine(codeHeader, width).join(`\n${MUTED}`)}${RESET}`);
+      }
       else output.push(`${MUTED}└─ code ─${RESET}`);
       continue;
     }
     if (inCode) {
       const codeLine = stripTerminalControl(line);
+      output.push(`${CODE}│ ${wrapLine(codeLine, width - 2).join(`\n${CODE}│ `)}${RESET}`);
+      continue;
+    }
+    if (/^\s{4}\S/.test(line)) {
+      const codeLine = line.replace(/^\s{4}/, "");
       output.push(`${CODE}│ ${wrapLine(codeLine, width - 2).join(`\n${CODE}│ `)}${RESET}`);
       continue;
     }
@@ -172,7 +189,11 @@ export function formatAiConclusion(
     }
     const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)$/);
     if (heading) {
-      output.push(`${HEADING}${stripInlineMarkdown(heading[1] ?? "")}${RESET}`);
+      output.push(
+        ...wrapLine(stripInlineMarkdown(heading[1] ?? ""), width).map(
+          (part) => `${HEADING}${part}${RESET}`,
+        ),
+      );
       continue;
     }
     const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
@@ -185,13 +206,28 @@ export function formatAiConclusion(
       output.push(...wrapLine(`${numbered[1]} ${stripInlineMarkdown(numbered[2] ?? "")}`, width));
       continue;
     }
+    const quote = line.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      output.push(
+        ...wrapLine(`│ ${stripInlineMarkdown(quote[1] ?? "")}`, width),
+      );
+      continue;
+    }
+    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) {
+      output.push(`${MUTED}${"─".repeat(Math.max(3, width))}${RESET}`);
+      continue;
+    }
     if (!line.trim()) {
       if (output.at(-1) !== "") output.push("");
       continue;
     }
     output.push(...wrapLine(stripInlineMarkdown(line), width));
   }
+  if (inCode) output.push(`${MUTED}└─ code ─${RESET}`);
   while (output.at(-1) === "") output.pop();
   const label = tone === "error" ? "AI 错误" : tone === "stopped" ? "AI 已停止" : "AI 分析";
-  return `\r\n${toneColor(tone)}┌─ ${label} ─${RESET}\r\n${output.join("\r\n")}\r\n${toneColor(tone)}└────────────${RESET}\r\n`;
+  const headerText = `┌─ ${label} `;
+  const header = `${headerText}${"─".repeat(Math.max(3, width - visibleWidth(headerText) - 1))}┐`;
+  const footer = `└${"─".repeat(Math.max(3, width - 2))}┘`;
+  return `\r\n${toneColor(tone)}${header}${RESET}\r\n${output.join("\r\n")}\r\n${toneColor(tone)}${footer}${RESET}\r\n`;
 }
