@@ -449,7 +449,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .home-server-badges { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .home-server-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .home-server-icon { width: 48px; height: 48px; display: grid; place-items: center; border-radius: 12px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); flex: 0 0 48px; }
-.home-server-icon svg, .home-server-icon .service-icon-image { width: 34px; height: 34px; }
+.home-server-icon svg, .home-server-icon .service-icon-image { width: 44px; height: 44px; }
 .home-server-card strong, .home-server-card span { display: block; }
 .home-server-card strong { color: var(--text-strong); font-size: 14px; }
 .home-server-card span { margin-top: 5px; color: var(--muted); font-size: 11px; }
@@ -486,10 +486,11 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .connection-address-toggle:hover, .connection-address-toggle:focus-visible { border-color: var(--line-soft); background: var(--control-hover); color: var(--text-strong); outline: none; }
 .home-status.is-connected { background: color-mix(in srgb, #58cc87 16%, transparent); color: #72d99a; }
 .server-profile-banner { max-width: 820px; min-height: 92px; margin: 0 auto 28px; padding: 16px 18px; display: flex; align-items: center; gap: 16px; border: 1px solid var(--line-soft); border-radius: 13px; background: var(--card); }
-.server-profile-icon { width: 60px; height: 60px; flex: 0 0 60px; display: grid; place-items: center; border-radius: 12px; background: #fff0f4; color: #a80030; overflow: hidden; }
-.server-profile-icon > * { display: block; max-width: 44px; max-height: 44px; }
-.server-profile-icon > svg { width: 30px; height: 30px; }
-.server-profile-icon .system-alibaba { width: 44px; height: 44px; object-fit: contain; }
+.server-profile-icon { width: 60px; height: 60px; flex: 0 0 60px; display: grid; place-items: center; border-radius: 0; background: transparent; color: #a80030; overflow: visible; }
+.server-profile-icon > * { display: block; max-width: 60px; max-height: 60px; }
+.server-profile-icon > svg { width: 60px; height: 60px; }
+.server-profile-icon > img { width: 60px; height: 60px; object-fit: contain; }
+.server-profile-icon .system-alibaba { width: 60px; height: 60px; object-fit: contain; }
 
 .file-manager-panel { height: 100%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-1); }
 .file-manager-tabs { display: flex; align-items: center; gap: 4px; min-height: 38px; padding: 5px 8px; border-bottom: 1px solid var(--border); overflow: visible; z-index: 30; }
@@ -539,12 +540,14 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .service-icon-image.system-openwrt { filter: none; border-radius: 3px; }
 .service-icon-image.system-istoreos { filter: none; border-radius: 3px; }
 .service-icon-image.system-fnos { width: 44px; height: 44px; object-fit: contain; border-radius: 0; }
-.server-profile-icon .system-fnos { width: 52px; height: 52px; max-width: none; max-height: none; }
+.home-server-icon .service-icon-image.system-fnos { width: 44px; height: 44px; object-fit: contain; }
+.server-profile-icon .system-fnos { width: 60px; height: 60px; max-width: none; max-height: none; }
 .server-profile-icon.nas-profile-icon { background: transparent; }
 .server-profile-icon.nas-profile-icon .system-fnos { width: 60px; height: 60px; }
 .home-server-icon .service-icon-image.system-istoreos,
 .server-profile-icon .service-icon-image.system-istoreos { width: 100%; height: 100%; object-fit: cover; border-radius: 0; }
 .system-istoreos-mark { display: block; width: 34px; height: 34px; min-width: 0; min-height: 0; border-radius: 0; object-fit: contain; background: transparent; }
+.home-server-icon .system-istoreos-mark { width: 44px; height: 44px; }
 .server-profile-icon .system-istoreos-mark {
   width: 60px;
   height: 60px;
@@ -952,6 +955,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   .home-server-card-top { gap: 8px; }
   .home-server-icon { width: 40px; height: 40px; flex-basis: 40px; }
   .home-server-icon svg, .home-server-icon .service-icon-image { width: 28px; height: 28px; }
+  .home-server-icon .service-icon-image.system-fnos { width: 28px; height: 28px; }
   .home-server-stats { grid-template-columns: 1fr; }
   .home-server-stats div,
   .home-server-stats div:nth-child(2n),

@@ -963,19 +963,6 @@ function HomePage({
         const detail =
           actions?.querySelector<HTMLButtonElement>(".text-button");
         if (!server || !actions || !detail) return;
-        const top = card.querySelector<HTMLElement>(".home-server-card-top");
-        const status = top?.querySelector<HTMLElement>("em");
-        const network = document.createElement("em");
-        network.className = "network-badge";
-        network.textContent = isPrivateServerHost(server.host)
-          ? isEnglish
-            ? "LAN"
-            : "内网"
-          : isEnglish
-            ? "WAN"
-            : "外网";
-        if (status) status.insertAdjacentElement("afterend", network);
-        cleanups.push(() => network.remove());
         actions
           .querySelectorAll(".home-server-edit-action")
           .forEach((item) => item.remove());
