@@ -37,6 +37,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ImeGate } from "./features/terminal/ime-gate";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
+import { formatAiConclusion } from "./features/terminal/ai-format";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -5542,9 +5543,11 @@ function InteractiveTerminalPanel({
             role: "ai_reply",
             content: result.content,
           });
-          conclusion = resultFailed
-            ? `\r\n\x1b[31m${result.content}\x1b[0m\r\n`
-            : `\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`;
+          conclusion = formatAiConclusion(
+            result.content,
+            term.cols,
+            resultFailed ? "error" : "success",
+          );
           void appendActivity({
             category: "ai",
             title: `AI-SSH · ${server.name}`,
@@ -5677,9 +5680,11 @@ function InteractiveTerminalPanel({
         let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({ role: "ai_reply", content: result.content });
-          conclusion = resultFailed
-            ? `\r\n\x1b[31m${result.content}\x1b[0m\r\n`
-            : `\r\n\x1b[38;5;114m• ${result.content}\x1b[0m\r\n`;
+          conclusion = formatAiConclusion(
+            result.content,
+            term.cols,
+            resultFailed ? "error" : "success",
+          );
           void appendActivity({
             category: "ai",
             title: `AI-SSH · ${server.name}`,
