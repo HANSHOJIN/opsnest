@@ -30,5 +30,5 @@ type DetailActionBarProps = {
 export function ServerDetailActionBar({ connected, language, onOpen, onConnect, onManager, onEdit }: DetailActionBarProps) {
   const zhMode = language === "zh-CN";
 
-  return <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to server manager"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>;
+  return <div className="server-detail-actions"><button className="primary" onClick={connected ? onOpen : onConnect}>{connected ? (zhMode ? "打开 SSH 终端" : "Open SSH terminal") : (zhMode ? "连接服务器" : "Connect server")}</button><button className="secondary" onClick={onManager}>{zhMode ? "与服务器总管对话" : "Talk to Butler"}</button><button className="text-button" onClick={onEdit}>{zhMode ? "编辑服务器" : "Edit server"}</button></div>;
 }

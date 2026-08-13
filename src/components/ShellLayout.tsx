@@ -57,7 +57,9 @@ export type ShellLayoutProps = {
 };
 
 export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string; customLabel?: string };
-export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; sudoConfigured?: boolean; pinned?: boolean; connected?: boolean; system?: string; kernel?: string; cpu?: string; cpuModel?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[]; router?: { model?: string; firmware?: string; kernel?: string; wanIp?: string; lanIp?: string; lanClients?: string; wifiClients?: string } };
+export type ServerStorageVolume = { name?: string; kind?: string; profile?: string; devices?: string; mountPoint?: string; total?: string; used?: string; available?: string; percent?: string };
+export type NasInstalledApp = { id: string; name: string; version?: string; source?: string; status?: string; port?: number; iconData?: string };
+export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; sudoConfigured?: boolean; pinned?: boolean; connected?: boolean; system?: string; kernel?: string; cpu?: string; cpuModel?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[]; router?: { model?: string; firmware?: string; kernel?: string; wanIp?: string; lanIp?: string; lanClients?: string; wifiClients?: string }; nas?: { kind?: string; version?: string; managementPort?: string; storage?: ServerStorageVolume[]; apps?: NasInstalledApp[] } };
 
 export function ShellNavigation({ language = "zh-CN", selected, onSelect, servers: serverSummaries = [], onTogglePin, onRename, onToggleConnection, onDelete, onOpenSsh }: { language?: "zh-CN" | "en"; selected?: string | null; onSelect?: (id: string) => void; servers?: ServerSummary[]; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void }) {
   const isEnglish = language === "en";
@@ -69,7 +71,7 @@ export function ShellNavigation({ language = "zh-CN", selected, onSelect, server
     const pinned = serverSummaries.filter((server) => server.pinned);
     return <nav className="left-navigation" aria-label={isEnglish ? "Shell navigation" : "导航"}>
       <button className={`nav-item ${selected === "home" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("home")}><House size={15} /><span>{isEnglish ? "Home" : "首页"}</span></button>
-      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Server Manager" : "服务器总管"}</span></button>
+      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Butler" : "服务器总管"}</span></button>
       <button className={`nav-item ${selected === "tasks" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("tasks")}><ClipboardList size={15} /><span>{isEnglish ? "Task history" : "任务记录"}</span></button>
       <button className={`nav-item ${selected === "cron" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("cron")}><CalendarClock size={15} /><span>{isEnglish ? "Scheduled tasks" : "定时任务"}</span></button>
       {pinned.length > 0 && <ServerNavGroup label={isEnglish ? "Pinned" : "置顶"} servers={pinned} selected={selected} onSelect={onSelect} onTogglePin={onTogglePin} onRename={onRename} onToggleConnection={onToggleConnection} onDelete={onDelete} onOpenSsh={onOpenSsh} />}
@@ -81,7 +83,7 @@ export function ShellNavigation({ language = "zh-CN", selected, onSelect, server
 
   return (
     <nav className="left-navigation" aria-label={isEnglish ? "Shell navigation" : "壳导航"}>
-      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Server Manager" : "服务器总管"}</span></button>
+      <button className={`nav-item ${selected === "manager" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("manager")}><MessageSquare size={15} /><span>{isEnglish ? "Butler" : "服务器总管"}</span></button>
       <button className={`nav-item ${selected === "tasks" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("tasks")}><ClipboardList size={15} /><span>{isEnglish ? "Task history" : "任务记录"}</span></button>
       <button className={`nav-item ${selected === "cron" ? "is-selected" : ""}`} type="button" onClick={() => onSelect?.("cron")}><CalendarClock size={15} /><span>{isEnglish ? "Scheduled tasks" : "定时任务"}</span></button>
       <NavGroup label={isEnglish ? "Pinned" : "置顶"} icon={<Pin size={14} />} open={openGroups.pinned} onToggle={() => toggle("pinned")} items={pinnedServers} onSelect={onSelect} groupId="pinned" selected={selected} />
@@ -217,7 +219,7 @@ function SidebarFooter({ onSettings, language }: { onSettings: () => void; langu
             <button className="about-close" type="button" aria-label={isEnglish ? "Close" : "关闭"} onClick={() => setAboutOpen(false)}><X size={15} /></button>
             <div className="about-mark">ON</div>
             <h2 id="about-title">OpsNest</h2>
-            <p className="about-version">OpsNest 0.2.0-alpha.4</p>
+            <p className="about-version">OpsNest 0.2.0-alpha.5</p>
             <p className="about-credit">{isEnglish ? "AI-integrated server management." : "集成 AI 的服务器管理工具。"}</p>
             <a className="about-link" href="https://github.com/HANSHOJIN/opsnest" target="_blank" rel="noreferrer">github.com/HANSHOJIN/opsnest</a>
             <p className="about-license">{isEnglish ? "OpsNest is open source and free to use. Please keep the project name and source address when using it, so more people can discover the project. Thank you." : "OpsNest 是开源且免费的软件。使用或再发布时，请保留项目名称和源码地址，让更多人可以找到这个项目。谢谢。"}</p>

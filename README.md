@@ -26,7 +26,7 @@ The screenshots below use fictional demo servers and addresses for illustration 
 
 ## Highlights
 
-1. **Server Manager**: a traditional AI chat interface for managing all your servers. It can help modify the application interface, add or remove server connections, and execute other Agent commands.
+1. **Butler**: a traditional AI chat interface for managing all your servers. It can help modify the application interface, add or remove server connections, and execute other Agent commands.
 2. **Specialized home pages**: each terminal connection is automatically identified according to its capabilities as a general Linux server, an OpenWrt router, or a NAS. OpsNest then presents the appropriate home-page design. For example, a router home page can show connection counts and other router-specific information.
 3. **Service discovery**: automatically scans ports that expose Web services and presents them as quick-open cards. Open a service with one click instead of remembering every port number, and add custom entries when needed.
 

@@ -6,6 +6,8 @@ import {
   CircleGauge,
   Container,
   Database,
+  Eye,
+  EyeOff,
   Globe,
   Network,
   Server,
@@ -15,6 +17,7 @@ import {
 import ShellLayout, {
   ShellNavigation,
   type DiscoveredServiceSummary,
+  type NasInstalledApp,
   type ServerSummary,
 } from "./components/ShellLayout";
 import { ModelSettingsPanel } from "./components/ModelSettingsPanel";
@@ -129,6 +132,8 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
             : key.includes("network") || key.includes("listen")
               ? Network
               : Box;
+  const isFnosSystem =
+    directory === "systems" && /fnos|fnnas|feiniu|飞牛|nas/i.test(key);
   const baseKey =
     key.includes("1panel") || key.includes("1 panel")
       ? "1panel"
@@ -149,7 +154,9 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
                     : directory === "systems"
                       ? isAlibabaLabel(name)
                         ? "alibaba"
-                        : key.includes("istoreos")
+                        : isFnosSystem
+                          ? "fnos"
+                          : key.includes("istoreos")
                           ? "istoreos"
                           : /openwrt|immortalwrt/.test(key)
                             ? "openwrt"
@@ -223,6 +230,17 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
         alt="iStoreOS"
         width={400}
         height={400}
+      />
+    );
+  if (isFnosSystem)
+    return (
+      <img
+        className="service-icon-image system-fnos"
+        src="/icons/packed/systems/fnos.png?v=1"
+        alt="fnOS"
+        aria-hidden="true"
+        width={18}
+        height={18}
       />
     );
   return remote ? (
@@ -1035,7 +1053,7 @@ function HomePage({
           type="button"
           onClick={onOpenManagerBottom}
         >
-          {isEnglish ? "Open manager" : "打开服务器总管"}
+          {isEnglish ? "Open Butler" : "打开服务器总管"}
         </button>
       </div>
       {servers.length === 0 ? (
@@ -1050,16 +1068,19 @@ function HomePage({
         </section>
       ) : (
         <section className="home-server-grid">
-          {servers.map((server) => (
+          {servers.map((server) => {
+            const serverIdentity = `${server.name} ${server.system || ""} ${server.nas?.kind || ""} ${server.router?.firmware || ""}`;
+            const isFnos = /fnos|fnnas|feiniu|飞牛|nas/i.test(serverIdentity);
+            return (
             <article className="home-server-card" key={server.id}>
               <div className="home-server-card-top">
                 <div className="home-server-identity">
                   <span
-                    className={`home-server-icon ${/istoreos/i.test(`${server.name} ${server.system || ""} ${server.router?.firmware || ""}`) ? "is-istoreos" : ""}`}
+                    className={`home-server-icon ${/istoreos/i.test(serverIdentity) ? "is-istoreos" : ""} ${isFnos ? "is-fnos" : ""}`}
                   >
                     <ServiceIcon
                       kind="system"
-                      name={server.system || "linux"}
+                      name={serverIdentity || "linux"}
                     />
                   </span>
                   <div>
@@ -1145,7 +1166,8 @@ function HomePage({
                 </button>
               </div>
             </article>
-          ))}
+            );
+          })}
         </section>
       )}
     </div>
@@ -2998,13 +3020,13 @@ function LinuxServerHomeContent({
     <div className="server-home-page">
       <header className="server-home-header">
         <div>
+          <div className="server-home-eyebrow-row">
           <div className="settings-eyebrow">
             {isEnglish ? "Linux server" : "Linux 服务器"}
           </div>
+          <ConnectionAddress language={language} server={server} />
+          </div>
           <h1>{server.name}</h1>
-          <p>
-            {server.host}:{server.port}
-          </p>
         </div>
         <div className="router-status-group">
           <span className="router-network-badge">
@@ -3113,7 +3135,7 @@ function LinuxServerHomeContent({
         <div className="server-home-section-heading">
           <div>
             <span className="home-section-label">
-              {isEnglish ? "Server manager" : "服务器总管"}
+              {isEnglish ? "Butler" : "服务器总管"}
             </span>
             <h2>{isEnglish ? "Ask about this server" : "询问这台服务器"}</h2>
           </div>
@@ -3182,6 +3204,56 @@ function isRouterServer(server: ServerSummary) {
   return /openwrt|istoreos|immortalwrt|路由器/i.test(value);
 }
 
+function isNasServer(server: ServerSummary) {
+  const value = [server.name, server.system || "", server.nas?.kind || ""]
+    .join(" ")
+    .toLowerCase();
+  return Boolean(server.nas?.kind) || /fnos|fnnas|feiniu|飞牛|truenas|freenas|synology|qnap|openmediavault/.test(value);
+}
+
+function ConnectionAddress({
+  language,
+  server,
+}: {
+  language: Language;
+  server: ServerSummary;
+}) {
+  const [visible, setVisible] = React.useState(false);
+  const address = `${server.host}:${server.port}`;
+  return (
+    <p className="connection-address">
+      <span className={visible ? "is-visible" : "is-masked"}>
+        {visible ? address : "••••••••••"}
+      </span>
+      <button
+        type="button"
+        className="connection-address-toggle"
+        onClick={() => setVisible((current) => !current)}
+        aria-label={
+          visible
+            ? language === "en"
+              ? "Hide connection details"
+              : "隐藏连接信息"
+            : language === "en"
+              ? "Show connection details"
+              : "显示连接信息"
+        }
+        title={
+          visible
+            ? language === "en"
+              ? "Hide connection details"
+              : "隐藏连接信息"
+            : language === "en"
+              ? "Show connection details"
+              : "显示连接信息"
+        }
+      >
+        {visible ? <EyeOff size={14} /> : <Eye size={14} />}
+      </button>
+    </p>
+  );
+}
+
 function RouterServerHome({
   language,
   server,
@@ -3219,13 +3291,13 @@ function RouterServerHome({
       <div className="server-home-page router-server-home">
         <header className="server-home-header">
           <div>
+            <div className="server-home-eyebrow-row">
             <div className="settings-eyebrow">
               {isEnglish ? "Router" : "路由器"}
             </div>
+            <ConnectionAddress language={language} server={server} />
+            </div>
             <h1>{server.name}</h1>
-            <p>
-              {server.host}:{server.port}
-            </p>
           </div>
           <div className="router-status-group">
             <span className="router-network-badge">
@@ -3362,6 +3434,382 @@ function RouterServerHome({
         hideDocker
       />
     </div>
+  );
+}
+
+function NasServerHome({
+  language,
+  server,
+  onScan,
+  onOpenTerminal,
+  onOpenFiles,
+  onServicesUpdated,
+}: {
+  language: Language;
+  server: ServerSummary;
+  onScan: () => void;
+  onOpenTerminal: () => void;
+  onOpenFiles: () => void;
+  onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
+}) {
+  const isEnglish = language === "en";
+  const nas = server.nas || {};
+  const value = (
+    text?: string,
+    fallback = isEnglish ? "Not scanned" : "未扫描",
+  ) => {
+    const cleaned = text?.trim() || "";
+    return !cleaned || /default string|unknown/i.test(cleaned)
+      ? fallback
+      : cleaned;
+  };
+  const managementPort = value(nas.managementPort, "5666");
+  const storageVolumes = [...(nas.storage ?? [])].sort((left, right) =>
+    (left.mountPoint || left.name || "").localeCompare(
+      right.mountPoint || right.name || "",
+      undefined,
+      { numeric: true },
+    ),
+  );
+  const [showAllStorage, setShowAllStorage] = React.useState(false);
+  React.useEffect(() => {
+    setShowAllStorage(false);
+  }, [server.id]);
+  const hasCollapsedStorage = storageVolumes.length > 2;
+  const visibleStorageVolumes =
+    hasCollapsedStorage && !showAllStorage
+      ? storageVolumes.slice(0, 2)
+      : storageVolumes;
+  const dockerContainers = (server.services ?? []).filter(
+    (service) => service.kind.toLowerCase() === "docker",
+  ).length;
+  return (
+    <div className="server-home-center">
+      <div className="server-home-page nas-server-home">
+        <header className="server-home-header">
+          <div>
+            <div className="server-home-eyebrow-row">
+            <div className="settings-eyebrow">NAS</div>
+            <ConnectionAddress language={language} server={server} />
+            </div>
+            <h1>{server.name}</h1>
+          </div>
+          <div className="router-status-group">
+            <span className="router-network-badge">
+              ●{" "}
+              {isPrivateServerHost(server.host)
+                ? isEnglish
+                  ? "LAN"
+                  : "内网"
+                : isEnglish
+                  ? "WAN"
+                  : "外网"}
+            </span>
+            <span
+              className={`home-status ${server.connected ? "is-connected" : ""}`}
+            >
+              ●{" "}
+              {server.connected
+                ? isEnglish
+                  ? "Connected"
+                  : "已连接"
+                : isEnglish
+                  ? "Not connected"
+                  : "未连接"}
+            </span>
+          </div>
+        </header>
+        <section className="server-profile-banner router-profile-banner">
+          <div className="server-profile-icon nas-profile-icon">
+            <ServiceIcon kind="system" name="fnOS NAS" />
+          </div>
+          <div>
+            <strong>{isEnglish ? "Feiniu fnOS NAS" : "飞牛 fnOS NAS"}</strong>
+            <span>{value(nas.version, isEnglish ? "fnOS" : "fnOS 系统")}</span>
+            <small>
+              {isEnglish
+                ? `Management port ${managementPort}`
+                : `管理端口 ${managementPort}`}
+            </small>
+          </div>
+          <div className="server-profile-actions">
+            <button
+              className="secondary"
+              type="button"
+              onClick={onOpenTerminal}
+            >
+              {isEnglish ? "Open terminal" : "打开终端"}
+            </button>
+            <button className="secondary" type="button" onClick={onOpenFiles}>
+              {isEnglish ? "Files" : "文件管理"}
+            </button>
+          </div>
+        </section>
+        <section className="server-home-section">
+          <div className="server-home-section-heading">
+            <div>
+              <span className="home-section-label">
+                {isEnglish ? "Storage" : "存储"}
+              </span>
+              <h2>{isEnglish ? "All storage volumes" : "全部存储空间"}</h2>
+            </div>
+            <div className="nas-storage-heading-actions">
+              {hasCollapsedStorage && (
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => setShowAllStorage((current) => !current)}
+                  aria-expanded={showAllStorage}
+                >
+                  {showAllStorage
+                    ? isEnglish
+                      ? "Collapse"
+                      : "收起"
+                    : isEnglish
+                      ? `Show all ${storageVolumes.length}`
+                      : `展开全部（${storageVolumes.length}）`}
+                </button>
+              )}
+              <button className="text-button" type="button" onClick={onScan}>
+              {isEnglish ? "Scan again" : "重新扫描"}
+            </button>
+            </div>
+          </div>
+          {storageVolumes.length > 0 ? (
+            <div className="nas-storage-grid">
+              {visibleStorageVolumes.map((volume) => {
+                const logicalVolume = /^\/vol(\d+)$/.exec(volume.mountPoint || "");
+                const storageName = logicalVolume
+                  ? isEnglish
+                    ? `Storage volume ${logicalVolume[1]}`
+                    : `\u5b58\u50a8\u7a7a\u95f4 ${logicalVolume[1]}`
+                  : volume.name || volume.mountPoint || "/";
+                const percent = Math.min(
+                  100,
+                  Math.max(
+                    0,
+                    Number.parseInt((volume.percent || "").replace("%", ""), 10) || 0,
+                  ),
+                );
+                const usageClass =
+                  percent >= 85
+                    ? "is-critical"
+                    : percent >= 70
+                      ? "is-warning"
+                      : "is-healthy";
+                return (
+                  <article className="nas-storage-card" key={volume.mountPoint}>
+                    <div className="nas-storage-card-heading">
+                      <strong>{storageName}</strong>
+                      <span>{volume.profile || (volume.kind === "btrfs" ? "Btrfs" : "Filesystem")}</span>
+                    </div>
+                    <div
+                      className={`nas-storage-progress ${usageClass}`}
+                      role="progressbar"
+                      aria-label={isEnglish ? "Storage usage" : "存储空间使用率"}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={percent}
+                    >
+                      <i style={{ width: `${percent}%` }} />
+                    </div>
+                    <div className="nas-storage-card-meta">
+                      <span>
+                        {volume.used || "—"} / {volume.total || "—"} · {volume.percent || "—"}
+                      </span>
+                      <span>
+                        {isEnglish ? "Free" : "可用"} {volume.available || "—"}
+                      </span>
+                    </div>
+                    <small className="nas-storage-card-foot">
+                      {volume.mountPoint || "/"}
+                      {volume.devices ? ` · ${volume.devices} ${isEnglish ? "disks" : "块磁盘"}` : ""}
+                    </small>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="server-service-empty">
+              <strong>{isEnglish ? "No storage volumes scanned" : "尚未扫描到存储空间"}</strong>
+              <span>
+                {isEnglish
+                  ? "Run a scan to read every mounted NAS volume."
+                  : "点击重新扫描，读取 NAS 上的全部挂载存储空间。"}
+              </span>
+            </div>
+          )}
+        </section>
+        <section className="server-home-section">
+          <div className="server-home-section-heading">
+            <div>
+              <span className="home-section-label">
+                {isEnglish ? "System" : "系统"}
+              </span>
+              <h2>{isEnglish ? "NAS resources" : "NAS 系统资源"}</h2>
+            </div>
+          </div>
+          <div className="server-metric-grid">
+            <div>
+              <span>CPU</span>
+              <strong>{value(server.cpu)}</strong>
+            </div>
+            <div>
+              <span>{isEnglish ? "Memory" : "内存"}</span>
+              <strong>{value(server.memory)}</strong>
+            </div>
+            <div>
+              <span>{isEnglish ? "System disk" : "系统盘"}</span>
+              <strong>{value(server.disk)}</strong>
+            </div>
+            <div>
+              <span>Docker</span>
+              <strong>
+                {dockerContainers > 0
+                  ? `已安装 · ${dockerContainers} 个运行中`
+                  : value(server.docker)}
+              </strong>
+            </div>
+          </div>
+        </section>
+      </div>
+      <WebServiceDiscoveryPanel
+        server={server}
+        onServicesUpdated={onServicesUpdated}
+        nasMode
+        language={language}
+      />
+      <NasApplicationCenter language={language} server={server} onScan={onScan} />
+    </div>
+  );
+}
+
+function NasApplicationCenter({
+  language,
+  server,
+  onScan,
+}: {
+  language: Language;
+  server: ServerSummary;
+  onScan: () => void;
+}) {
+  const isEnglish = language === "en";
+  const apps = server.nas?.apps ?? [];
+  const [expanded, setExpanded] = React.useState(false);
+  const visibleApps = expanded ? apps : apps.slice(0, 6);
+  const openApp = async (app: NasInstalledApp) => {
+    if (!app.port) return;
+    const host = server.host.split("@").pop() ?? server.host;
+    try {
+      const baseUrl = await invoke<string>("resolve_service_url", {
+        host,
+        port: app.port,
+        preferredScheme: app.port === 443 ? "https" : null,
+      });
+      await invoke("open_external_url", { url: baseUrl });
+    } catch {
+      /* Keep the card useful even when an app closes its port between scans. */
+    }
+  };
+  return (
+    <section className="nas-app-center-card server-home-section">
+      <div className="server-home-section-heading">
+        <div>
+          <span className="home-section-label">
+            {isEnglish ? "Applications" : "应用"}
+          </span>
+          <h2>{isEnglish ? "fnOS App Center" : "飞牛应用中心"}</h2>
+        </div>
+        <div className="nas-storage-heading-actions">
+          <button className="text-button" type="button" onClick={onScan}>
+            {isEnglish ? "Scan again" : "重新扫描"}
+          </button>
+          {apps.length > 6 && (
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => setExpanded((current) => !current)}
+              aria-expanded={expanded}
+            >
+              {expanded
+                ? isEnglish
+                  ? "Collapse"
+                  : "收起"
+                : isEnglish
+                  ? `Show all ${apps.length}`
+                  : `展开全部（${apps.length}）`}
+            </button>
+          )}
+        </div>
+      </div>
+      {apps.length === 0 ? (
+        <div className="server-service-empty">
+          <strong>
+            {isEnglish ? "No installed apps scanned" : "尚未扫描到已安装应用"}
+          </strong>
+          <span>
+            {isEnglish
+              ? "Run a NAS scan to read the fnOS application center."
+              : "重新扫描 NAS 后，将读取飞牛应用中心中的已安装应用。"}
+          </span>
+        </div>
+      ) : (
+        <div className="nas-app-grid">
+          {visibleApps.map((app) => {
+            const running = app.status?.toLowerCase() === "running";
+            const official = app.source?.toLowerCase() === "official";
+            return (
+              <article className="nas-app-card" key={app.id}>
+                <div className="nas-app-icon">
+                  {app.iconData ? (
+                    <img src={app.iconData} alt="" aria-hidden="true" />
+                  ) : (
+                    <ServiceIcon kind="web" name={app.name || app.id} />
+                  )}
+                </div>
+                <div className="nas-app-card-body">
+                  <strong>{app.name || app.id}</strong>
+                  <span>
+                    {app.version || (isEnglish ? "Version unknown" : "版本未知")}
+                  </span>
+                  <small>
+                    {running
+                      ? isEnglish
+                        ? "Running"
+                        : "运行中"
+                      : isEnglish
+                        ? "Installed"
+                        : "已安装"}
+                    {official
+                      ? isEnglish
+                        ? " · Official"
+                        : " · 官方"
+                      : app.source
+                        ? isEnglish
+                          ? " · Third-party"
+                          : " · 第三方"
+                        : ""}
+                  </small>
+                </div>
+                {app.port ? (
+                  <button
+                    className="secondary nas-app-open"
+                    type="button"
+                    onClick={() => void openApp(app)}
+                  >
+                    {isEnglish ? "Open" : "打开"}
+                  </button>
+                ) : (
+                  <span className="nas-app-portless">
+                    {isEnglish ? "No web entry" : "无 Web 入口"}
+                  </span>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3694,6 +4142,10 @@ function DockerServiceCard({ server }: { server: ServerSummary }) {
     (service) => service.kind.toLowerCase() === "docker",
   );
   const dockerState = server.docker || "尚未扫描";
+  const displayDockerState =
+    containers.length > 0 && /\b0\b/.test(dockerState)
+      ? dockerState.replace(/\b0\b/, String(containers.length))
+      : dockerState;
   const [expanded, setExpanded] = React.useState(false);
   const dockerUnavailable = /(?:not\s+installed|未安装)/i.test(dockerState);
   if (dockerUnavailable) return null;
@@ -3710,9 +4162,9 @@ function DockerServiceCard({ server }: { server: ServerSummary }) {
           </div>
         </div>
         <span
-          className={`docker-service-status ${dockerState.includes("未安装") ? "is-off" : ""}`}
+          className={`docker-service-status ${displayDockerState.includes("未安装") ? "is-off" : ""}`}
         >
-          {dockerState
+          {displayDockerState
             .replace(/\bnot\s+installed\b/gi, "未安装")
             .replace(/\binstalled\b/gi, "已安装")}
         </span>
@@ -6045,10 +6497,14 @@ function WebServiceDiscoveryPanel({
   server,
   onServicesUpdated,
   hideDocker = false,
+  nasMode = false,
+  language,
 }: {
   server: ServerSummary;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
   hideDocker?: boolean;
+  nasMode?: boolean;
+  language?: Language;
 }) {
   const [services, setServices] = React.useState<DiscoveredServiceSummary[]>(
     () =>
@@ -6059,6 +6515,16 @@ function WebServiceDiscoveryPanel({
   const [state, setState] = React.useState("正在扫描");
   const serviceLabel = hideDocker ? "路由器服务" : "服务";
   const serviceTitle = hideDocker ? "内置服务与管理入口" : "常用入口";
+  const resolvedServiceLabel = nasMode
+    ? language === "en"
+      ? "NAS services"
+      : "NAS 服务"
+    : serviceLabel;
+  const resolvedServiceTitle = nasMode
+    ? language === "en"
+      ? "NAS applications and entry points"
+      : "NAS 应用与管理入口"
+    : serviceTitle;
   const [showCustomService, setShowCustomService] = React.useState(false);
   const [customName, setCustomName] = React.useState("");
   const [customLabel, setCustomLabel] = React.useState("");
@@ -6243,9 +6709,9 @@ function WebServiceDiscoveryPanel({
     <section className="service-discovery-section">
       <div className="server-home-section-heading">
         <div>
-          <span className="home-section-label">{serviceLabel}</span>
+          <span className="home-section-label">{resolvedServiceLabel}</span>
           <div className="service-heading-title">
-            <h2>{serviceTitle}</h2>
+            <h2>{resolvedServiceTitle}</h2>
             <button
               className="service-add-button"
               type="button"
@@ -6854,6 +7320,7 @@ function App() {
         disk: string;
         docker: string;
         router?: ServerSummary["router"];
+        nas?: ServerSummary["nas"];
       }>("inspect_linux_server", {
         request: {
           host,
@@ -6910,6 +7377,7 @@ function App() {
                 disk: result.disk,
                 docker: result.docker,
                 router: result.router,
+                nas: result.nas,
               }
             : item,
         ),
@@ -6924,7 +7392,7 @@ function App() {
   const selectedLabel =
     selectedMenu === "manager"
       ? isEnglish
-        ? "Server Manager"
+        ? "Butler"
         : "服务器总管"
       : selectedMenu === "tasks"
         ? isEnglish
@@ -6961,8 +7429,20 @@ function App() {
     [selectedServer?.id, updateServerServices],
   );
   React.useEffect(() => {
-    if (selectedServer && !selectedServer.cpu) void scanServer(selectedServer);
-  }, [selectedServer?.id]);
+    if (
+      selectedServer &&
+      (!selectedServer.cpu ||
+        (isNasServer(selectedServer) &&
+          (!Array.isArray(selectedServer.nas?.storage) ||
+            !selectedServer.nas?.version ||
+            /^(unknown|not scanned)$/i.test(selectedServer.nas.version))))
+    )
+      void scanServer(selectedServer);
+  }, [
+    selectedServer?.id,
+    selectedServer?.nas?.version,
+    selectedServer?.nas?.storage?.length,
+  ]);
   const pageTitle = selectedServer
     ? `${selectedServer.name} · ${selectedServer.host}:${selectedServer.port} · ${selectedServer.connected ? (isEnglish ? "Connected" : "已连接") : isEnglish ? "Not connected" : "未连接"}`
     : selectedMenu === "home"
@@ -7088,6 +7568,15 @@ function App() {
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
                   onOpenManager={() => navigate("manager")}
+                  onServicesUpdated={updateSelectedServerServices}
+                />
+              ) : isNasServer(selectedServer) ? (
+                <NasServerHome
+                  language={appearance.language}
+                  server={selectedServer}
+                  onScan={() => void scanServer(selectedServer)}
+                  onOpenTerminal={() => openServerTerminal(selectedServer.id)}
+                  onOpenFiles={() => openServerFiles(selectedServer.id)}
                   onServicesUpdated={updateSelectedServerServices}
                 />
               ) : (
