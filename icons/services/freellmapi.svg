@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="0 0 400 400">
+  <!-- 黑色圆角背景 -->
+  <rect width="400" height="400" rx="60" fill="#000000"/>
+
+  <!-- 白色圆点 -->
+  <circle cx="72" cy="200" r="22" fill="#ffffff"/>
+
+  <!-- 完整文字 FreeLLMAPI，单行不换行，保证 PI 显示在内 -->
+  <text x="118" y="206" font-family="Arial, Helvetica, sans-serif" font-size="48" fill="#ffffff" font-weight="700" text-anchor="start">
+    FreeLLMAPI
+  </text>
+</svg>
