@@ -501,27 +501,29 @@ function FileManagerPanel({
           </button>
         </div>
       ))}
-      <button
-        type="button"
-        className="file-manager-add"
-        aria-label="添加文件标签"
-        onClick={() => setShowAddMenu((value) => !value)}
-      >
-        +
-      </button>
-      {showAddMenu && (
-        <div className="file-manager-add-menu">
-          {servers.filter((item) => !openServerIds.includes(item.id)).map((item) => (
-            <button key={item.id} type="button" onClick={() => openServerTab(item.id)}>
-              <FilesGlyph size={14} strokeWidth={1.8} />
-              <span>{item.name}</span>
-            </button>
-          ))}
-          {servers.every((item) => openServerIds.includes(item.id)) && (
-            <span>没有可打开的服务器</span>
-          )}
-        </div>
-      )}
+      <div className="file-manager-add-slot">
+        <button
+          type="button"
+          className="file-manager-add"
+          aria-label="添加文件标签"
+          onClick={() => setShowAddMenu((value) => !value)}
+        >
+          +
+        </button>
+        {showAddMenu && (
+          <div className="file-manager-add-menu">
+            {servers.filter((item) => !openServerIds.includes(item.id)).map((item) => (
+              <button key={item.id} type="button" onClick={() => openServerTab(item.id)}>
+                <FilesGlyph size={14} strokeWidth={1.8} />
+                <span>{item.name}</span>
+              </button>
+            ))}
+            {servers.every((item) => openServerIds.includes(item.id)) && (
+              <span>没有可打开的服务器</span>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 
