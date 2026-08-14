@@ -219,7 +219,7 @@ function SidebarFooter({ onSettings, language }: { onSettings: () => void; langu
             <button className="about-close" type="button" aria-label={isEnglish ? "Close" : "关闭"} onClick={() => setAboutOpen(false)}><X size={15} /></button>
             <div className="about-mark">ON</div>
             <h2 id="about-title">OpsNest</h2>
-            <p className="about-version">OpsNest 0.2.0-alpha.6</p>
+            <p className="about-version">OpsNest 0.2.0-alpha.7</p>
             <p className="about-credit">{isEnglish ? "AI-integrated server management." : "集成 AI 的服务器管理工具。"}</p>
             <a className="about-link" href="https://github.com/HANSHOJIN/opsnest" target="_blank" rel="noreferrer">github.com/HANSHOJIN/opsnest</a>
             <p className="about-license">{isEnglish ? "OpsNest is open source and free to use. Please keep the project name and source address when using it, so more people can discover the project. Thank you." : "OpsNest 是开源且免费的软件。使用或再发布时，请保留项目名称和源码地址，让更多人可以找到这个项目。谢谢。"}</p>
