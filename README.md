@@ -2,6 +2,21 @@
 
 [简体中文](README_cn.md) · English
 
+[![GitHub release](https://img.shields.io/github/v/release/HANSHOJIN/opsnest?include_prereleases&color=blue&label=version)](https://github.com/HANSHOJIN/opsnest/releases)
+[![GitHub stars](https://img.shields.io/github/stars/HANSHOJIN/opsnest?style=social)](https://github.com/HANSHOJIN/opsnest/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/HANSHOJIN/opsnest?style=social)](https://github.com/HANSHOJIN/opsnest/network/members)
+[![License](https://img.shields.io/github/license/HANSHOJIN/opsnest?color=green)](LICENSE)
+[![GitHub issues](https://img.shields.io/github/issues/HANSHOJIN/opsnest?color=orange)](https://github.com/HANSHOJIN/opsnest/issues)
+[![GitHub last commit](https://img.shields.io/github/last-commit/HANSHOJIN/opsnest?color=purple)](https://github.com/HANSHOJIN/opsnest/commits/main)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/HANSHOJIN/opsnest/releases)
+
+[![Built with](https://img.shields.io/badge/Built%20with-Tauri%202-blueviolet)](https://tauri.app)
+[![Frontend](https://img.shields.io/badge/React-18-61dafb)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)](https://www.typescriptlang.org)
+[![Rust](https://img.shields.io/badge/Rust-2021-dea584)](https://www.rust-lang.org)
+
+---
+
 ## What is OpsNest?
 
 OpsNest is, as its name suggests, a small operations and maintenance nest. It is a management application for centrally managing the terminal devices you own, including servers, routers, NAS devices, and more.
