@@ -8,6 +8,7 @@ import {
   Database,
   Eye,
   EyeOff,
+  Files as FilesGlyph,
   Globe,
   Network,
   Server,
@@ -756,8 +757,9 @@ function FileManagerPanel({
         <div className="file-manager-tabs">
           {servers.map((item) => (
             <button key={item.id} hidden type="button">
-              {item.name}
-              <span>×</span>
+              <FilesGlyph className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
+              <span className="file-manager-tab-label">{item.name}</span>
+              <span className="file-manager-tab-close">×</span>
             </button>
           ))}
           <button
@@ -783,8 +785,9 @@ function FileManagerPanel({
               setRemotePath("/root");
             }}
           >
-            {item.name}
-            <span>×</span>
+            <FilesGlyph className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
+            <span className="file-manager-tab-label">{item.name}</span>
+            <span className="file-manager-tab-close">×</span>
           </button>
         ))}
         <button

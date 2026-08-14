@@ -510,11 +510,13 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .file-manager-panel { height: 100%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-1); }
 .file-manager-tabs { display: flex; align-items: center; gap: 5px; min-height: 32px; padding: 4px 104px 4px 8px; border-bottom: 1px solid var(--line-soft); background: var(--card); overflow: visible; z-index: 30; }
 .file-manager-tabs, .terminal-tabs { position: relative; }
-.file-manager-tabs button { border: 1px solid transparent; background: transparent; color: var(--text-muted); border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px; line-height: 1.2; white-space: nowrap; cursor: pointer; transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease; }
+.file-manager-tabs button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: transparent; color: var(--text-muted); border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px; line-height: 1.2; white-space: nowrap; cursor: pointer; transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease; }
 .file-manager-tabs button:hover, .file-manager-tabs button.is-active { color: var(--text-strong); background: var(--control-hover); border-color: var(--line); }
-.file-manager-tabs button span { margin-left: 6px; color: var(--text-subtle); transition: color 140ms ease; }
+.file-manager-tabs button span { color: var(--text-subtle); transition: color 140ms ease; }
 .file-manager-tabs button:hover span, .file-manager-tabs button.is-active span { color: var(--text-strong); }
-.file-manager-tabs .file-manager-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-left: 5px; border-radius: 4px; }
+.file-manager-tab-icon { flex: 0 0 auto; color: currentColor; }
+.file-manager-tab-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.file-manager-tabs .file-manager-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-left: 1px; border-radius: 4px; }
 .file-manager-tabs button:hover .file-manager-tab-close { background: var(--control-hover); }
 .file-manager-add-menu, .terminal-add-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 8px; min-width: 150px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-3); box-shadow: 0 12px 28px rgba(0,0,0,.28); }
 .file-manager-add-menu { right: 104px; left: auto; }
