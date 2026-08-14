@@ -28,8 +28,10 @@ import {
 } from "./services/portableStorage";
 import { writeDebugLog } from "./services/debugLog";
 import {
+  bundledIconUrl,
   iconCandidates,
   iconDirectory,
+  normalizeIconKey,
   remoteIconUrl,
 } from "./services/iconCatalog";
 import { Terminal } from "@xterm/xterm";
@@ -39,6 +41,9 @@ import { ImeGate } from "./features/terminal/ime-gate";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
 import { formatAiConclusion } from "./features/terminal/ai-format";
+import dockerIcon from "../icons/packed/services/docker.svg";
+import openListIcon from "../icons/packed/services/openlist.png";
+import luckyIcon from "../icons/packed/services/lucky.png";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -113,10 +118,74 @@ function isAlibabaLabel(value: string) {
   );
 }
 
-function ServiceIcon({ kind, name }: { kind: string; name: string }) {
+function NamedDockerServiceIcon({
+  name,
+  refreshKey,
+}: {
+  name: string;
+  refreshKey: number;
+}) {
+  const iconKey = normalizeIconKey(name);
+  const sources = React.useMemo(() => {
+    if (!iconKey) return [];
+    const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
+    return [
+      bundledIconUrl("services", iconKey, "svg"),
+      bundledIconUrl("services", iconKey, "png"),
+      `/icons/packed/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
+      `/icons/packed/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
+      `${remoteIconUrl("services", iconKey, "svg")}${refreshSuffix}`,
+      `${remoteIconUrl("services", iconKey, "png")}${refreshSuffix}`,
+      `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
+      `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
+    ].filter((source): source is string => Boolean(source));
+  }, [iconKey, refreshKey]);
+  const [sourceIndex, setSourceIndex] = React.useState(0);
+  React.useEffect(() => setSourceIndex(0), [iconKey, refreshKey]);
+
+  if (sourceIndex >= sources.length)
+    return (
+      <img
+        className="service-icon-image service-docker"
+        src={dockerIcon}
+        alt="Docker"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
+    );
+
+  return (
+    <img
+      className={`service-icon-image service-${iconKey}`}
+      src={sources[sourceIndex]}
+      alt=""
+      aria-hidden="true"
+      width={18}
+      height={18}
+      onError={() => setSourceIndex((value) => value + 1)}
+    />
+  );
+}
+
+function ServiceIcon({
+  kind,
+  name,
+  refreshKey = 0,
+}: {
+  kind: string;
+  name: string;
+  refreshKey?: number;
+}) {
   const key = `${kind} ${name}`.toLowerCase();
   if (key.includes("custom-web")) return <Globe size={18} strokeWidth={1.8} />;
   const directory = iconDirectory(kind, name);
+  const kindOnly = kind.trim().toLowerCase();
+  const nameOnly = name.trim();
+  const isNamedDockerContainer =
+    directory === "services" &&
+    /^(docker|container)$/.test(kindOnly) &&
+    !/^(docker|container)$/i.test(nameOnly);
   const Icon =
     directory === "systems"
       ? key.includes("windows")
@@ -136,8 +205,9 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
               : Box;
   const isFnosSystem =
     directory === "systems" && /fnos|fnnas|feiniu|飞牛|nas/i.test(key);
-  const baseKey =
-    key.includes("1panel") || key.includes("1 panel")
+  const baseKey = isNamedDockerContainer
+    ? normalizeIconKey(nameOnly) || "generic"
+    : key.includes("1panel") || key.includes("1 panel")
       ? "1panel"
       : key.includes("docker") || key.includes("container")
         ? "docker"
@@ -151,6 +221,10 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
                 ? "redis"
                 : key.includes("mongo")
                   ? "mongodb"
+                  : /openlist|open-list/.test(key)
+                    ? "openlist"
+                  : key.includes("alist")
+                    ? "alist"
                   : key.includes("web") || key.includes("http")
                     ? "web"
                     : directory === "systems"
@@ -170,6 +244,13 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
                       : "generic";
   const isAlibabaSystem = directory === "systems" && isAlibabaLabel(name);
   const isIStoreSystem = directory === "systems" && /istoreos/i.test(key);
+  const isOpenListService =
+    directory === "services" && /openlist|open-list/i.test(name);
+  const isLuckyService = directory === "services" && /lucky/i.test(name);
+  const isDockerService =
+    directory === "services" &&
+    /^(docker|container)$/i.test(nameOnly) &&
+    !isNamedDockerContainer;
   const candidates = React.useMemo(() => {
     const found = iconCandidates(baseKey, name.match(/\d+(?:\.\d+)+/)?.[0]);
     return directory === "systems"
@@ -180,6 +261,9 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
   React.useEffect(() => {
     let active = true;
     setRemote(null);
+    if (isNamedDockerContainer) return () => {
+      active = false;
+    };
     void (async () => {
       const candidatesToTry = isAlibabaSystem
         ? candidates.filter((candidate) => candidate !== "generic")
@@ -195,11 +279,23 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
                 return;
               }
             }
-            const remoteUrl = remoteIconUrl(directory, candidate, type);
-            const response = await fetch(remoteUrl);
-            if (response.ok) {
-              if (active) setRemote(remoteUrl);
+            const bundled = bundledIconUrl(directory, candidate, type);
+            if (bundled) {
+              if (active) setRemote(bundled);
               return;
+            }
+            const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
+            for (const remoteUrl of [
+              `${remoteIconUrl(directory, candidate, type)}${refreshSuffix}`,
+              `https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
+              `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
+              `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
+            ]) {
+              const response = await fetch(remoteUrl);
+              if (response.ok) {
+                if (active) setRemote(remoteUrl);
+                return;
+              }
             }
           } catch {
             /* continue to next source */
@@ -212,7 +308,42 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
     return () => {
       active = false;
     };
-  }, [directory, candidates.join("|"), isAlibabaSystem]);
+  }, [directory, candidates.join("|"), isAlibabaSystem, isNamedDockerContainer, refreshKey]);
+  if (isNamedDockerContainer)
+    return <NamedDockerServiceIcon name={nameOnly} refreshKey={refreshKey} />;
+  if (isOpenListService)
+    return (
+      <img
+        className="service-icon-image service-openlist"
+        src={openListIcon}
+        alt="OpenList"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
+    );
+  if (isDockerService)
+    return (
+      <img
+        className="service-icon-image service-docker"
+        src={dockerIcon}
+        alt="Docker"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
+    );
+  if (isLuckyService)
+    return (
+      <img
+        className="service-icon-image service-lucky"
+        src={luckyIcon}
+        alt="Lucky"
+        aria-hidden="true"
+        width={18}
+        height={18}
+      />
+    );
   if (isAlibabaSystem || baseKey === "alibaba")
     return (
       <img
@@ -245,19 +376,19 @@ function ServiceIcon({ kind, name }: { kind: string; name: string }) {
         height={18}
       />
     );
-  return remote ? (
-    <img
-      className={`service-icon-image ${directory === "systems" ? `system-${baseKey}` : `service-${baseKey}`}`}
-      src={remote}
-      alt=""
-      aria-hidden="true"
-      width={18}
-      height={18}
-      onError={() => setRemote(null)}
-    />
-  ) : (
-    <Icon size={18} strokeWidth={1.8} />
-  );
+  if (remote)
+    return (
+      <img
+        className={`service-icon-image ${directory === "systems" ? `system-${baseKey}` : `service-${baseKey}`}`}
+        src={remote}
+        alt=""
+        aria-hidden="true"
+        width={18}
+        height={18}
+        onError={() => setRemote(null)}
+      />
+    );
+  return <Icon size={18} strokeWidth={1.8} />;
 }
 
 function SystemIconBadge({ system }: { system?: string }) {
@@ -708,12 +839,12 @@ function FileManagerPanel({
     const enterLocalDirectory = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       const button = target?.closest<HTMLButtonElement>(
-        ".file-manager-pane:nth-child(2) .file-manager-list > button",
+        ".file-manager-pane.local-pane .file-manager-list > button",
       );
       if (!button) return;
       const buttons = Array.from(
         document.querySelectorAll<HTMLButtonElement>(
-          ".file-manager-pane:nth-child(2) .file-manager-list > button",
+          ".file-manager-pane.local-pane .file-manager-list > button",
         ),
       );
       const entry = localFiles[buttons.indexOf(button)];
@@ -731,7 +862,7 @@ function FileManagerPanel({
       );
       if (!path) return;
       const pane = path.closest<HTMLElement>(".file-manager-pane");
-      const remote = pane?.matches(":first-child");
+      const remote = pane?.classList.contains("remote-pane") === true;
       const current = remote ? remotePath : localPath;
       if (!current || current === "/") return;
       if (!remote && /^[A-Za-z]:\\?$/.test(current)) {
@@ -753,6 +884,28 @@ function FileManagerPanel({
     document.addEventListener("click", goParent, true);
     return () => document.removeEventListener("click", goParent, true);
   }, [localPath, remotePath]);
+  const renderTransferActions = () => (
+    <div className="file-manager-actions" aria-label="文件传输操作">
+      <button
+        className="secondary"
+        type="button"
+        onClick={() => void transferRemoteToLocal()}
+        disabled={!selectedRemote || selectedRemote.isDir || busy}
+        aria-label="下载文件到本地"
+      >
+        下载
+      </button>
+      <button
+        className="primary"
+        type="button"
+        onClick={() => void transferLocalToRemote()}
+        disabled={!selectedLocal || selectedLocal.isDir || busy}
+        aria-label="上传文件到服务器"
+      >
+        上传
+      </button>
+    </div>
+  );
   if (openServerIds.length === 0)
     return (
       <div className="file-manager-panel">
@@ -762,9 +915,9 @@ function FileManagerPanel({
   return (
     <div className="file-manager-panel">
       {renderTabs()}
-      <div className="file-manager-columns">
+      <div className={`file-manager-columns${localCollapsed ? " is-local-collapsed" : ""}`}>
         <section
-          className="file-manager-pane"
+          className="file-manager-pane remote-pane"
           onDragOver={(event) => event.preventDefault()}
           onDrop={handleRemoteDrop}
         >
@@ -793,12 +946,15 @@ function FileManagerPanel({
                 onDoubleClick={() => folder(entry, true)}
               >
                 <span>{entry.isDir ? "▰" : "▱"}</span>
-                {entry.name}
+                <span className="file-manager-entry-name" title={entry.name}>
+                  {entry.name}
+                </span>
                 <small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small>
               </button>
             ))}
           </div>
         </section>
+        {!localCollapsed && renderTransferActions()}
         <section
           className={`file-manager-pane local-pane${localCollapsed ? " is-collapsed" : ""}`}
           onDragOver={(event) => event.preventDefault()}
@@ -843,7 +999,9 @@ function FileManagerPanel({
                   onDoubleClick={() => folder(entry, false)}
                 >
                   <span>{entry.isDir ? "▰" : "▱"}</span>
-                  {entry.name}
+                  <span className="file-manager-entry-name" title={entry.name}>
+                    {entry.name}
+                  </span>
                   <small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small>
                 </button>
               ))}
@@ -851,24 +1009,7 @@ function FileManagerPanel({
           </div>
         </section>
       </div>
-      <div className="file-manager-actions">
-        <button
-          className="secondary"
-          type="button"
-          onClick={() => void transferRemoteToLocal()}
-          disabled={!selectedRemote || selectedRemote.isDir || busy}
-        >
-          下载到本地
-        </button>
-        <button
-          className="primary"
-          type="button"
-          onClick={() => void transferLocalToRemote()}
-          disabled={!selectedLocal || selectedLocal.isDir || busy}
-        >
-          上传到服务器
-        </button>
-      </div>
+      {localCollapsed && renderTransferActions()}
       {transfer && (
         <div className="file-manager-transfer">
           <div>
@@ -2139,6 +2280,7 @@ function ServerManagerPage({
             serverDraft.authMethod === "password" ? draftPassword : undefined,
           sudoConfigured: Boolean(draftSudoPassword),
           connected: true,
+          connectionError: false,
         },
         draftSudoPassword || undefined,
       );
@@ -2707,6 +2849,7 @@ function ServerForm({
           ? "password"
           : (initialServer?.authMethod ?? "password"),
         connected: true,
+        connectionError: false,
         kernel: undefined,
         cpu: undefined,
         cpuModel: undefined,
@@ -4109,7 +4252,12 @@ function DockerServiceCard({ server }: { server: ServerSummary }) {
       <div className="docker-service-heading">
         <div className="docker-service-title">
           <span className="docker-service-icon">
-            <Container size={20} />
+            <img
+              className="docker-service-brand-icon"
+              src={dockerIcon}
+              alt="Docker"
+              aria-hidden="true"
+            />
           </span>
           <div>
             <span className="home-section-label">容器</span>
@@ -5970,7 +6118,7 @@ function InteractiveTerminalPanel({
           if (!intentionallyClosedSessions.has(sessionRef.current))
             window.dispatchEvent(
               new CustomEvent("opsnest-server-connection-state", {
-                detail: { serverId: server.id, connected: false },
+                detail: { serverId: server.id, connected: false, connectionError: false },
               }),
             );
           render("\r\n\x1b[31m[SSH connection closed]\x1b[0m\r\n");
@@ -6026,7 +6174,7 @@ function InteractiveTerminalPanel({
         if (created)
           window.dispatchEvent(
             new CustomEvent("opsnest-server-connection-state", {
-              detail: { serverId: server.id, connected: true },
+              detail: { serverId: server.id, connected: true, connectionError: false },
             }),
           );
       })
@@ -6034,7 +6182,7 @@ function InteractiveTerminalPanel({
         if (disposed) return;
         window.dispatchEvent(
           new CustomEvent("opsnest-server-connection-state", {
-            detail: { serverId: server.id, connected: false },
+            detail: { serverId: server.id, connected: false, connectionError: true },
           }),
         );
         setError(String(reason));
@@ -6410,9 +6558,19 @@ function ServiceDiscoveryPanel({ server }: { server: ServerSummary }) {
                 source = local;
                 break;
               }
+              const bundled = bundledIconUrl(directory, candidate, type);
+              if (bundled) {
+                source = bundled;
+                break;
+              }
               const remote = remoteIconUrl(directory, candidate, type);
               if ((await fetch(remote, { method: "HEAD" })).ok) {
                 source = remote;
+                break;
+              }
+              const packedRemote = `https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}`;
+              if ((await fetch(packedRemote, { method: "HEAD" })).ok) {
+                source = packedRemote;
                 break;
               }
             } catch {
@@ -6516,6 +6674,7 @@ function WebServiceDiscoveryPanel({
         isVisibleWebService(service, server.port, hideDocker),
       ),
   );
+  const [iconRefreshKey, setIconRefreshKey] = React.useState(0);
   const [state, setState] = React.useState("正在扫描");
   const serviceLabel = hideDocker ? "路由器服务" : "服务";
   const serviceTitle = hideDocker ? "内置服务与管理入口" : "常用入口";
@@ -6538,8 +6697,16 @@ function WebServiceDiscoveryPanel({
     null,
   );
   const [editingLabel, setEditingLabel] = React.useState("");
+  const savedServicesRef = React.useRef<DiscoveredServiceSummary[]>(
+    server.services ?? [],
+  );
+  savedServicesRef.current = server.services ?? [];
   const scan = React.useCallback(async () => {
     setState("正在扫描");
+    // A rescan is also the explicit signal to re-read user-added packed
+    // icons. Keep the service row keys stable, but make each icon resolver
+    // retry its local/online sources once the scan completes.
+    setIconRefreshKey((value) => value + 1);
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
     const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -6572,11 +6739,33 @@ function WebServiceDiscoveryPanel({
       const cleaned = result.filter(
         (service) => !(service.id === "1panel" && service.port === server.port),
       );
-      const customServices = (server.services ?? []).filter((service) =>
+      const savedServices = savedServicesRef.current;
+      const customServices = savedServices.filter((service) =>
         service.id.startsWith("custom-"),
       );
+      // A rescan refreshes runtime discovery, but it must not erase the
+      // user's saved port/path/label adjustments. Keep those values keyed by
+      // the stable service id and apply them on top of the fresh probe result.
+      const savedById = new Map(
+        savedServices
+          .filter((service) => !service.id.startsWith("custom-"))
+          .map((service) => [service.id, service]),
+      );
+      const withSavedOverrides = (service: DiscoveredServiceSummary) => {
+        const saved = savedById.get(service.id);
+        if (!saved) return service;
+        return {
+          ...service,
+          port: saved.port ?? service.port,
+          webPath: saved.webPath ?? service.webPath,
+          webScheme: saved.webScheme ?? service.webScheme,
+          customLabel: saved.customLabel ?? service.customLabel,
+        };
+      };
       const merged = [
-        ...cleaned.filter((service) => !service.id.startsWith("custom-")),
+        ...cleaned
+          .filter((service) => !service.id.startsWith("custom-"))
+          .map(withSavedOverrides),
         ...customServices,
       ];
       const webServices = merged.filter((service) =>
@@ -6805,6 +6994,7 @@ function WebServiceDiscoveryPanel({
                       : service.kind
                   }
                   name={service.name}
+                  refreshKey={iconRefreshKey}
                 />
               </span>
               <div>
@@ -6975,7 +7165,13 @@ function App() {
           }),
         );
         if (!active) return;
-        setServers(enriched.map((server) => ({ ...server, connected: false })));
+        setServers(
+          enriched.map((server) => ({
+            ...server,
+            connected: false,
+            connectionError: false,
+          })),
+        );
         setServersLoaded(true);
       },
     );
@@ -7114,7 +7310,9 @@ function App() {
         window.dispatchEvent(new Event("opsnest-close-ssh"));
         setServers((current) =>
           current.map((item) =>
-            item.id === id ? { ...item, connected: false } : item,
+            item.id === id
+              ? { ...item, connected: false, connectionError: false }
+              : item,
           ),
         );
         return;
@@ -7143,7 +7341,9 @@ function App() {
             });
             setServers((current) =>
               current.map((item) =>
-                item.id === id ? { ...item, connected: true } : item,
+                item.id === id
+                  ? { ...item, connected: true, connectionError: false }
+                  : item,
               ),
             );
             void writeDebugLog("info", "SSH connection verified", {
@@ -7152,7 +7352,9 @@ function App() {
           } catch (error) {
             setServers((current) =>
               current.map((item) =>
-                item.id === id ? { ...item, connected: false } : item,
+                item.id === id
+                  ? { ...item, connected: false, connectionError: true }
+                  : item,
               ),
             );
             void writeDebugLog("error", "SSH connection verification failed", {
@@ -7285,10 +7487,16 @@ function App() {
     [],
   );
   const updateConnectionState = React.useCallback(
-    (serverId: string, connected: boolean) => {
+    (serverId: string, connected: boolean, connectionError = false) => {
       setServers((current) =>
         current.map((item) =>
-          item.id === serverId ? { ...item, connected } : item,
+          item.id === serverId
+            ? {
+                ...item,
+                connected,
+                connectionError: connected ? false : connectionError,
+              }
+            : item,
         ),
       );
     },
@@ -7297,10 +7505,18 @@ function App() {
   React.useEffect(() => {
     const handler = (event: Event) => {
       const detail = (
-        event as CustomEvent<{ serverId?: string; connected?: boolean }>
+        event as CustomEvent<{
+          serverId?: string;
+          connected?: boolean;
+          connectionError?: boolean;
+        }>
       ).detail;
       if (detail?.serverId && typeof detail.connected === "boolean")
-        updateConnectionState(detail.serverId, detail.connected);
+        updateConnectionState(
+          detail.serverId,
+          detail.connected,
+          detail.connectionError === true,
+        );
     };
     window.addEventListener("opsnest-server-connection-state", handler);
     return () =>
@@ -7373,6 +7589,7 @@ function App() {
             ? {
                 ...item,
                 connected: true,
+                connectionError: false,
                 system: result.system,
                 kernel: result.kernel,
                 cpu: cpuLabel,
@@ -7387,6 +7604,13 @@ function App() {
         ),
       );
     } catch (error) {
+      setServers((current) =>
+        current.map((item) =>
+          item.id === server.id
+            ? { ...item, connected: false, connectionError: true }
+            : item,
+        ),
+      );
       void writeDebugLog("error", "linux server scan failed", {
         serverId: server.id,
         error: String(error),
@@ -7448,7 +7672,7 @@ function App() {
     selectedServer?.nas?.storage?.length,
   ]);
   const pageTitle = selectedServer
-    ? `${selectedServer.name} · ${selectedServer.host}:${selectedServer.port} · ${selectedServer.connected ? (isEnglish ? "Connected" : "已连接") : isEnglish ? "Not connected" : "未连接"}`
+    ? selectedServer.name
     : selectedMenu === "home"
       ? isEnglish
         ? "Home"

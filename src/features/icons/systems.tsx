@@ -15,12 +15,16 @@ import gentooIcon from "../../../icons/packed/systems/gentoo.svg?raw";
 import linuxIcon from "../../../icons/packed/systems/linux.svg?raw";
 import freenasIcon from "../../../icons/packed/systems/freenas.svg?raw";
 import fnosImage from "../../../icons/packed/systems/fnos.png";
+import macImage from "../../../icons/packed/systems/mac.png";
+import proxmoxImage from "../../../icons/packed/systems/proxmox-pve.png";
 
 const systemIconMarkup: Record<string, string> = {
   debian: debianIcon,
   ubuntu: ubuntuIcon,
   openwrt: openwrtIcon,
   fnos: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${fnosImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
+  mac: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${macImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
+  "proxmox-pve": `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${proxmoxImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
   nas: freenasIcon,
   alpine: alpineIcon,
   arch: archIcon,
@@ -38,6 +42,8 @@ export function getSystemIconKey(profile?: ServerProfile, system?: string) {
   const value = `${profile?.osId ?? ""} ${profile?.osName ?? ""} ${profile?.hostname ?? ""} ${system ?? ""}`.toLowerCase();
   if (profile?.nas?.kind === "fnos" || /fnos|fnnas|feiniu|飞牛/.test(value)) return "fnos";
   if (/truenas|freenas|synology|qnap|openmediavault/.test(value)) return "nas";
+  if (/proxmox/.test(value)) return "proxmox-pve";
+  if (/macos|mac os|darwin/.test(value)) return "mac";
   if (/istoreos|immortalwrt|openwrt/.test(value)) return "openwrt";
   if (/debian/.test(value)) return "debian";
   if (/ubuntu|kubuntu|lubuntu/.test(value)) return "ubuntu";
