@@ -209,6 +209,12 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
         lines.push(format!("当前工作目录：{cwd}"));
     }
     for event in snapshot.events.iter().rev() {
+        // Agent lifecycle events are durable UI/audit facts, not model
+        // context. Keep the event log replayable without leaking internal
+        // phase JSON into the next prompt.
+        if event.kind == "agent_phase" {
+            continue;
+        }
         // Marker lines are an internal synchronization detail of the PTY command
         // runner. Keep the surrounding output for the model, but never expose
         // the opaque marker token itself as useful terminal context.
