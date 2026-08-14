@@ -10,7 +10,7 @@ use std::{
 };
 use tauri::Emitter;
 use tokio::io::{duplex, AsyncWriteExt};
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -570,6 +570,36 @@ pub async fn run_interactive_command_with_marker(
     approved: bool,
     sudo_password: Option<&str>,
 ) -> Result<InteractiveCommandResult, String> {
+    run_interactive_command_with_marker_inner(session_id, command, approved, sudo_password, None)
+        .await
+}
+
+/// Variant used by the Agent loop.  The same cancellation signal that aborts
+/// the model request also interrupts a running PTY command with Ctrl+C.
+pub async fn run_interactive_command_with_marker_cancel(
+    session_id: &str,
+    command: &str,
+    approved: bool,
+    sudo_password: Option<&str>,
+    cancel: &mut oneshot::Receiver<()>,
+) -> Result<InteractiveCommandResult, String> {
+    run_interactive_command_with_marker_inner(
+        session_id,
+        command,
+        approved,
+        sudo_password,
+        Some(cancel),
+    )
+    .await
+}
+
+async fn run_interactive_command_with_marker_inner(
+    session_id: &str,
+    command: &str,
+    approved: bool,
+    sudo_password: Option<&str>,
+    mut cancel: Option<&mut oneshot::Receiver<()>>,
+) -> Result<InteractiveCommandResult, String> {
     let lowered = command.to_ascii_lowercase();
     let risky = [
         "sudo ",
@@ -608,13 +638,32 @@ pub async fn run_interactive_command_with_marker(
     let marker = format!("__OPSNEST_INTERACTIVE_END_{marker_id}__");
     // Keep the completion marker and the following real shell prompt atomic
     // relative to direct input and other tool commands.
-    let _execution = match tokio::time::timeout(Duration::from_secs(120), shell.execution.lock()).await {
-        Ok(guard) => guard,
-        Err(_) => {
-            return Ok(InteractiveCommandResult {
-                output: command_result_error("Interactive command queue timed out"),
-                terminal_marker: String::new(),
-            })
+    let _execution = if let Some(cancel_receiver) = cancel.as_deref_mut() {
+        tokio::select! {
+            guard = tokio::time::timeout(Duration::from_secs(120), shell.execution.lock()) => {
+                match guard {
+                    Ok(guard) => guard,
+                    Err(_) => {
+                        return Ok(InteractiveCommandResult {
+                            output: command_result_error("Interactive command queue timed out"),
+                            terminal_marker: String::new(),
+                        })
+                    }
+                }
+            }
+            _ = cancel_receiver => {
+                return Err("AI-SSH command cancelled".into());
+            }
+        }
+    } else {
+        match tokio::time::timeout(Duration::from_secs(120), shell.execution.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Ok(InteractiveCommandResult {
+                    output: command_result_error("Interactive command queue timed out"),
+                    terminal_marker: String::new(),
+                })
+            }
         }
     };
     append_blackboard(&shell, "ai_command", command.trim().to_string());
@@ -697,9 +746,24 @@ pub async fn run_interactive_command_with_marker(
                 terminal_marker: marker,
             });
         }
-        tokio::time::timeout(Duration::from_secs(2), shell.notify.notified())
-            .await
-            .ok();
+        if let Some(cancel_receiver) = cancel.as_deref_mut() {
+            tokio::select! {
+                _ = cancel_receiver => {
+                    let _ = shell
+                        .writer
+                        .lock()
+                        .await
+                        .data_bytes(vec![3])
+                        .await;
+                    return Err("AI-SSH command cancelled".into());
+                }
+                _ = tokio::time::timeout(Duration::from_secs(2), shell.notify.notified()) => {}
+            }
+        } else {
+            tokio::time::timeout(Duration::from_secs(2), shell.notify.notified())
+                .await
+                .ok();
+        }
     }
 }
 

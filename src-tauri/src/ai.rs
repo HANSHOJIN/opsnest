@@ -1,4 +1,4 @@
-use crate::ssh_session;
+use crate::{agent_workflow::AgentTurn, ssh_session};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -284,6 +284,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         session_id: session_id.clone(),
         generation: cancellation_generation,
     };
+    let mut workflow = AgentTurn::start(cancellation_generation);
+    record_agent_phase(&request.session_id, &workflow);
     let board_context = ssh_session::session_context(&request.session_id, 12000);
     let conversation_history = ssh_session::conversation_history(&request.session_id, 12000);
     let _ = ssh_session::record_session_event(
@@ -326,15 +328,29 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
     if let Some(command) = approved_followup.as_deref() {
-        let (output, terminal_marker) = match ssh_session::run_interactive_command_with_marker(
+        workflow.tool_requested(true);
+        workflow.approval_granted();
+        record_agent_phase(&request.session_id, &workflow);
+        let (output, terminal_marker) = match ssh_session::run_interactive_command_with_marker_cancel(
             &request.session_id,
             command,
             true,
             request.sudo_password.as_deref(),
+            &mut cancel_receiver,
         )
         .await
         {
             Ok(value) => (value.output, Some(value.terminal_marker)),
+            Err(error) if error == "AI-SSH command cancelled" => {
+                workflow.cancel();
+                record_agent_phase(&request.session_id, &workflow);
+                return Ok(serde_json::json!({
+                    "status": "cancelled",
+                    "content": "",
+                    "executed": executed
+                })
+                .to_string());
+            }
             Err(error) => (format!("__OPSNEST_COMMAND_ERROR__{error}"), None),
         };
         let _ = ssh_session::record_session_event(
@@ -347,6 +363,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             "output": output,
             "terminalMarker": terminal_marker
         }));
+        workflow.tool_completed();
+        record_agent_phase(&request.session_id, &workflow);
         messages.push(serde_json::json!({
             "role":"user",
             "content": format!(
@@ -357,11 +375,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         }));
     }
     let mut recovery_attempts = 0u8;
-    for _round in 0..8 {
+    for round in 0..8 {
+        if round > 0 {
+            workflow.begin_step();
+            record_agent_phase(&request.session_id, &workflow);
+        }
         let tool_choice = if approved_followup.is_some() { "none" } else { "auto" };
         let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
             Ok(raw) => raw,
             Err(error) if error == "AI-SSH request cancelled" => {
+                workflow.cancel();
+                record_agent_phase(&request.session_id, &workflow);
                 return Ok(serde_json::json!({
                     "status": "cancelled",
                     "content": "",
@@ -376,6 +400,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 continue;
             }
             Err(error) if !executed.is_empty() => {
+                workflow.fail();
+                record_agent_phase(&request.session_id, &workflow);
                 return Ok(serde_json::json!({
                     "status": "error",
                     "content": format!("AI 请求失败，重试后仍未恢复：{error}"),
@@ -385,12 +411,22 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             }
             Err(error) => return Err(format!("AI 请求失败，重试后仍未恢复：{error}")),
         };
-        let payload: Value =
-            serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
-        let choice = payload
-            .get("choices")
-            .and_then(|items| items.get(0))
-            .ok_or_else(|| "AI response did not contain choices".to_string())?;
+        let payload: Value = match serde_json::from_str(&raw) {
+            Ok(payload) => payload,
+            Err(error) => {
+                workflow.fail();
+                record_agent_phase(&request.session_id, &workflow);
+                return Err(format!("Invalid AI response: {error}"));
+            }
+        };
+        let choice = match payload.get("choices").and_then(|items| items.get(0)) {
+            Some(choice) => choice,
+            None => {
+                workflow.fail();
+                record_agent_phase(&request.session_id, &workflow);
+                return Err("AI response did not contain choices".to_string());
+            }
+        };
         let message = choice.get("message").cloned().unwrap_or_default();
         if let Some(call) = message.get("tool_calls").and_then(|calls| calls.get(0)) {
             let arguments = call
@@ -422,21 +458,38 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 .unwrap_or("medium")
                 .to_string();
             if command.is_empty() {
+                workflow.fail();
+                record_agent_phase(&request.session_id, &workflow);
                 return Err("AI requested an invalid command".into());
             }
-            if !approved_for_this_turn && command_requires_approval(&command, &risk) {
+            let requires_approval =
+                !approved_for_this_turn && command_requires_approval(&command, &risk);
+            workflow.tool_requested(requires_approval);
+            record_agent_phase(&request.session_id, &workflow);
+            if requires_approval {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
             }
             let execution =
-                match ssh_session::run_interactive_command_with_marker(
+                match ssh_session::run_interactive_command_with_marker_cancel(
                     &request.session_id,
                     &command,
                     true,
                     request.sudo_password.as_deref(),
+                    &mut cancel_receiver,
                 )
                     .await
                 {
                     Ok(value) => value,
+                    Err(error) if error == "AI-SSH command cancelled" => {
+                        workflow.cancel();
+                        record_agent_phase(&request.session_id, &workflow);
+                        return Ok(serde_json::json!({
+                            "status": "cancelled",
+                            "content": "",
+                            "executed": executed
+                        })
+                        .to_string());
+                    }
                     Err(error) => ssh_session::InteractiveCommandResult {
                         output: format!("__OPSNEST_COMMAND_ERROR__{error}"),
                         terminal_marker: String::new(),
@@ -458,15 +511,26 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 (None, None)
             } else {
                 let verification_execution =
-                    match ssh_session::run_interactive_command_with_marker(
+                    match ssh_session::run_interactive_command_with_marker_cancel(
                         &request.session_id,
                         &verify_command,
                         true,
                         request.sudo_password.as_deref(),
+                        &mut cancel_receiver,
                     )
                     .await
                     {
                         Ok(value) => value,
+                        Err(error) if error == "AI-SSH command cancelled" => {
+                            workflow.cancel();
+                            record_agent_phase(&request.session_id, &workflow);
+                            return Ok(serde_json::json!({
+                                "status": "cancelled",
+                                "content": "",
+                                "executed": executed
+                            })
+                            .to_string());
+                        }
                         Err(error) => ssh_session::InteractiveCommandResult {
                             output: format!("__OPSNEST_VERIFICATION_ERROR__{error}"),
                             terminal_marker: String::new(),
@@ -497,6 +561,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 "terminalMarker": terminal_marker,
                 "verificationTerminalMarker": verification_marker
             }));
+            workflow.tool_completed();
+            record_agent_phase(&request.session_id, &workflow);
             let tool_call_id = call
                 .get("id")
                 .and_then(Value::as_str)
@@ -517,14 +583,30 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             "ai_message",
             content.to_string(),
         );
+        workflow.finalize();
+        record_agent_phase(&request.session_id, &workflow);
         let summary = summarize_execution(&executed);
+        workflow.complete();
+        record_agent_phase(&request.session_id, &workflow);
         return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
     }
     if recovery_attempts > 0 {
+        workflow.fail();
+        record_agent_phase(&request.session_id, &workflow);
         let summary = summarize_execution(&executed);
         return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
     }
+    workflow.fail();
+    record_agent_phase(&request.session_id, &workflow);
     Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed}).to_string())
+}
+
+fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
+    let _ = ssh_session::record_session_event(
+        session_id,
+        "agent_phase",
+        turn.event_payload().to_string(),
+    );
 }
 
 #[tauri::command]
