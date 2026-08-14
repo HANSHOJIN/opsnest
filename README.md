@@ -8,13 +8,12 @@
 [![License](https://img.shields.io/github/license/HANSHOJIN/opsnest?color=green)](LICENSE)
 [![GitHub issues](https://img.shields.io/github/issues/HANSHOJIN/opsnest?color=orange)](https://github.com/HANSHOJIN/opsnest/issues)
 [![GitHub last commit](https://img.shields.io/github/last-commit/HANSHOJIN/opsnest?color=purple)](https://github.com/HANSHOJIN/opsnest/commits/main)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/HANSHOJIN/opsnest/releases)
+[![Platform](https://img.shields.io/badge/platform-Windows-blue)](https://github.com/HANSHOJIN/opsnest/releases)
 
 [![Built with](https://img.shields.io/badge/Built%20with-Tauri%202-blueviolet)](https://tauri.app)
 [![Frontend](https://img.shields.io/badge/React-18-61dafb)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)](https://www.typescriptlang.org)
 [![Rust](https://img.shields.io/badge/Rust-2021-dea584)](https://www.rust-lang.org)
-[![License MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 ---
 
