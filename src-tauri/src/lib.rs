@@ -4,11 +4,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-mod ai;
 mod agent_workflow;
+mod ai;
 mod file_manager;
 mod ssh_scan;
 mod ssh_session;
+mod tools;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -473,13 +474,13 @@ pub fn run() {
             ai::cancel_ai_ssh_chat,
             append_debug_log,
             read_debug_log,
-            clear_debug_log
-            ,file_manager::list_local_directory
-            ,file_manager::list_remote_directory
-            ,file_manager::download_remote_file
-            ,file_manager::upload_remote_file
-            ,file_manager::read_local_file_base64
-            ,file_manager::write_local_file_base64
+            clear_debug_log,
+            file_manager::list_local_directory,
+            file_manager::list_remote_directory,
+            file_manager::download_remote_file,
+            file_manager::upload_remote_file,
+            file_manager::read_local_file_base64,
+            file_manager::write_local_file_base64
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show OpsNest", true, None::<&str>)?;

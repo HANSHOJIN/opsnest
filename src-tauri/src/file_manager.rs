@@ -1,8 +1,11 @@
-use serde::Serialize;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::{fs, path::{Path, PathBuf}};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::ssh_session::SessionRequest;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use serde::Serialize;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,22 +17,91 @@ pub struct RemoteFileEntry {
 }
 
 #[tauri::command]
-pub async fn list_remote_directory(request: SessionRequest, path: String) -> Result<Vec<RemoteFileEntry>, String> {
-    let path = if path.trim().is_empty() { "/root" } else { path.trim() };
+pub async fn list_remote_directory(
+    request: SessionRequest,
+    path: String,
+) -> Result<Vec<RemoteFileEntry>, String> {
+    let path = if path.trim().is_empty() {
+        "/root"
+    } else {
+        path.trim()
+    };
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let result = sftp.read_dir(path).await.map_err(|error| error.to_string());
     let _ = sftp.close().await;
     let mut entries = result?
         .map(|entry| {
             let metadata = entry.metadata();
-            RemoteFileEntry { name: entry.file_name(), path: entry.path(), is_dir: metadata.is_dir(), size: metadata.len() }
-        }).collect::<Vec<_>>();
+            RemoteFileEntry {
+                name: entry.file_name(),
+                path: entry.path(),
+                is_dir: metadata.is_dir(),
+                size: metadata.len(),
+            }
+        })
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
     Ok(entries)
 }
 
+/// Reads a bounded UTF-8 text file over a dedicated SFTP connection. This is
+/// intentionally separate from the interactive PTY so a model inspection
+/// cannot reorder terminal bytes or consume the user's prompt. The SFTP
+/// subsystem is closed on both success and read errors.
+pub async fn read_remote_text(
+    request: &SessionRequest,
+    remote_path: &str,
+    max_bytes: usize,
+) -> Result<String, String> {
+    if max_bytes == 0 {
+        return Err("max_bytes must be greater than zero".to_string());
+    }
+    let remote_path = remote_path.trim();
+    if remote_path.is_empty() {
+        return Err("remote file path is required".to_string());
+    }
+    let sftp = crate::ssh_session::open_sftp_session(request).await?;
+    let mut remote = match sftp.open(remote_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = sftp.close().await;
+            return Err(error.to_string());
+        }
+    };
+    let mut data = Vec::with_capacity(max_bytes.min(8192));
+    let mut buffer = [0_u8; 8192];
+    let read_result: Result<(), String> = async {
+        loop {
+            let count = remote
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
+            if count == 0 {
+                break;
+            }
+            if data.len().saturating_add(count) > max_bytes {
+                return Err(format!(
+                    "remote file exceeds the {max_bytes}-byte read limit"
+                ));
+            }
+            data.extend_from_slice(&buffer[..count]);
+        }
+        Ok(())
+    }
+    .await;
+    drop(remote);
+    let close_result = sftp.close().await.map_err(|error| error.to_string());
+    read_result?;
+    close_result?;
+    String::from_utf8(data).map_err(|_| "remote file is not valid UTF-8 text".to_string())
+}
+
 #[tauri::command]
-pub async fn download_remote_file(request: SessionRequest, remote_path: String, local_path: String) -> Result<u64, String> {
+pub async fn download_remote_file(
+    request: SessionRequest,
+    remote_path: String,
+    local_path: String,
+) -> Result<u64, String> {
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let mut remote = match sftp.open(remote_path).await {
         Ok(file) => file,
@@ -39,7 +111,10 @@ pub async fn download_remote_file(request: SessionRequest, remote_path: String, 
         }
     };
     let mut data = Vec::new();
-    let read_result = remote.read_to_end(&mut data).await.map_err(|error| error.to_string());
+    let read_result = remote
+        .read_to_end(&mut data)
+        .await
+        .map_err(|error| error.to_string());
     drop(remote);
     let _ = sftp.close().await;
     read_result?;
@@ -48,7 +123,11 @@ pub async fn download_remote_file(request: SessionRequest, remote_path: String, 
 }
 
 #[tauri::command]
-pub async fn upload_remote_file(request: SessionRequest, local_path: String, remote_path: String) -> Result<u64, String> {
+pub async fn upload_remote_file(
+    request: SessionRequest,
+    local_path: String,
+    remote_path: String,
+) -> Result<u64, String> {
     let data = fs::read(Path::new(&local_path)).map_err(|error| error.to_string())?;
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
     let mut remote = match sftp.create(remote_path).await {
@@ -58,7 +137,10 @@ pub async fn upload_remote_file(request: SessionRequest, local_path: String, rem
             return Err(error.to_string());
         }
     };
-    let write_result = remote.write_all(&data).await.map_err(|error| error.to_string());
+    let write_result = remote
+        .write_all(&data)
+        .await
+        .map_err(|error| error.to_string());
     let shutdown_result = if write_result.is_ok() {
         remote.shutdown().await.map_err(|error| error.to_string())
     } else {
@@ -81,26 +163,42 @@ pub struct LocalFileEntry {
 }
 
 fn safe_local_path(path: Option<String>) -> Result<PathBuf, String> {
-    let mut value = path.filter(|item| !item.trim().is_empty()).unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("." )).to_string_lossy().to_string()
-    });
+    let mut value = path
+        .filter(|item| !item.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .to_string_lossy()
+                .to_string()
+        });
     // `F:` is drive-relative on Windows (and can resolve to an unexpected
     // working directory). Treat a bare drive as its root explicitly.
     if value.len() == 2 && value.as_bytes()[1] == b':' {
         value.push('\\');
     }
     let target = PathBuf::from(value);
-    if !target.exists() || !target.is_dir() { return Err("本地目录不存在或不可访问".into()); }
+    if !target.exists() || !target.is_dir() {
+        return Err("本地目录不存在或不可访问".into());
+    }
     Ok(target)
 }
 
 fn local_drive_entries() -> Vec<LocalFileEntry> {
-    ('A'..='Z').filter_map(|letter| {
-        let path = format!("{letter}:\\");
-        let root = Path::new(&path);
-        if !root.is_dir() { return None; }
-        Some(LocalFileEntry { name: format!("{letter}:"), path, is_dir: true, size: 0 })
-    }).collect()
+    ('A'..='Z')
+        .filter_map(|letter| {
+            let path = format!("{letter}:\\");
+            let root = Path::new(&path);
+            if !root.is_dir() {
+                return None;
+            }
+            Some(LocalFileEntry {
+                name: format!("{letter}:"),
+                path,
+                is_dir: true,
+                size: 0,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -110,10 +208,13 @@ pub fn list_local_directory(path: Option<String>) -> Result<Vec<LocalFileEntry>,
     // navigate to e.g. F:\\codex explicitly.
     if path.as_deref().map(str::trim).unwrap_or("").is_empty() {
         let drives = local_drive_entries();
-        if !drives.is_empty() { return Ok(drives); }
+        if !drives.is_empty() {
+            return Ok(drives);
+        }
     }
     let target = safe_local_path(path)?;
-    let mut entries = fs::read_dir(&target).map_err(|error| error.to_string())?
+    let mut entries = fs::read_dir(&target)
+        .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let metadata = entry.metadata().ok()?;
@@ -123,14 +224,17 @@ pub fn list_local_directory(path: Option<String>) -> Result<Vec<LocalFileEntry>,
                 is_dir: metadata.is_dir(),
                 size: metadata.len(),
             })
-        }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     entries.sort_by_key(|entry| (!entry.is_dir, entry.name.to_lowercase()));
     Ok(entries)
 }
 
 pub fn read_local_file(path: &str) -> Result<Vec<u8>, String> {
     let target = Path::new(path);
-    if !target.is_file() { return Err("本地文件不存在".into()); }
+    if !target.is_file() {
+        return Err("本地文件不存在".into());
+    }
     fs::read(target).map_err(|error| error.to_string())
 }
 
@@ -145,6 +249,8 @@ pub fn read_local_file_base64(path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub fn write_local_file_base64(path: String, content: String) -> Result<(), String> {
-    let data = STANDARD.decode(content).map_err(|error| error.to_string())?;
+    let data = STANDARD
+        .decode(content)
+        .map_err(|error| error.to_string())?;
     write_local_file(&path, &data)
 }

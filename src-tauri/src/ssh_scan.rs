@@ -267,7 +267,11 @@ pub async fn inspect_linux_server(request: ScanRequest) -> Result<ScanResult, St
     raw.push('\n');
     raw.push_str(&execute(&session, nas_probe).await.unwrap_or_default());
     raw.push('\n');
-    raw.push_str(&execute(&session, storage_pool_probe).await.unwrap_or_default());
+    raw.push_str(
+        &execute(&session, storage_pool_probe)
+            .await
+            .unwrap_or_default(),
+    );
     raw.push('\n');
     raw.push_str(&execute(&session, app_probe).await.unwrap_or_default());
     let router_probe = OPENWRT_ROUTER_PROBE;
@@ -305,63 +309,78 @@ pub async fn inspect_linux_server(request: ScanRequest) -> Result<ScanResult, St
                         apps: Vec::new(),
                     });
                 }
-                "NAS_VERSION" => if let Some(nas) = result.nas.as_mut() {
-                    let version = value.trim();
-                    if !version.is_empty() { nas.version = version.to_string(); }
-                },
-                "NAS_PORT" => if let Some(nas) = result.nas.as_mut() {
-                    let port = value.trim();
-                    if !port.is_empty() { nas.management_port = port.to_string(); }
-                },
-                "STORAGE" => if let Some(nas) = result.nas.as_mut() {
-                    let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
-                    if parts.len() >= 5 && !parts[0].is_empty() {
-                        nas.storage.push(StorageScanResult {
-                            name: parts[0].to_string(),
-                            kind: "filesystem".into(),
-                            profile: String::new(),
-                            devices: String::new(),
-                            mount_point: parts[0].to_string(),
-                            total: parts[1].to_string(),
-                            used: parts[2].to_string(),
-                            available: parts[3].to_string(),
-                            percent: parts[4].to_string(),
-                        });
+                "NAS_VERSION" => {
+                    if let Some(nas) = result.nas.as_mut() {
+                        let version = value.trim();
+                        if !version.is_empty() {
+                            nas.version = version.to_string();
+                        }
                     }
-                },
-                "STORAGE_POOL" => if let Some(nas) = result.nas.as_mut() {
-                    let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
-                    if parts.len() >= 9 && !parts[0].is_empty() {
-                        nas.storage.push(StorageScanResult {
-                            name: parts[0].to_string(),
-                            mount_point: parts[1].to_string(),
-                            kind: parts[2].to_string(),
-                            profile: parts[3].to_string(),
-                            devices: parts[4].to_string(),
-                            total: parts[5].to_string(),
-                            used: parts[6].to_string(),
-                            available: parts[7].to_string(),
-                            percent: parts[8].to_string(),
-                        });
+                }
+                "NAS_PORT" => {
+                    if let Some(nas) = result.nas.as_mut() {
+                        let port = value.trim();
+                        if !port.is_empty() {
+                            nas.management_port = port.to_string();
+                        }
                     }
-                },
-                "NAS_APP" => if let Some(nas) = result.nas.as_mut() {
-                    let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
-                    if parts.len() >= 6 && !parts[0].is_empty() {
-                        let icon_data = parts.get(6).filter(|data| !data.is_empty()).map(|data| {
-                            format!("data:image/png;base64,{data}")
-                        });
-                        nas.apps.push(NasInstalledApp {
-                            id: parts[0].to_string(),
-                            name: parts[1].to_string(),
-                            version: parts[2].to_string(),
-                            source: parts[3].to_string(),
-                            status: parts[4].to_string(),
-                            port: parts[5].parse::<u16>().ok(),
-                            icon_data,
-                        });
+                }
+                "STORAGE" => {
+                    if let Some(nas) = result.nas.as_mut() {
+                        let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
+                        if parts.len() >= 5 && !parts[0].is_empty() {
+                            nas.storage.push(StorageScanResult {
+                                name: parts[0].to_string(),
+                                kind: "filesystem".into(),
+                                profile: String::new(),
+                                devices: String::new(),
+                                mount_point: parts[0].to_string(),
+                                total: parts[1].to_string(),
+                                used: parts[2].to_string(),
+                                available: parts[3].to_string(),
+                                percent: parts[4].to_string(),
+                            });
+                        }
                     }
-                },
+                }
+                "STORAGE_POOL" => {
+                    if let Some(nas) = result.nas.as_mut() {
+                        let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
+                        if parts.len() >= 9 && !parts[0].is_empty() {
+                            nas.storage.push(StorageScanResult {
+                                name: parts[0].to_string(),
+                                mount_point: parts[1].to_string(),
+                                kind: parts[2].to_string(),
+                                profile: parts[3].to_string(),
+                                devices: parts[4].to_string(),
+                                total: parts[5].to_string(),
+                                used: parts[6].to_string(),
+                                available: parts[7].to_string(),
+                                percent: parts[8].to_string(),
+                            });
+                        }
+                    }
+                }
+                "NAS_APP" => {
+                    if let Some(nas) = result.nas.as_mut() {
+                        let parts = value.split('\t').map(str::trim).collect::<Vec<_>>();
+                        if parts.len() >= 6 && !parts[0].is_empty() {
+                            let icon_data = parts
+                                .get(6)
+                                .filter(|data| !data.is_empty())
+                                .map(|data| format!("data:image/png;base64,{data}"));
+                            nas.apps.push(NasInstalledApp {
+                                id: parts[0].to_string(),
+                                name: parts[1].to_string(),
+                                version: parts[2].to_string(),
+                                source: parts[3].to_string(),
+                                status: parts[4].to_string(),
+                                port: parts[5].parse::<u16>().ok(),
+                                icon_data,
+                            });
+                        }
+                    }
+                }
                 "ROUTER" if value.trim() == "yes" => {
                     result.router = Some(RouterScanResult {
                         model: String::new(),
@@ -373,18 +392,46 @@ pub async fn inspect_linux_server(request: ScanRequest) -> Result<ScanResult, St
                         wifi_clients: "0".into(),
                     })
                 }
-                "ROUTER_MODEL" => if let Some(router) = result.router.as_mut() {
-                    let model = value.trim();
-                    if !model.is_empty() && !model.to_ascii_lowercase().contains("default string") {
-                        router.model = model.to_string();
+                "ROUTER_MODEL" => {
+                    if let Some(router) = result.router.as_mut() {
+                        let model = value.trim();
+                        if !model.is_empty()
+                            && !model.to_ascii_lowercase().contains("default string")
+                        {
+                            router.model = model.to_string();
+                        }
                     }
-                },
-                "ROUTER_FIRMWARE" => if let Some(router) = result.router.as_mut() { router.firmware = value.trim().to_string(); },
-                "ROUTER_KERNEL" => if let Some(router) = result.router.as_mut() { router.kernel = value.trim().to_string(); },
-                "ROUTER_WAN" => if let Some(router) = result.router.as_mut() { router.wan_ip = value.trim().to_string(); },
-                "ROUTER_LAN" => if let Some(router) = result.router.as_mut() { router.lan_ip = value.trim().to_string(); },
-                "ROUTER_LAN_CLIENTS" => if let Some(router) = result.router.as_mut() { router.lan_clients = value.trim().to_string(); },
-                "ROUTER_WIFI_CLIENTS" => if let Some(router) = result.router.as_mut() { router.wifi_clients = value.trim().to_string(); },
+                }
+                "ROUTER_FIRMWARE" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.firmware = value.trim().to_string();
+                    }
+                }
+                "ROUTER_KERNEL" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.kernel = value.trim().to_string();
+                    }
+                }
+                "ROUTER_WAN" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.wan_ip = value.trim().to_string();
+                    }
+                }
+                "ROUTER_LAN" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.lan_ip = value.trim().to_string();
+                    }
+                }
+                "ROUTER_LAN_CLIENTS" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.lan_clients = value.trim().to_string();
+                    }
+                }
+                "ROUTER_WIFI_CLIENTS" => {
+                    if let Some(router) = result.router.as_mut() {
+                        router.wifi_clients = value.trim().to_string();
+                    }
+                }
                 _ => {}
             }
         }
@@ -415,10 +462,16 @@ fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
         // (for example 3300:80) over an auxiliary same-port mapping (8091:8091).
         mappings
             .find(|(_, container_port)| matches!(*container_port, 80 | 443))
-            .or_else(|| ports.split(',').filter_map(|item| {
-                let (host, _) = item.trim().split_once("->")?;
-                Some(host.rsplit(':').next()?.parse::<u16>().ok()?)
-            }).next().map(|host_port| (host_port, 0)))
+            .or_else(|| {
+                ports
+                    .split(',')
+                    .filter_map(|item| {
+                        let (host, _) = item.trim().split_once("->")?;
+                        Some(host.rsplit(':').next()?.parse::<u16>().ok()?)
+                    })
+                    .next()
+                    .map(|host_port| (host_port, 0))
+            })
             .map(|(host_port, _)| host_port)
     });
     Some(DiscoveredService {
@@ -537,7 +590,10 @@ fi"#
         .as_deref()
         .map(shell_quote)
         .unwrap_or_else(|| "''".to_string());
-    let command = format!("OPSNEST_SUDO_PASSWORD={sudo_password}\n{}", discover_command());
+    let command = format!(
+        "OPSNEST_SUDO_PASSWORD={sudo_password}\n{}",
+        discover_command()
+    );
     let raw = execute(&session, &command).await?;
     let mut services = Vec::new();
     let mut section = "";
@@ -577,8 +633,15 @@ fi"#
                         status: parts[1].to_string(),
                         detail: "1Panel 管理面板".into(),
                         port: Some(port),
-                        web_path: parts.get(4).filter(|value| !value.is_empty()).map(|value| value.to_string()),
-                        web_scheme: parts.get(3).filter(|value| **value == "http" || **value == "https").map(|value| value.to_string()).or_else(|| Some("http".into())),
+                        web_path: parts
+                            .get(4)
+                            .filter(|value| !value.is_empty())
+                            .map(|value| value.to_string()),
+                        web_scheme: parts
+                            .get(3)
+                            .filter(|value| **value == "http" || **value == "https")
+                            .map(|value| value.to_string())
+                            .or_else(|| Some("http".into())),
                         version: None,
                     });
                 }
@@ -706,7 +769,14 @@ fi"#,
                 detail: "1Panel 管理面板".into(),
                 port: Some(port),
                 web_path: None,
-                web_scheme: Some(if port == 443 || port == 8443 { "https" } else { "http" }.into()),
+                web_scheme: Some(
+                    if port == 443 || port == 8443 {
+                        "https"
+                    } else {
+                        "http"
+                    }
+                    .into(),
+                ),
                 version: None,
             });
         }

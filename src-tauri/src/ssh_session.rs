@@ -51,6 +51,11 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
 }
 
 struct InteractiveShell {
+    // Keep the credentials associated with the already-open PTY in backend
+    // memory. AI read-only tools can open a short-lived SFTP/scan connection
+    // without asking the frontend to send credentials through the model
+    // request, and without coupling those tools to PTY output ordering.
+    request: SessionRequest,
     writer: tokio::sync::Mutex<russh::ChannelWriteHalf<client::Msg>>,
     // One interactive PTY has one input stream. The direct terminal and AI
     // tool loop must not write to it concurrently.
@@ -219,10 +224,7 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
         // runner. Keep the surrounding output for the model, but never expose
         // the opaque marker token itself as useful terminal context.
         let mut text = event.text.clone();
-        for prefix in [
-            "__OPSNEST_INTERACTIVE_START_",
-            "__OPSNEST_INTERACTIVE_END_",
-        ] {
+        for prefix in ["__OPSNEST_INTERACTIVE_START_", "__OPSNEST_INTERACTIVE_END_"] {
             while let Some(start) = text.find(prefix) {
                 let remainder = &text[start + prefix.len()..];
                 if let Some(end) = remainder.find("__") {
@@ -277,16 +279,29 @@ pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, 
             _ => continue,
         };
         let mut text = event.text.trim().to_string();
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
         if text.chars().count() > 4000 {
-            text = text.chars().rev().take(4000).collect::<String>().chars().rev().collect();
+            text = text
+                .chars()
+                .rev()
+                .take(4000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
         }
         let cost = text.chars().count();
-        if used + cost > max_chars { break; }
+        if used + cost > max_chars {
+            break;
+        }
         used += cost;
         history.push((role.to_string(), text));
     }
-    if history.len() > 24 { history.truncate(24); }
+    if history.len() > 24 {
+        history.truncate(24);
+    }
     history.reverse();
     history
 }
@@ -435,6 +450,7 @@ pub async fn open_interactive_ssh_terminal(
         .await
         .map_err(|error| error.to_string())?;
     let shell = Arc::new(InteractiveShell {
+        request: request.clone(),
         writer: tokio::sync::Mutex::new(writer),
         execution: tokio::sync::Mutex::new(()),
         output: Mutex::new(Vec::new()),
@@ -483,7 +499,9 @@ pub async fn open_interactive_ssh_terminal(
         );
         // Do not leave a dead PTY in the session pool. Otherwise the next
         // attempt reuses a closed channel and the UI can show stale prompts.
-        let _ = interactive().lock().map(|mut sessions| sessions.remove(&session_id));
+        let _ = interactive()
+            .lock()
+            .map(|mut sessions| sessions.remove(&session_id));
     });
     Ok(true)
 }
@@ -539,7 +557,10 @@ pub fn record_session_event(
 /// Converts a leading `sudo` into a non-interactive sudo invocation while
 /// keeping the password out of the command string. Commands without an
 /// explicitly configured sudo credential retain their original behavior.
-fn prepare_sudo_command<'a>(command: &'a str, sudo_password: Option<&'a str>) -> (String, Option<&'a str>) {
+fn prepare_sudo_command<'a>(
+    command: &'a str,
+    sudo_password: Option<&'a str>,
+) -> (String, Option<&'a str>) {
     let trimmed = command.trim();
     let Some(password) = sudo_password.filter(|value| !value.is_empty()) else {
         return (trimmed.to_string(), None);
@@ -564,6 +585,20 @@ pub fn get_ssh_session_blackboard(session_id: String) -> Result<BlackboardSnapsh
 pub struct InteractiveCommandResult {
     pub output: String,
     pub terminal_marker: String,
+}
+
+/// Returns the credentials for an existing interactive terminal to backend
+/// code only. The value is never serialized into model messages or emitted to
+/// the frontend.
+pub fn session_request(session_id: &str) -> Result<SessionRequest, String> {
+    let shell = interactive()
+        .lock()
+        .map_err(|_| "SSH terminal lock failed".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "SSH interactive session is not connected".to_string())?;
+    touch_activity(&shell);
+    Ok(shell.request.clone())
 }
 
 fn command_result_error(error: impl ToString) -> String {

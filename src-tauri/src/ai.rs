@@ -1,4 +1,4 @@
-use crate::{agent_workflow::AgentTurn, ssh_session};
+use crate::{agent_workflow::AgentTurn, file_manager, ssh_scan, ssh_session, tools::ToolKind};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -98,8 +98,7 @@ fn summarize_execution(executed: &[Value]) -> String {
             item.get("output")
                 .and_then(Value::as_str)
                 .map(|value| {
-                    value.contains("[command_error]")
-                        || value.contains("__OPSNEST_COMMAND_ERROR__")
+                    value.contains("[command_error]") || value.contains("__OPSNEST_COMMAND_ERROR__")
                 })
                 .unwrap_or(false)
                 || item
@@ -139,6 +138,99 @@ fn summarize_execution(executed: &[Value]) -> String {
             executed.len(),
             tail
         )
+    }
+}
+
+const MAX_LIST_ENTRIES: usize = 200;
+const DEFAULT_READ_BYTES: usize = 32 * 1024;
+const MAX_READ_BYTES: usize = 64 * 1024;
+
+/// Execute a read-only model tool without touching the interactive PTY. The
+/// existing terminal session supplies the credentials locally; only the
+/// bounded result is returned to the model.
+async fn execute_read_only_tool(
+    session_id: &str,
+    kind: ToolKind,
+    arguments: &Value,
+) -> Result<(String, String), String> {
+    let request = ssh_session::session_request(session_id)?;
+    match kind {
+        ToolKind::ListFiles => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("/root")
+                .trim();
+            if path.is_empty() {
+                return Err("list_files path must not be empty".to_string());
+            }
+            let entries = file_manager::list_remote_directory(request, path.to_string()).await?;
+            let truncated = entries.len() > MAX_LIST_ENTRIES;
+            let entries = entries
+                .into_iter()
+                .take(MAX_LIST_ENTRIES)
+                .collect::<Vec<_>>();
+            let output = serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "entries": entries,
+                "truncated": truncated,
+                "limit": MAX_LIST_ENTRIES
+            }))
+            .map_err(|error| format!("failed to encode list_files result: {error}"))?;
+            Ok((format!("list_files {path}"), output))
+        }
+        ToolKind::ReadFile => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "read_file path is required".to_string())?
+                .trim();
+            if path.is_empty() {
+                return Err("read_file path must not be empty".to_string());
+            }
+            let max_bytes = match arguments.get("max_bytes").and_then(Value::as_u64) {
+                Some(value) if (1..=MAX_READ_BYTES as u64).contains(&value) => value as usize,
+                Some(_) => {
+                    return Err(format!(
+                        "read_file max_bytes must be between 1 and {MAX_READ_BYTES}"
+                    ));
+                }
+                None => DEFAULT_READ_BYTES,
+            };
+            let content = file_manager::read_remote_text(&request, path, max_bytes).await?;
+            let output = serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "content": content,
+                "maxBytes": max_bytes
+            }))
+            .map_err(|error| format!("failed to encode read_file result: {error}"))?;
+            Ok((format!("read_file {path}"), output))
+        }
+        ToolKind::DiscoverServices => {
+            let scan_request = ssh_scan::ScanRequest {
+                host: request.host,
+                port: request.port,
+                username: request.username,
+                auth_method: request.auth_method,
+                password: request.password,
+                private_key_path: request.private_key_path,
+                passphrase: request.passphrase,
+            };
+            let services = ssh_scan::discover_linux_services(scan_request).await?;
+            let truncated = services.len() > MAX_LIST_ENTRIES;
+            let services = services
+                .into_iter()
+                .take(MAX_LIST_ENTRIES)
+                .collect::<Vec<_>>();
+            let output = serde_json::to_string(&serde_json::json!({
+                "services": services,
+                "truncated": truncated,
+                "limit": MAX_LIST_ENTRIES
+            }))
+            .map_err(|error| format!("failed to encode discover_services result: {error}"))?;
+            Ok(("discover_services".to_string(), output))
+        }
+        ToolKind::RunCommand => Err("run_command is not a read-only tool".to_string()),
     }
 }
 
@@ -293,7 +385,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         "user_message",
         request.prompt.clone(),
     );
-    let tools = serde_json::json!([{"type":"function","function":{"name":"run_command","description":"Plan one concrete command on the connected server. Include a verification command when the result can be checked safely.","parameters":{"type":"object","properties":{"command":{"type":"string"},"verify_command":{"type":"string"},"explain":{"type":"string"},"risk":{"type":"string","enum":["low","medium","high"]}},"required":["command","explain","risk"]}}}]);
+    let tool_registry = crate::tools::default_registry();
+    let tool_schemas = tool_registry.schemas();
     let context = request
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
@@ -305,16 +398,18 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let system = format!(
         "{system}\nTerminal output is visible to the user in real time. Do not repeat raw command output, file listings, prompts, or banners unless the user explicitly asks for a quotation. If a read-only tool result already answers the request (for example ls, pwd, df, or system status), return no summary text; only report errors, anomalies, or an actionable conclusion."
     );
-    let system = if request.sudo_password.as_deref().is_some_and(|value| !value.is_empty()) {
+    let system = if request
+        .sudo_password
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+    {
         format!(
             "{system}\nThis server has a locally configured sudo credential. When elevation is genuinely required, use a command beginning with `sudo `. The credential is supplied locally after approval; never request, print, or transmit it."
         )
     } else {
         system
     };
-    let mut messages = vec![
-        serde_json::json!({"role":"system","content":system}),
-    ];
+    let mut messages = vec![serde_json::json!({"role":"system","content":system})];
     for (role, content) in conversation_history {
         messages.push(serde_json::json!({"role": role, "content": content}));
     }
@@ -331,28 +426,29 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         workflow.tool_requested(true);
         workflow.approval_granted();
         record_agent_phase(&request.session_id, &workflow);
-        let (output, terminal_marker) = match ssh_session::run_interactive_command_with_marker_cancel(
-            &request.session_id,
-            command,
-            true,
-            request.sudo_password.as_deref(),
-            &mut cancel_receiver,
-        )
-        .await
-        {
-            Ok(value) => (value.output, Some(value.terminal_marker)),
-            Err(error) if error == "AI-SSH command cancelled" => {
-                workflow.cancel();
-                record_agent_phase(&request.session_id, &workflow);
-                return Ok(serde_json::json!({
-                    "status": "cancelled",
-                    "content": "",
-                    "executed": executed
-                })
-                .to_string());
-            }
-            Err(error) => (format!("__OPSNEST_COMMAND_ERROR__{error}"), None),
-        };
+        let (output, terminal_marker) =
+            match ssh_session::run_interactive_command_with_marker_cancel(
+                &request.session_id,
+                command,
+                true,
+                request.sudo_password.as_deref(),
+                &mut cancel_receiver,
+            )
+            .await
+            {
+                Ok(value) => (value.output, Some(value.terminal_marker)),
+                Err(error) if error == "AI-SSH command cancelled" => {
+                    workflow.cancel();
+                    record_agent_phase(&request.session_id, &workflow);
+                    return Ok(serde_json::json!({
+                        "status": "cancelled",
+                        "content": "",
+                        "executed": executed
+                    })
+                    .to_string());
+                }
+                Err(error) => (format!("__OPSNEST_COMMAND_ERROR__{error}"), None),
+            };
         let _ = ssh_session::record_session_event(
             &request.session_id,
             "ai_tool_result",
@@ -380,8 +476,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             workflow.begin_step();
             record_agent_phase(&request.session_id, &workflow);
         }
-        let tool_choice = if approved_followup.is_some() { "none" } else { "auto" };
-        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tools,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
+        let tool_choice = if approved_followup.is_some() {
+            "none"
+        } else {
+            "auto"
+        };
+        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tool_schemas,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
             Ok(raw) => raw,
             Err(error) if error == "AI-SSH request cancelled" => {
                 workflow.cancel();
@@ -429,12 +529,68 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         };
         let message = choice.get("message").cloned().unwrap_or_default();
         if let Some(call) = message.get("tool_calls").and_then(|calls| calls.get(0)) {
+            let tool_name = call
+                .get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let tool_kind = tool_registry
+                .get(tool_name)
+                .map(|tool| tool.kind)
+                .ok_or_else(|| format!("AI requested an unknown tool: {tool_name}"))?;
             let arguments = call
                 .get("function")
                 .and_then(|function| function.get("arguments"))
                 .and_then(Value::as_str)
                 .and_then(|value| serde_json::from_str::<Value>(value).ok())
                 .unwrap_or_default();
+            if tool_kind != ToolKind::RunCommand {
+                workflow.tool_requested(false);
+                record_agent_phase(&request.session_id, &workflow);
+                let tool_call_id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("opsnest-call")
+                    .to_string();
+                let (display, output) = match execute_read_only_tool(
+                    &request.session_id,
+                    tool_kind,
+                    &arguments,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let display = match tool_kind {
+                            ToolKind::ListFiles => "list_files".to_string(),
+                            ToolKind::ReadFile => "read_file".to_string(),
+                            ToolKind::DiscoverServices => "discover_services".to_string(),
+                            ToolKind::RunCommand => "run_command".to_string(),
+                        };
+                        (display, format!("__OPSNEST_READONLY_ERROR__{error}"))
+                    }
+                };
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_tool_result",
+                    format!("工具：{}\n结果：{}", display, output),
+                );
+                executed.push(serde_json::json!({
+                    "tool": tool_name,
+                    "command": display,
+                    "output": output
+                }));
+                workflow.tool_completed();
+                record_agent_phase(&request.session_id, &workflow);
+                messages.push(message);
+                messages.push(serde_json::json!({
+                    "role":"tool",
+                    "tool_call_id":tool_call_id,
+                    "content":executed.last().and_then(|item| item.get("output")).and_then(Value::as_str).unwrap_or_default()
+                }));
+                approved_for_this_turn = false;
+                continue;
+            }
             let command = arguments
                 .get("command")
                 .and_then(Value::as_str)
@@ -469,37 +625,34 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             if requires_approval {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
             }
-            let execution =
-                match ssh_session::run_interactive_command_with_marker_cancel(
-                    &request.session_id,
-                    &command,
-                    true,
-                    request.sudo_password.as_deref(),
-                    &mut cancel_receiver,
-                )
-                    .await
-                {
-                    Ok(value) => value,
-                    Err(error) if error == "AI-SSH command cancelled" => {
-                        workflow.cancel();
-                        record_agent_phase(&request.session_id, &workflow);
-                        return Ok(serde_json::json!({
-                            "status": "cancelled",
-                            "content": "",
-                            "executed": executed
-                        })
-                        .to_string());
-                    }
-                    Err(error) => ssh_session::InteractiveCommandResult {
-                        output: format!("__OPSNEST_COMMAND_ERROR__{error}"),
-                        terminal_marker: String::new(),
-                    },
-                };
+            let execution = match ssh_session::run_interactive_command_with_marker_cancel(
+                &request.session_id,
+                &command,
+                true,
+                request.sudo_password.as_deref(),
+                &mut cancel_receiver,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(error) if error == "AI-SSH command cancelled" => {
+                    workflow.cancel();
+                    record_agent_phase(&request.session_id, &workflow);
+                    return Ok(serde_json::json!({
+                        "status": "cancelled",
+                        "content": "",
+                        "executed": executed
+                    })
+                    .to_string());
+                }
+                Err(error) => ssh_session::InteractiveCommandResult {
+                    output: format!("__OPSNEST_COMMAND_ERROR__{error}"),
+                    terminal_marker: String::new(),
+                },
+            };
             let output = execution.output;
             let terminal_marker = execution.terminal_marker;
-            if output.contains("[command_error]")
-                || output.contains("__OPSNEST_COMMAND_ERROR__")
-            {
+            if output.contains("[command_error]") || output.contains("__OPSNEST_COMMAND_ERROR__") {
                 recovery_attempts = recovery_attempts.saturating_add(1);
                 let _ = ssh_session::record_session_event(
                     &request.session_id,
@@ -507,40 +660,41 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     format!("命令执行失败，已把错误返回给模型继续恢复：{}", output),
                 );
             }
-            let (verification, verification_marker) = if verify_command.is_empty() || verify_command == command {
-                (None, None)
-            } else {
-                let verification_execution =
-                    match ssh_session::run_interactive_command_with_marker_cancel(
-                        &request.session_id,
-                        &verify_command,
-                        true,
-                        request.sudo_password.as_deref(),
-                        &mut cancel_receiver,
+            let (verification, verification_marker) =
+                if verify_command.is_empty() || verify_command == command {
+                    (None, None)
+                } else {
+                    let verification_execution =
+                        match ssh_session::run_interactive_command_with_marker_cancel(
+                            &request.session_id,
+                            &verify_command,
+                            true,
+                            request.sudo_password.as_deref(),
+                            &mut cancel_receiver,
+                        )
+                        .await
+                        {
+                            Ok(value) => value,
+                            Err(error) if error == "AI-SSH command cancelled" => {
+                                workflow.cancel();
+                                record_agent_phase(&request.session_id, &workflow);
+                                return Ok(serde_json::json!({
+                                    "status": "cancelled",
+                                    "content": "",
+                                    "executed": executed
+                                })
+                                .to_string());
+                            }
+                            Err(error) => ssh_session::InteractiveCommandResult {
+                                output: format!("__OPSNEST_VERIFICATION_ERROR__{error}"),
+                                terminal_marker: String::new(),
+                            },
+                        };
+                    (
+                        Some(verification_execution.output),
+                        Some(verification_execution.terminal_marker),
                     )
-                    .await
-                    {
-                        Ok(value) => value,
-                        Err(error) if error == "AI-SSH command cancelled" => {
-                            workflow.cancel();
-                            record_agent_phase(&request.session_id, &workflow);
-                            return Ok(serde_json::json!({
-                                "status": "cancelled",
-                                "content": "",
-                                "executed": executed
-                            })
-                            .to_string());
-                        }
-                        Err(error) => ssh_session::InteractiveCommandResult {
-                            output: format!("__OPSNEST_VERIFICATION_ERROR__{error}"),
-                            terminal_marker: String::new(),
-                        },
-                    };
-                (
-                    Some(verification_execution.output),
-                    Some(verification_execution.terminal_marker),
-                )
-            };
+                };
             let _ = ssh_session::record_session_event(
                 &request.session_id,
                 "ai_tool_result",
@@ -626,27 +780,90 @@ fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
     // The model's risk label is advisory. Read-only inspection should remain
     // one-click/automatic even when the model conservatively labels it high.
     [
-        "sudo ", "rm ", "mv ", "cp ", "chmod ", "chown ", "systemctl start",
-        "systemctl stop", "systemctl restart", "systemctl enable", "systemctl disable",
-        "systemctl mask", "systemctl unmask", "systemctl reload", "service start",
-        "service stop", "service restart", "reboot", "shutdown", "docker rm", "docker stop",
-        "docker restart", "apt install", "apt remove", "apt purge", "apt upgrade",
-        "dnf install", "yum install", "apk add", "pacman -s", "mkfs", "dd ",
+        "sudo ",
+        "rm ",
+        "mv ",
+        "cp ",
+        "chmod ",
+        "chown ",
+        "systemctl start",
+        "systemctl stop",
+        "systemctl restart",
+        "systemctl enable",
+        "systemctl disable",
+        "systemctl mask",
+        "systemctl unmask",
+        "systemctl reload",
+        "service start",
+        "service stop",
+        "service restart",
+        "reboot",
+        "shutdown",
+        "docker rm",
+        "docker stop",
+        "docker restart",
+        "apt install",
+        "apt remove",
+        "apt purge",
+        "apt upgrade",
+        "dnf install",
+        "yum install",
+        "apk add",
+        "pacman -s",
+        "mkfs",
+        "dd ",
     ]
-    .iter().any(|token| lowered.contains(token))
+    .iter()
+    .any(|token| lowered.contains(token))
         || (declared_risk.eq_ignore_ascii_case("high") && !is_read_only_command(&lowered))
 }
 
 fn is_read_only_command(command: &str) -> bool {
     let read_only = [
-        "which ", "command -v ", "type ", "ls", "stat ", "cat ", "head ", "tail ",
-        "grep ", "egrep ", "fgrep ", "awk ", "sed -n", "find ", "ps", "top", "free",
-        "df", "du ", "uname", "id", "whoami", "hostname", "uptime", "env", "printenv",
-        "systemctl status", "systemctl is-active", "systemctl list-units", "service --status-all",
-        "docker ps", "docker inspect", "docker version", "docker info", "ss ", "netstat ",
-        "ip ", "curl -i", "curl -I", "wget --spider",
+        "which ",
+        "command -v ",
+        "type ",
+        "ls",
+        "stat ",
+        "cat ",
+        "head ",
+        "tail ",
+        "grep ",
+        "egrep ",
+        "fgrep ",
+        "awk ",
+        "sed -n",
+        "find ",
+        "ps",
+        "top",
+        "free",
+        "df",
+        "du ",
+        "uname",
+        "id",
+        "whoami",
+        "hostname",
+        "uptime",
+        "env",
+        "printenv",
+        "systemctl status",
+        "systemctl is-active",
+        "systemctl list-units",
+        "service --status-all",
+        "docker ps",
+        "docker inspect",
+        "docker version",
+        "docker info",
+        "ss ",
+        "netstat ",
+        "ip ",
+        "curl -i",
+        "curl -I",
+        "wget --spider",
     ];
-    command.split(|ch| ch == '&' || ch == '|' || ch == ';')
-        .map(str::trim).filter(|part| !part.is_empty())
+    command
+        .split(|ch| ch == '&' || ch == '|' || ch == ';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
         .all(|part| read_only.iter().any(|prefix| part.starts_with(prefix)))
 }
