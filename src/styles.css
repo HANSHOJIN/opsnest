@@ -156,6 +156,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .right-panel {
   grid-column: 3;
   grid-row: 1;
+  position: relative;
   display: flex;
   flex-direction: column;
   height: calc(100% - 6px);
@@ -163,7 +164,20 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
   background: var(--paper);
   border-left: 1px solid var(--line);
 }
-.right-panel > .files-placeholder { height: calc(100% - 48px); }
+.right-panel > .panel-toolbar {
+  position: absolute;
+  top: 3px;
+  right: 6px;
+  z-index: 40;
+  width: max-content;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: auto;
+}
+.right-panel > .file-manager-panel { flex: 1 1 auto; height: auto; min-height: 0; }
+.right-panel > .files-placeholder { flex: 1 1 auto; height: auto; min-height: 0; }
 .right-panel.is-fullscreen {
   grid-column: 2 / 4;
   height: 100%;
@@ -208,6 +222,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 
 .left-toolbar { padding: 0 10px 0 8px; gap: 8px; border-bottom: 0; }
 .right-toolbar, .bottom-toolbar { padding: 0 8px 0 16px; justify-content: space-between; }
+.right-panel > .right-toolbar { padding: 0; justify-content: flex-end; }
 .bottom-toolbar-actions { display: inline-flex; align-items: center; gap: 2px; }
 .app-title { font-family: "Segoe UI Variable", "Noto Sans SC Variable", system-ui, sans-serif; font-size: 15px; font-weight: 650; white-space: nowrap; color: var(--text-strong); }
 .left-panel { display: flex; flex-direction: column; }
@@ -493,7 +508,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-profile-icon .system-alibaba { width: 60px; height: 60px; object-fit: contain; }
 
 .file-manager-panel { height: 100%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-1); }
-.file-manager-tabs { display: flex; align-items: center; gap: 4px; min-height: 38px; padding: 5px 8px; border-bottom: 1px solid var(--border); overflow: visible; z-index: 30; }
+.file-manager-tabs { display: flex; align-items: center; gap: 5px; min-height: 32px; padding: 4px 104px 4px 8px; border-bottom: 1px solid var(--line-soft); background: var(--card); overflow: visible; z-index: 30; }
 .file-manager-tabs, .terminal-tabs { position: relative; }
 .file-manager-tabs button { border: 1px solid transparent; background: transparent; color: var(--text-muted); border-radius: 6px; padding: 5px 8px; font: inherit; font-size: 12px; line-height: 1.2; white-space: nowrap; cursor: pointer; transition: border-color 140ms ease, background-color 140ms ease, color 140ms ease; }
 .file-manager-tabs button:hover, .file-manager-tabs button.is-active { color: var(--text-strong); background: var(--control-hover); border-color: var(--line); }
@@ -502,11 +517,12 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .file-manager-tabs .file-manager-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; margin-left: 5px; border-radius: 4px; }
 .file-manager-tabs button:hover .file-manager-tab-close { background: var(--control-hover); }
 .file-manager-add-menu, .terminal-add-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 8px; min-width: 150px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-3); box-shadow: 0 12px 28px rgba(0,0,0,.28); }
-.file-manager-add-menu { left: 8px; right: auto; }
+.file-manager-add-menu { right: 104px; left: auto; }
 .file-manager-add-menu button, .terminal-add-menu button { display: block; width: 100%; border: 0; border-radius: 6px; background: transparent; color: var(--text-strong); padding: 7px 9px; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
 .file-manager-add-menu button:hover, .terminal-add-menu button:hover { background: var(--control-hover); }
 .file-manager-add-menu span, .terminal-add-menu span { display: block; padding: 7px 9px; color: var(--text-muted); font-size: 11px; }
-.file-manager-tabs .file-manager-add { font-size: 17px; padding-inline: 7px; }
+.file-manager-tabs .file-manager-add { margin-left: auto; width: 28px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 16px; line-height: 1; }
+.file-manager-tabs .file-manager-add:hover { border-color: var(--accent); background: var(--control-hover); color: var(--text-strong); }
 .file-manager-columns { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; flex: 1; }
 .file-manager-pane { min-height: 0; display: flex; flex-direction: column; border-bottom: 1px solid var(--border); }
 .file-manager-pane.local-pane { border-top: 1px solid var(--line); box-shadow: 0 -5px 0 color-mix(in srgb, var(--surface-3) 42%, transparent); }

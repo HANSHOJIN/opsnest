@@ -765,7 +765,7 @@ function FileManagerPanel({
             className="file-manager-add"
             aria-label="添加服务器标签"
           >
-            ＋
+            +
           </button>
         </div>
       </div>
@@ -792,7 +792,7 @@ function FileManagerPanel({
           className="file-manager-add"
           aria-label="添加服务器标签"
         >
-          ＋
+          +
         </button>
       </div>
       <div className="file-manager-columns">

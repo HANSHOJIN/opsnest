@@ -634,9 +634,15 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
         </main>
 
         {rightOpen && !rightFullscreen && <div className="resize-handle vertical right-handle" role="separator" tabIndex={0} aria-orientation="vertical" aria-label="调整右侧栏宽度" onPointerDown={(e) => startDrag("right", e)} onKeyDown={(e) => resizeWithKeyboard("right", e)} />}
-        <aside className={`panel right-panel ${rightOpen ? "is-open" : "is-closed"} ${rightFullscreen ? "is-fullscreen" : ""}`} aria-hidden={!rightOpen} inert={!rightOpen}>
-          <div className="panel-toolbar right-toolbar">
-            <span>{isEnglish ? "Files" : "文件"}</span>
+        <aside
+          className={`panel right-panel ${rightOpen ? "is-open" : "is-closed"} ${rightFullscreen ? "is-fullscreen" : ""}`}
+          aria-hidden={!rightOpen}
+          inert={!rightOpen}
+        >
+          <div
+            className="panel-toolbar right-toolbar"
+            aria-label={isEnglish ? "Side panel controls" : "侧栏操作"}
+          >
             <div className="toolbar-actions">
               <IconButton label={rightFullscreen ? (isEnglish ? "Restore files panel" : "退出文件栏全屏") : (isEnglish ? "Maximize files panel" : "文件栏全屏")} onClick={() => {
                 if (!rightFullscreen) {
