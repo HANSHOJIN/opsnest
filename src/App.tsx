@@ -4999,6 +4999,10 @@ function InteractiveTerminalPanel({
     let noToolDecisionReady = false;
     let aiOperationHadTools = false;
     let awaitingPromptAfterMarker = false;
+    // Tool commands can pause for a remote confirmation (for example
+    // `Is this ok [y/N]:`). Keep the response on the PTY instead of letting
+    // the local line dispatcher interpret `y`/`n` as a question for the AI.
+    let confirmationPromptActive = false;
     let deferredPromptTail = "";
     let promptTailSettleTimer: number | undefined;
     let finalPromptWaitTimer: number | undefined;
@@ -5029,9 +5033,28 @@ function InteractiveTerminalPanel({
         return lastLine;
       return null;
     };
+    const detectConfirmationPrompt = (data: string) => {
+      const plain = stripTerminalControl(data).replace(/\r/g, "\n");
+      const candidate =
+        plain
+          .split("\n")
+          .reverse()
+          .find((line) => line.trim().length > 0)
+          ?.trimEnd() ?? "";
+      if (
+        /(?:\[|\()(?:\s*(?:y|n|yes|no)\s*\/\s*(?:y|n|yes|no)\s*)(?:\]|\))\s*:?\s*$/i.test(
+          candidate,
+        )
+      ) {
+        confirmationPromptActive = true;
+        return true;
+      }
+      return false;
+    };
     const detectTrailingPrompt = (data: string) => {
       const prompt = extractTrailingPrompt(data);
       if (!prompt) return null;
+      confirmationPromptActive = false;
       promptRef.current = prompt;
       rememberTerminalPrompt(server.id, prompt);
       promptVersionRef.current += 1;
@@ -5138,6 +5161,7 @@ function InteractiveTerminalPanel({
       noToolDecisionReady = false;
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
+      confirmationPromptActive = false;
       deferredPromptTail = "";
       pendingAiConclusion = "";
       restorePromptAfterConclusion = false;
@@ -5274,6 +5298,7 @@ function InteractiveTerminalPanel({
       noToolDecisionReady = false;
       aiOperationHadTools = false;
       awaitingPromptAfterMarker = false;
+      confirmationPromptActive = false;
       deferredPromptTail = "";
       pendingAiConclusion = "";
       restorePromptAfterConclusion = false;
@@ -5997,6 +6022,7 @@ function InteractiveTerminalPanel({
           }
         }
         else {
+          detectConfirmationPrompt(event.payload.data);
           const cleaned = suppressLatePrompt(
             cleanInteractiveMarker(event.payload.data),
           );
@@ -6121,6 +6147,14 @@ function InteractiveTerminalPanel({
       },
     });
     processInputData = (data) => {
+      if (confirmationPromptActive) {
+        // The remote program owns this prompt's echo and line discipline. Do
+        // not echo locally or send the response through the AI dispatcher.
+        void write(data);
+        if (data.includes("\r") || data.includes("\n"))
+          confirmationPromptActive = false;
+        return;
+      }
       if (rawPtyModeRef.current) {
         // Do not interpret line endings, backspace or paste while an
         // interactive program owns the PTY. xterm/PTY must receive the exact
