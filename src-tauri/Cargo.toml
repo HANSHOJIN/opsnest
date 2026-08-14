@@ -1,6 +1,6 @@
 [package]
 name = "opsnest"
-version = "0.2.0-alpha.5"
+version = "0.2.0-alpha.6"
 description = "A focused desktop shell"
 authors = ["OpsNest contributors"]
 edition = "2021"
