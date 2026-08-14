@@ -524,6 +524,9 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .file-manager-add-menu button, .terminal-add-menu button { display: flex; align-items: center; gap: 7px; width: 100%; border: 0; border-radius: 6px; background: transparent; color: var(--text-strong); padding: 7px 9px; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
 .file-manager-add-menu button:hover, .terminal-add-menu button:hover { background: var(--control-hover); }
 .file-manager-add-menu span, .terminal-add-menu span { display: block; padding: 7px 9px; color: var(--text-muted); font-size: 11px; }
+.file-manager-add-menu button { min-height: 30px; padding: 5px 8px; }
+.file-manager-add-menu button span { display: inline; padding: 0; color: inherit; font-size: inherit; }
+.file-manager-add-menu > span { padding: 6px 8px; }
 .file-manager-tabs .file-manager-add { margin-left: auto; width: 28px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 16px; line-height: 1; }
 .file-manager-tabs .file-manager-add:hover { border-color: var(--accent); background: var(--control-hover); color: var(--text-strong); }
 .file-manager-columns { display: grid; grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; flex: 1; }
