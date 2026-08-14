@@ -431,6 +431,9 @@ function FileManagerPanel({
   } | null>(null);
   const activeServer =
     servers.find((item) => item.id === activeServerId) || server;
+  const openTabs = openServerIds
+    .map((id) => servers.find((item) => item.id === id))
+    .filter((item): item is ServerSummary => Boolean(item));
   React.useEffect(() => {
     setOpenServerIds((current) =>
       current.filter((id) => servers.some((item) => item.id === id)),
@@ -460,70 +463,67 @@ function FileManagerPanel({
       return next;
     });
   };
-  React.useEffect(() => {
-    const tabBar = document.querySelector<HTMLElement>(".file-manager-tabs");
-    if (!tabBar) return;
-    tabBar
-      .closest<HTMLElement>(".file-manager-panel")
-      ?.classList.toggle("is-empty", openServerIds.length === 0);
-    const buttons = Array.from(
-      tabBar.querySelectorAll<HTMLButtonElement>(
-        "button:not(.file-manager-add)",
-      ),
+  const openServerTab = (id: string) => {
+    setOpenServerIds((current) =>
+      current.includes(id) ? current : [...current, id],
     );
-    const cleanups: Array<() => void> = [];
-    servers.forEach((item, index) => {
-      const button = buttons[index];
-      const close = button?.querySelector<HTMLElement>("span:last-child");
-      if (!button || !close) return;
-      button.hidden = !openServerIds.includes(item.id);
-      close.classList.add("file-manager-tab-close");
-      const handler = (event: Event) => {
-        event.stopPropagation();
-        closeServerTab(item.id);
-      };
-      close.addEventListener("click", handler);
-      cleanups.push(() => close.removeEventListener("click", handler));
-    });
-    return () => cleanups.forEach((cleanup) => cleanup());
-  }, [servers, openServerIds, activeServerId]);
-  React.useEffect(() => {
-    const tabBar = document.querySelector<HTMLElement>(".file-manager-tabs");
-    const add = tabBar?.querySelector<HTMLButtonElement>(".file-manager-add");
-    if (!tabBar || !add) return;
-    const toggle = (event: Event) => {
-      event.stopPropagation();
-      setShowAddMenu((value) => !value);
-    };
-    add.addEventListener("click", toggle, true);
-    if (showAddMenu) {
-      const menu = document.createElement("div");
-      menu.className = "file-manager-add-menu";
-      servers
-        .filter((item) => !openServerIds.includes(item.id))
-        .forEach((item) => {
-          const option = document.createElement("button");
-          option.type = "button";
-          option.textContent = item.name;
-          option.onclick = () => {
-            setOpenServerIds((current) => [...current, item.id]);
-            setActiveServerId(item.id);
-            setShowAddMenu(false);
-          };
-          menu.appendChild(option);
-        });
-      if (!menu.childElementCount) {
-        const empty = document.createElement("span");
-        empty.textContent = "没有可打开的服务器";
-        menu.appendChild(empty);
-      }
-      tabBar.appendChild(menu);
-    }
-    return () => {
-      add.removeEventListener("click", toggle, true);
-      tabBar.querySelector(".file-manager-add-menu")?.remove();
-    };
-  }, [showAddMenu, servers, openServerIds]);
+    setActiveServerId(id);
+    setRemotePath("/root");
+    setShowAddMenu(false);
+  };
+
+  const renderTabs = () => (
+    <div className="file-manager-tabs">
+      {openTabs.map((item) => (
+        <div
+          key={item.id}
+          className={`file-manager-tab ${item.id === activeServer.id ? "is-active" : ""}`}
+        >
+          <button
+            className="file-manager-tab-select"
+            type="button"
+            onClick={() => {
+              setActiveServerId(item.id);
+              setRemotePath("/root");
+              setShowAddMenu(false);
+            }}
+          >
+            <FilesGlyph className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
+            <span className="file-manager-tab-label">{item.name}</span>
+          </button>
+          <button
+            className="file-manager-tab-close"
+            type="button"
+            onClick={() => closeServerTab(item.id)}
+            aria-label={`关闭 ${item.name} 文件标签`}
+          >
+            <X size={12} />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        className="file-manager-add"
+        aria-label="添加文件标签"
+        onClick={() => setShowAddMenu((value) => !value)}
+      >
+        +
+      </button>
+      {showAddMenu && (
+        <div className="file-manager-add-menu">
+          {servers.filter((item) => !openServerIds.includes(item.id)).map((item) => (
+            <button key={item.id} type="button" onClick={() => openServerTab(item.id)}>
+              <FilesGlyph size={14} strokeWidth={1.8} />
+              <span>{item.name}</span>
+            </button>
+          ))}
+          {servers.every((item) => openServerIds.includes(item.id)) && (
+            <span>没有可打开的服务器</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
 
   const connectionRequest = React.useCallback(async () => {
     const at = activeServer.host.indexOf("@");
@@ -754,50 +754,12 @@ function FileManagerPanel({
   if (openServerIds.length === 0)
     return (
       <div className="file-manager-panel">
-        <div className="file-manager-tabs">
-          {servers.map((item) => (
-            <button key={item.id} hidden type="button">
-              <FilesGlyph className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
-              <span className="file-manager-tab-label">{item.name}</span>
-              <span className="file-manager-tab-close">×</span>
-            </button>
-          ))}
-          <button
-            type="button"
-            className="file-manager-add"
-            aria-label="添加服务器标签"
-          >
-            +
-          </button>
-        </div>
+        {renderTabs()}
       </div>
     );
   return (
     <div className="file-manager-panel">
-      <div className="file-manager-tabs">
-        {servers.map((item) => (
-          <button
-            key={item.id}
-            className={item.id === activeServer.id ? "is-active" : ""}
-            type="button"
-            onClick={() => {
-              setActiveServerId(item.id);
-              setRemotePath("/root");
-            }}
-          >
-            <FilesGlyph className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
-            <span className="file-manager-tab-label">{item.name}</span>
-            <span className="file-manager-tab-close">×</span>
-          </button>
-        ))}
-        <button
-          type="button"
-          className="file-manager-add"
-          aria-label="添加服务器标签"
-        >
-          +
-        </button>
-      </div>
+      {renderTabs()}
       <div className="file-manager-columns">
         <section
           className="file-manager-pane"
