@@ -613,7 +613,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
             {!settingsOpen && title && <span className="center-label">{title}</span>}
             <div className="toolbar-actions">
               <IconButton label={isEnglish ? (bottomOpen ? "Hide bottom panel" : "Show bottom panel") : (bottomOpen ? "收起底部面板" : "展开底部面板")} onClick={() => { setBottomFullscreen(false); setBottomOpen((value) => !value); }} className={bottomOpen ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
-              <IconButton label={isEnglish ? (rightOpen ? "Hide files panel" : "Show files panel") : (rightOpen ? "收起文件栏" : "展开文件栏")} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen((value) => !value); }} className={rightOpen ? "is-active" : ""}><PanelRight size={15} /></IconButton>
+              <IconButton label={isEnglish ? (rightOpen ? "Hide side panel" : "Show side panel") : (rightOpen ? "收起右侧面板" : "展开右侧面板")} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen((value) => !value); }} className={rightOpen ? "is-active" : ""}><PanelRight size={15} /></IconButton>
             </div>
           </div>
           <section className="main-placeholder">{settingsOpen ? (settingsSection === "model" && modelSettings ? modelSettings : settings) : main}</section>
@@ -644,7 +644,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
             aria-label={isEnglish ? "Side panel controls" : "侧栏操作"}
           >
             <div className="toolbar-actions">
-              <IconButton label={rightFullscreen ? (isEnglish ? "Restore files panel" : "退出文件栏全屏") : (isEnglish ? "Maximize files panel" : "文件栏全屏")} onClick={() => {
+              <IconButton label={rightFullscreen ? (isEnglish ? "Restore side panel" : "退出右侧面板全屏") : (isEnglish ? "Maximize side panel" : "右侧面板全屏")} onClick={() => {
                 if (!rightFullscreen) {
                   // A right-panel fullscreen view owns the viewport. Clear the
                   // ordinary bottom panel first so its content cannot remain
@@ -655,7 +655,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
                 toggleRightFullscreen();
               }} className={rightFullscreen ? "is-active" : ""}>{rightFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</IconButton>
               <IconButton label={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? (isEnglish ? "Hide bottom panel" : "收起底部面板") : (isEnglish ? "Show bottom panel" : "呼出底部面板")} onClick={toggleRightBottom} className={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
-              <IconButton label={isEnglish ? "Hide files panel" : "收起文件栏"} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen(false); }}><PanelRight size={15} /></IconButton>
+              <IconButton label={isEnglish ? "Hide side panel" : "收起右侧面板"} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen(false); }}><PanelRight size={15} /></IconButton>
             </div>
           </div>
           {right}
