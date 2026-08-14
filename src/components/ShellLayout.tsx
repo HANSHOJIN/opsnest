@@ -654,7 +654,6 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
                 }
                 toggleRightFullscreen();
               }} className={rightFullscreen ? "is-active" : ""}>{rightFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</IconButton>
-              <IconButton label={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? (isEnglish ? "Hide bottom panel" : "收起底部面板") : (isEnglish ? "Show bottom panel" : "呼出底部面板")} onClick={toggleRightBottom} className={(rightFullscreen ? rightFullscreenBottomOpen : bottomOpen) ? "is-active" : ""}><PanelBottom size={15} /></IconButton>
               <IconButton label={isEnglish ? "Hide side panel" : "收起右侧面板"} onClick={() => { setRightFullscreen(false); setRightFullscreenBottomOpen(false); setRightOpen(false); }}><PanelRight size={15} /></IconButton>
             </div>
           </div>
