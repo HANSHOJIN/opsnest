@@ -2,7 +2,7 @@
 
 [简体中文](README_cn.md) · English
 
-[![GitHub release](https://img.shields.io/github/v/release/HANSHOJIN/opsnest?color=blue&label=release)](https://github.com/HANSHOJIN/opsnest/releases)
+[![GitHub release](https://img.shields.io/github/v/release/HANSHOJIN/opsnest?include_prereleases&color=blue&label=version)](https://github.com/HANSHOJIN/opsnest/releases)
 [![GitHub stars](https://img.shields.io/github/stars/HANSHOJIN/opsnest?style=social)](https://github.com/HANSHOJIN/opsnest/stargazers)
 [![GitHub forks](https://img.shields.io/github/forks/HANSHOJIN/opsnest?style=social)](https://github.com/HANSHOJIN/opsnest/network/members)
 [![License](https://img.shields.io/github/license/HANSHOJIN/opsnest?color=green)](LICENSE)
