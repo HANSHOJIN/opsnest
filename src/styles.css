@@ -792,6 +792,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .server-terminal-section { width: 100%; height: 100%; box-sizing: border-box; overflow: auto; padding: 16px; background: var(--card); }
 .terminal-workspace { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .terminal-tabs { display: flex; align-items: center; gap: 5px; min-height: 32px; padding: 4px 78px 4px 8px; border-bottom: 1px solid var(--line-soft); background: var(--card); overflow: visible; z-index: 30; }
+.terminal-add-slot { position: relative; flex: 0 0 auto; }
 .terminal-tab { display: inline-flex; align-items: center; border: 1px solid transparent; border-radius: 6px; background: transparent; }
 .terminal-tab > button:first-child { display: inline-flex; align-items: center; gap: 6px; max-width: 150px; padding: 5px 7px; border: 0; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; }
 .terminal-tab > button:first-child svg { width: 14px; height: 14px; flex: 0 0 auto; }
@@ -800,7 +801,8 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .terminal-tab:hover, .terminal-tab.is-active { border-color: var(--line); background: var(--control-hover); }
 .terminal-tab:hover > button:first-child, .terminal-tab.is-active > button:first-child { color: var(--text-strong); }
 .terminal-tab-close:hover { color: var(--text-strong); }
-.terminal-tabs .terminal-tab-add { margin-left: auto; width: 28px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.terminal-tabs .terminal-tab-add { margin-left: 0; width: 28px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.terminal-add-slot > .terminal-add-menu { right: auto; left: 0; }
 .terminal-tabs .terminal-tab-add:hover { border-color: var(--accent); background: var(--control-hover); color: var(--text-strong); }
 .interactive-terminal-panel { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; background: #0d0d0f; }
 .interactive-terminal-status { position: absolute; top: 10px; right: 14px; z-index: 8; display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 999px; background: rgba(20,20,23,.88); color: var(--muted); font-size: 11px; line-height: 1; box-shadow: 0 4px 14px rgba(0,0,0,.22); pointer-events: auto; }

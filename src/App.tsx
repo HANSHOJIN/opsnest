@@ -4472,8 +4472,9 @@ function TerminalWorkspace({
   }, [server.id, servers]);
   React.useEffect(() => {
     const tabsBar = document.querySelector<HTMLElement>(".terminal-tabs");
-    const add = tabsBar?.querySelector<HTMLButtonElement>(".terminal-tab-add");
-    if (!tabsBar || !add) return;
+    const addSlot = tabsBar?.querySelector<HTMLElement>(".terminal-add-slot");
+    const add = addSlot?.querySelector<HTMLButtonElement>(".terminal-tab-add");
+    if (!tabsBar || !addSlot || !add) return;
     const toggle = (event: Event) => {
       event.stopPropagation();
       setShowAddMenu((value) => !value);
@@ -4500,11 +4501,11 @@ function TerminalWorkspace({
         empty.textContent = "没有可打开的服务器";
         menu.appendChild(empty);
       }
-      tabsBar.appendChild(menu);
+      addSlot.appendChild(menu);
     }
     return () => {
       add.removeEventListener("click", toggle, true);
-      tabsBar.querySelector(".terminal-add-menu")?.remove();
+      addSlot.querySelector(".terminal-add-menu")?.remove();
     };
   }, [showAddMenu, servers, tabIds]);
   const closeTab = (id: string) => {
@@ -4547,20 +4548,22 @@ function TerminalWorkspace({
               </button>
             </div>
           ))}
-          <button
-            className="terminal-tab-add"
-            type="button"
-            onClick={() => {
-              const next = servers.find((item) => !tabIds.includes(item.id));
-              if (next) {
-                setTabIds((current) => [...current, next.id]);
-                setFocusedId(next.id);
-              }
-            }}
-            aria-label="新建 SSH 连接"
-          >
-            +
-          </button>
+          <div className="terminal-add-slot">
+            <button
+              className="terminal-tab-add"
+              type="button"
+              onClick={() => {
+                const next = servers.find((item) => !tabIds.includes(item.id));
+                if (next) {
+                  setTabIds((current) => [...current, next.id]);
+                  setFocusedId(next.id);
+                }
+              }}
+              aria-label="新建 SSH 连接"
+            >
+              +
+            </button>
+          </div>
         </div>
         {tabs.length > 0 && (
           <InteractiveTerminalPanel
