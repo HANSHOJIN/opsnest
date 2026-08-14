@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
 struct AiSshCancellation {
@@ -26,6 +26,53 @@ fn next_ai_ssh_generation() -> u64 {
             *generation
         }
         Err(_) => 0,
+    }
+}
+
+const DISCOVER_SERVICES_COOLDOWN: Duration = Duration::from_secs(5);
+const DISCOVER_SERVICES_CACHE_RETENTION: Duration = Duration::from_secs(60);
+
+struct ServiceDiscoveryCacheEntry {
+    completed_at: Instant,
+    output: String,
+}
+
+static SERVICE_DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, ServiceDiscoveryCacheEntry>>> =
+    OnceLock::new();
+
+fn service_discovery_cache() -> &'static Mutex<HashMap<String, ServiceDiscoveryCacheEntry>> {
+    SERVICE_DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_service_discovery(session_id: &str) -> Option<String> {
+    let now = Instant::now();
+    let mut cache = service_discovery_cache().lock().ok()?;
+    cache.retain(|_, entry| {
+        now.duration_since(entry.completed_at) < DISCOVER_SERVICES_CACHE_RETENTION
+    });
+    let entry = cache.get(session_id)?;
+    let age = now.duration_since(entry.completed_at);
+    if age >= DISCOVER_SERVICES_COOLDOWN {
+        return None;
+    }
+    let mut payload = match serde_json::from_str::<Value>(&entry.output) {
+        Ok(payload) => payload,
+        Err(_) => return Some(entry.output.clone()),
+    };
+    payload["cached"] = Value::Bool(true);
+    payload["cacheAgeMs"] = serde_json::json!(age.as_millis());
+    serde_json::to_string(&payload).ok()
+}
+
+fn remember_service_discovery(session_id: &str, output: String) {
+    if let Ok(mut cache) = service_discovery_cache().lock() {
+        cache.insert(
+            session_id.to_string(),
+            ServiceDiscoveryCacheEntry {
+                completed_at: Instant::now(),
+                output,
+            },
+        );
     }
 }
 
@@ -207,6 +254,9 @@ async fn execute_read_only_tool(
             Ok((format!("read_file {path}"), output))
         }
         ToolKind::DiscoverServices => {
+            if let Some(output) = cached_service_discovery(session_id) {
+                return Ok(("discover_services (cached)".to_string(), output));
+            }
             let scan_request = ssh_scan::ScanRequest {
                 host: request.host,
                 port: request.port,
@@ -225,9 +275,11 @@ async fn execute_read_only_tool(
             let output = serde_json::to_string(&serde_json::json!({
                 "services": services,
                 "truncated": truncated,
-                "limit": MAX_LIST_ENTRIES
+                "limit": MAX_LIST_ENTRIES,
+                "cached": false
             }))
             .map_err(|error| format!("failed to encode discover_services result: {error}"))?;
+            remember_service_discovery(session_id, output.clone());
             Ok(("discover_services".to_string(), output))
         }
         ToolKind::RunCommand => Err("run_command is not a read-only tool".to_string()),
@@ -866,4 +918,29 @@ fn is_read_only_command(command: &str) -> bool {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .all(|part| read_only.iter().any(|prefix| part.starts_with(prefix)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cached_service_discovery, remember_service_discovery};
+
+    #[test]
+    fn service_discovery_cache_marks_recent_result() {
+        let session_id = format!(
+            "tool-cache-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock should be after unix epoch")
+                .as_nanos()
+        );
+        remember_service_discovery(
+            &session_id,
+            r#"{"services":[],"truncated":false,"limit":200,"cached":false}"#.to_string(),
+        );
+        let cached = cached_service_discovery(&session_id).expect("recent result should be cached");
+        let payload: serde_json::Value =
+            serde_json::from_str(&cached).expect("cached result should remain JSON");
+        assert_eq!(payload["cached"], serde_json::Value::Bool(true));
+        assert!(payload["cacheAgeMs"].is_number());
+    }
 }
