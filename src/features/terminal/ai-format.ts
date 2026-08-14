@@ -225,7 +225,7 @@ export function formatAiConclusion(
   }
   if (inCode) output.push(`${MUTED}└─ code ─${RESET}`);
   while (output.at(-1) === "") output.pop();
-  const label = tone === "error" ? "AI 错误" : tone === "stopped" ? "AI 已停止" : "AI 分析";
+  const label = tone === "error" ? "AI 错误" : tone === "stopped" ? "AI 已停止" : "AI";
   const headerText = `┌─ ${label} `;
   const header = `${headerText}${"─".repeat(Math.max(3, width - visibleWidth(headerText) - 1))}┐`;
   const footer = `└${"─".repeat(Math.max(3, width - 2))}┘`;
