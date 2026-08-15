@@ -63,8 +63,8 @@ import {
   type RemoteEditorTab,
 } from "./features/files/remote-editor";
 import dockerIcon from "../icons/packed/services/docker.svg";
-import openListIcon from "../icons/packed/services/openlist.png";
-import luckyIcon from "../icons/packed/services/lucky.png";
+import openListIcon from "../icons/services/openlist.png";
+import luckyIcon from "../icons/services/lucky.png";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -356,7 +356,7 @@ function ServiceIcon({
         }
       }
       if (active && isAlibabaSystem)
-        setRemote("/icons/packed/systems/alibaba.png");
+        setRemote("/icons/systems/alibaba.png");
     })();
     return () => {
       active = false;
@@ -401,7 +401,7 @@ function ServiceIcon({
     return (
       <img
         className="service-icon-image system-alibaba"
-        src="/icons/packed/systems/alibaba.png?v=3"
+        src="/icons/systems/alibaba.png?v=3"
         alt=""
         aria-hidden="true"
         width={18}
@@ -412,7 +412,7 @@ function ServiceIcon({
     return (
       <img
         className="system-istoreos-mark"
-        src="/icons/packed/systems/istoreos.png?v=1"
+        src="/icons/systems/istoreos.png?v=1"
         alt="iStoreOS"
         width={400}
         height={400}
@@ -422,7 +422,7 @@ function ServiceIcon({
     return (
       <img
         className="service-icon-image system-fnos"
-        src="/icons/packed/systems/fnos.png?v=1"
+        src="/icons/systems/fnos.png?v=1"
         alt="fnOS"
         aria-hidden="true"
         width={18}
@@ -4101,7 +4101,7 @@ function LinuxServerHomeContent({
     isAlibabaLabel(`${server.name} ${server.system || ""}`) ? (
       <img
         className="service-icon-image system-alibaba"
-        src="/icons/packed/systems/alibaba.png?v=3"
+        src="/icons/systems/alibaba.png?v=3"
         alt=""
         aria-hidden="true"
         width={22}

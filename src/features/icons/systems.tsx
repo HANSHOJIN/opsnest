@@ -14,9 +14,9 @@ import kaliIcon from "../../../icons/packed/systems/kali.svg?raw";
 import gentooIcon from "../../../icons/packed/systems/gentoo.svg?raw";
 import linuxIcon from "../../../icons/packed/systems/linux.svg?raw";
 import freenasIcon from "../../../icons/packed/systems/freenas.svg?raw";
-import fnosImage from "../../../icons/packed/systems/fnos.png";
-import macImage from "../../../icons/packed/systems/mac.png";
-import proxmoxImage from "../../../icons/packed/systems/proxmox-pve.png";
+import fnosImage from "../../../icons/systems/fnos.png";
+import macImage from "../../../icons/systems/mac.png";
+import proxmoxImage from "../../../icons/systems/proxmox-pve.png";
 
 const systemIconMarkup: Record<string, string> = {
   debian: debianIcon,
