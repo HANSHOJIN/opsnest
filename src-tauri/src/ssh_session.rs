@@ -282,11 +282,11 @@ pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, 
         if text.is_empty() {
             continue;
         }
-        if text.chars().count() > 4000 {
+        if text.chars().count() > 8000 {
             text = text
                 .chars()
                 .rev()
-                .take(4000)
+                .take(8000)
                 .collect::<String>()
                 .chars()
                 .rev()
@@ -299,8 +299,8 @@ pub fn conversation_history(session_id: &str, max_chars: usize) -> Vec<(String, 
         used += cost;
         history.push((role.to_string(), text));
     }
-    if history.len() > 24 {
-        history.truncate(24);
+    if history.len() > 200 {
+        history.truncate(200);
     }
     history.reverse();
     history

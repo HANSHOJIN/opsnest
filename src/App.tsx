@@ -4,15 +4,23 @@ import {
   Box,
   ChevronDown,
   CircleGauge,
+  Copy,
   Container,
   Database,
+  Download,
   Eye,
   EyeOff,
+  FilePenLine,
   Files as FilesGlyph,
+  FolderOpen,
   Globe,
   Network,
+  Pencil,
+  RefreshCw,
   Server,
   SquareTerminal as TerminalGlyph,
+  Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import ShellLayout, {
@@ -23,8 +31,15 @@ import ShellLayout, {
 } from "./components/ShellLayout";
 import { ModelSettingsPanel } from "./components/ModelSettingsPanel";
 import {
+  ensureWorkspace,
+  deleteWorkspaceFile,
+  listWorkspaceFiles,
   readPortableJson,
+  readPortableText,
+  readWorkspaceText,
   writePortableJson,
+  writePortableText,
+  writeWorkspaceText,
 } from "./services/portableStorage";
 import { writeDebugLog } from "./services/debugLog";
 import {
@@ -41,6 +56,12 @@ import { ImeGate } from "./features/terminal/ime-gate";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
 import { formatAiConclusion } from "./features/terminal/ai-format";
+import {
+  clearRemoteEditorDocumentCache,
+  RemoteEditorPanel,
+  type EditorPlacement,
+  type RemoteEditorTab,
+} from "./features/files/remote-editor";
 import dockerIcon from "../icons/packed/services/docker.svg";
 import openListIcon from "../icons/packed/services/openlist.png";
 import luckyIcon from "../icons/packed/services/lucky.png";
@@ -55,10 +76,15 @@ type AppConfirmRequest = {
   resolve: (approved: boolean) => void;
 };
 let appConfirmHandler: ((message: string) => Promise<boolean>) | null = null;
+const pendingAppConfirms: AppConfirmRequest[] = [];
 function appConfirm(message: string) {
-  return appConfirmHandler
-    ? appConfirmHandler(message)
-    : Promise.resolve(false);
+  if (appConfirmHandler) return appConfirmHandler(message);
+  // A terminal can survive a React/HMR remount for a short time. Do not turn
+  // a missing UI handler into an implicit rejection; wait until the current
+  // App instance registers its confirmation surface.
+  return new Promise<boolean>((resolve) => {
+    pendingAppConfirms.push({ message, resolve });
+  });
 }
 
 type AppearancePreferences = {
@@ -77,6 +103,8 @@ type ModelPreferences = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /** Model context window in tokens, discovered during connection testing. */
+  contextLength?: number;
 };
 
 function isPrivateServerHost(host: string) {
@@ -115,6 +143,17 @@ function isAlibabaLabel(value: string) {
     normalized.includes("alibaba") ||
     normalized.includes("anolis") ||
     value.includes("\u963f\u91cc")
+  );
+}
+
+function isAmazonLabel(value: string) {
+  const normalized = value.toLowerCase();
+  return (
+    normalized.includes("amazon") ||
+    normalized.includes("amazon linux") ||
+    normalized.includes("al2023") ||
+    normalized.includes("amzn") ||
+    value.includes("\u4e9a\u9a6c\u900a")
   );
 }
 
@@ -230,6 +269,8 @@ function ServiceIcon({
                     : directory === "systems"
                       ? isAlibabaLabel(name)
                         ? "alibaba"
+                        : isAmazonLabel(name)
+                          ? "amazon"
                         : isFnosSystem
                           ? "fnos"
                           : key.includes("istoreos")
@@ -243,6 +284,7 @@ function ServiceIcon({
                                 : "linux"
                       : "generic";
   const isAlibabaSystem = directory === "systems" && isAlibabaLabel(name);
+  const isAmazonSystem = directory === "systems" && isAmazonLabel(name);
   const isIStoreSystem = directory === "systems" && /istoreos/i.test(key);
   const isOpenListService =
     directory === "services" && /openlist|open-list/i.test(name);
@@ -257,9 +299,20 @@ function ServiceIcon({
       ? [...found.filter((candidate) => candidate !== "generic"), "linux"]
       : found;
   }, [baseKey, name, directory]);
-  const [remote, setRemote] = React.useState<string | null>(null);
+  const amazonRemoteIcon = isAmazonSystem
+    ? `${remoteIconUrl("systems", "amazon", "png")}?opsnest-icon-refresh=${refreshKey}`
+    : null;
+  const [remote, setRemote] = React.useState<string | null>(amazonRemoteIcon);
   React.useEffect(() => {
     let active = true;
+    if (isAmazonSystem) {
+      // Amazon Linux is an online-only asset. Use an <img>-loaded URL rather
+      // than a fetch probe so WebView CORS policy cannot hide a valid PNG.
+      setRemote(amazonRemoteIcon);
+      return () => {
+        active = false;
+      };
+    }
     setRemote(null);
     if (isNamedDockerContainer) return () => {
       active = false;
@@ -308,7 +361,7 @@ function ServiceIcon({
     return () => {
       active = false;
     };
-  }, [directory, candidates.join("|"), isAlibabaSystem, isNamedDockerContainer, refreshKey]);
+  }, [amazonRemoteIcon, candidates.join("|"), directory, isAlibabaSystem, isAmazonSystem, isNamedDockerContainer, refreshKey]);
   if (isNamedDockerContainer)
     return <NamedDockerServiceIcon name={nameOnly} refreshKey={refreshKey} />;
   if (isOpenListService)
@@ -421,6 +474,25 @@ type ActivityRecord = {
   timestamp: string;
 };
 type ManagerChatMessage = { role: "user" | "assistant"; text: string };
+const AI_SSH_MEMORY_FILE = "ai-ssh-memory.json";
+const AI_SSH_MEMORY_MARKDOWN_FILE = "memory.md";
+const AI_SSH_MEMORY_STORAGE_MAX_CHARS = 1_500_000;
+const AI_SSH_MEMORY_FALLBACK_TOKENS = 32_000;
+const AI_SSH_MEMORY_MAX_TURNS = 200;
+const AI_SSH_MEMORY_MAX_TURN_CHARS = 8_000;
+type PersistedAiSshTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+type PersistedAiSshEntry = {
+  serverName: string;
+  address: string;
+  updatedAt: string;
+  turns: PersistedAiSshTurn[];
+};
+type PersistedAiSshStore = Record<string, PersistedAiSshEntry | PersistedAiSshTurn[]>;
+const aiSshMemoryCache = new Map<string, PersistedAiSshTurn[]>();
+let aiSshMemoryWriteQueue: Promise<void> = Promise.resolve();
 
 function sanitizeSensitiveText(value: string) {
   return value
@@ -458,6 +530,186 @@ function persistManagerChat(messages: ManagerChatMessage[]) {
     .catch(() => undefined);
   return managerChatWriteQueue;
 }
+
+function aiSshMemoryCharLimit(contextLength?: number) {
+  const tokens = Number.isFinite(contextLength) && (contextLength ?? 0) > 0
+    ? Math.floor(contextLength as number)
+    : AI_SSH_MEMORY_FALLBACK_TOKENS;
+  // Context metadata is expressed in model tokens. Keep a conservative
+  // character budget while leaving room for the system prompt and live tools.
+  return Math.max(
+    12_000,
+    Math.min(AI_SSH_MEMORY_STORAGE_MAX_CHARS, tokens * 3),
+  );
+}
+
+function normalizeAiSshMemory(
+  turns: unknown,
+  maxChars = AI_SSH_MEMORY_STORAGE_MAX_CHARS,
+): PersistedAiSshTurn[] {
+  if (!Array.isArray(turns)) return [];
+  return turns
+    .filter(
+      (turn): turn is { role?: unknown; content?: unknown } =>
+        Boolean(turn) && typeof turn === "object",
+    )
+    .map((turn) => ({
+      role: turn.role === "user" ? ("user" as const) : ("assistant" as const),
+      content:
+        typeof turn.content === "string"
+          ? sanitizeSensitiveText(turn.content)
+              .trim()
+              .slice(-AI_SSH_MEMORY_MAX_TURN_CHARS)
+          : "",
+    }))
+    .filter((turn) => turn.content.length > 0)
+    .reduceRight<PersistedAiSshTurn[]>((recent, turn) => {
+      if (
+        recent.length >= AI_SSH_MEMORY_MAX_TURNS ||
+        recent.reduce((total, item) => total + item.content.length, 0) +
+            turn.content.length >
+            maxChars
+      )
+        return recent;
+      recent.unshift(turn);
+      return recent;
+    }, []);
+}
+
+function persistedMemoryEntry(
+  value: PersistedAiSshEntry | PersistedAiSshTurn[] | undefined,
+): PersistedAiSshEntry {
+  if (Array.isArray(value)) {
+    return {
+      serverName: "未知服务器",
+      address: "",
+      updatedAt: "",
+      turns: normalizeAiSshMemory(value),
+    };
+  }
+  return {
+    serverName: typeof value?.serverName === "string" ? value.serverName : "未知服务器",
+    address: typeof value?.address === "string" ? value.address : "",
+    updatedAt: typeof value?.updatedAt === "string" ? value.updatedAt : "",
+    turns: normalizeAiSshMemory(value?.turns),
+  };
+}
+
+function buildAiSshMemoryMarkdown(store: PersistedAiSshStore) {
+  const sections = Object.entries(store).map(([serverId, raw]) => {
+    const entry = persistedMemoryEntry(raw);
+    const turns = entry.turns
+      .map((turn) => {
+        const label = turn.role === "user" ? "用户" : "AI";
+        return `#### ${label}\n\n${turn.content}`;
+      })
+      .join("\n\n");
+    return [
+      `## ${entry.serverName || serverId}`,
+      entry.address ? `地址：${entry.address}` : `服务器 ID：${serverId}`,
+      entry.updatedAt ? `更新时间：${entry.updatedAt}` : "",
+      "",
+      turns || "暂无对话记录。",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
+  const markdown = [
+    "# OpsNest AI-SSH Memory",
+    "",
+    "这是 OpsNest 按服务器保存的 AI-SSH 对话记忆。历史内容只作上下文参考，当前状态必须以实时终端和工具结果为准。",
+    "",
+    ...sections,
+  ].join("\n\n");
+  return markdown.length > 1_900_000 ? markdown.slice(-1_900_000) : markdown;
+}
+
+async function loadAiSshMemory(
+  serverId: string,
+  workspaceId?: string,
+): Promise<PersistedAiSshTurn[]> {
+  const cacheKey = workspaceId || serverId;
+  const cached = aiSshMemoryCache.get(cacheKey);
+  if (cached) return cached;
+  if (workspaceId) {
+    const workspaceContent = await readWorkspaceText(workspaceId, "memory.json");
+    if (workspaceContent.trim()) {
+      try {
+        const workspaceValue = JSON.parse(workspaceContent) as
+          | PersistedAiSshEntry
+          | PersistedAiSshTurn[];
+        const turns = persistedMemoryEntry(workspaceValue).turns;
+        aiSshMemoryCache.set(cacheKey, turns);
+        return turns;
+      } catch {
+        // Fall back to the pre-workspace server memory below.
+      }
+    }
+  }
+  const store = await readPortableJson<PersistedAiSshStore>(
+    AI_SSH_MEMORY_FILE,
+    {},
+  );
+  const turns = persistedMemoryEntry(store?.[serverId]).turns;
+  if (!aiSshMemoryCache.has(cacheKey)) aiSshMemoryCache.set(cacheKey, turns);
+  return aiSshMemoryCache.get(cacheKey) ?? turns;
+}
+
+function persistAiSshMemory(
+  server: ServerSummary,
+  turns: PersistedAiSshTurn[],
+  contextLength?: number,
+  workspaceId?: string,
+) {
+  const serverId = server.id;
+  const snapshot = normalizeAiSshMemory(
+    turns,
+    aiSshMemoryCharLimit(contextLength),
+  );
+  aiSshMemoryCache.set(workspaceId || serverId, snapshot);
+  aiSshMemoryWriteQueue = aiSshMemoryWriteQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const store = await readPortableJson<PersistedAiSshStore>(
+        AI_SSH_MEMORY_FILE,
+        {},
+      );
+      const normalizedStore: PersistedAiSshStore = {};
+      for (const [id, value] of Object.entries(store ?? {}))
+        normalizedStore[id] = persistedMemoryEntry(value);
+      normalizedStore[serverId] = {
+        serverName: server.name,
+        address: `${server.host}:${server.port}`,
+        updatedAt: new Date().toISOString(),
+        turns: snapshot,
+      };
+      await writePortableJson(AI_SSH_MEMORY_FILE, normalizedStore);
+      await writePortableText(
+        AI_SSH_MEMORY_MARKDOWN_FILE,
+        buildAiSshMemoryMarkdown(normalizedStore),
+      );
+      if (workspaceId) {
+        const workspaceEntry: PersistedAiSshEntry = {
+          serverName: server.name,
+          address: `${server.host}:${server.port}`,
+          updatedAt: new Date().toISOString(),
+          turns: snapshot,
+        };
+        await writeWorkspaceText(
+          workspaceId,
+          "memory.json",
+          JSON.stringify(workspaceEntry, null, 2),
+        );
+        await writeWorkspaceText(
+          workspaceId,
+          "memory.md",
+          buildAiSshMemoryMarkdown({ [workspaceId]: workspaceEntry }),
+        );
+      }
+    })
+    .catch(() => undefined);
+  return aiSshMemoryWriteQueue;
+}
 const DEFAULT_APPEARANCE: AppearancePreferences = {
   theme: "system",
   language: "zh-CN",
@@ -483,6 +735,20 @@ function serverManagerSystem(server: ServerSummary) {
     `系统：${server.system || "尚未扫描"}；CPU：${server.cpu || "尚未扫描"}；内存：${server.memory || "尚未扫描"}；磁盘：${server.disk || "尚未扫描"}；Docker：${server.docker || "尚未扫描"}。`,
     "所有用户输入都交给你结合上下文判断，不要依据固定关键词或预设的寒暄词做本地分流。普通聊天、确认、感谢、追问和对结果的讨论都应自然回答；只有用户明确要求检查、读取、修改或执行服务器操作时，才考虑调用工具。",
     "没有真实工具结果时，不要声称已经执行、修改或验证了任何操作。需要修改配置时先说明目标文件、拟修改内容和风险，并等待用户确认。",
+  ].join("\n");
+}
+
+function serverAiContext(server: ServerSummary) {
+  const profile = server.router
+    ? `路由器：${server.router.model || "未知型号"}；固件：${server.router.firmware || "未知"}；WAN：${server.router.wanIp || "未知"}；LAN：${server.router.lanIp || "未知"}`
+    : server.nas
+      ? `NAS：${server.nas.kind || "未知类型"}；版本：${server.nas.version || "未知"}；管理端口：${server.nas.managementPort || "未知"}`
+      : "终端类型：通用 Linux 服务器";
+  return [
+    `服务器：${server.name}；地址：${server.host}:${server.port}`,
+    `系统：${server.system || "尚未扫描"}；内核：${server.kernel || "尚未扫描"}`,
+    `CPU：${server.cpuModel || server.cpu || "尚未扫描"}；内存：${server.memory || "尚未扫描"}；磁盘：${server.disk || "尚未扫描"}；Docker：${server.docker || "尚未扫描"}`,
+    profile,
   ].join("\n");
 }
 
@@ -527,8 +793,49 @@ type RemoteFileEntry = {
   size: number;
 };
 
+type FileContextMenu = {
+  scope: "remote" | "local";
+  entry: RemoteFileEntry | LocalFileEntry;
+  x: number;
+  y: number;
+};
+
+type RenameTarget = {
+  scope: "remote" | "local";
+  entry: RemoteFileEntry | LocalFileEntry;
+};
+
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function isRemoteConnectionFailure(error: unknown) {
+  const message = String(error).toLowerCase();
+  if (
+    /(permission denied|not found|no such file|not a directory|directory not empty|read-only|already exists)/.test(
+      message,
+    )
+  )
+    return false;
+  return /(ssh|sftp|connection|connect|handshake|login|authenticat|timeout|timed out|network|socket|refused|unreachable|host key|credential|channel|subsystem|protocol|resolve|dns|no route|reset by peer|broken pipe|closed)/.test(
+    message,
+  );
+}
+
+async function copyFileText(value: string) {
+  try {
+    await navigator.clipboard.writeText(value);
+    return;
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
 }
 
 function FileManagerPanel({
@@ -536,11 +843,25 @@ function FileManagerPanel({
   servers,
   openSignal = 0,
   onEmpty,
+  onOpenEditor,
+  onConnectionState,
+  editorTab,
+  editorActive = false,
+  onSelectEditor,
 }: {
   server: ServerSummary;
   servers: ServerSummary[];
   openSignal?: number;
   onEmpty?: () => void;
+  onOpenEditor?: (serverId: string, path: string, name: string) => void;
+  onConnectionState?: (
+    serverId: string,
+    connected: boolean,
+    connectionError?: boolean,
+  ) => void;
+  editorTab?: RemoteEditorTab | null;
+  editorActive?: boolean;
+  onSelectEditor?: () => void;
 }) {
   const [remotePath, setRemotePath] = React.useState("/root");
   const [localPath, setLocalPath] = React.useState("");
@@ -560,8 +881,25 @@ function FileManagerPanel({
     progress: number;
     rate: string;
   } | null>(null);
+  const [contextMenu, setContextMenu] =
+    React.useState<FileContextMenu | null>(null);
+  const [renameTarget, setRenameTarget] =
+    React.useState<RenameTarget | null>(null);
+  const [renameDraft, setRenameDraft] = React.useState("");
   const activeServer =
     servers.find((item) => item.id === activeServerId) || server;
+  const markRemoteConnection = React.useCallback(
+    (connected: boolean, connectionError = false) => {
+      onConnectionState?.(activeServer.id, connected, connectionError);
+    },
+    [activeServer.id, onConnectionState],
+  );
+  const markRemoteFailure = React.useCallback(
+    (error: unknown) => {
+      if (isRemoteConnectionFailure(error)) markRemoteConnection(false, true);
+    },
+    [markRemoteConnection],
+  );
   const openTabs = openServerIds
     .map((id) => servers.find((item) => item.id === id))
     .filter((item): item is ServerSummary => Boolean(item));
@@ -594,6 +932,20 @@ function FileManagerPanel({
       return next;
     });
   };
+  React.useEffect(() => {
+    const disconnect = (event: Event) => {
+      const requested = (event as CustomEvent<{ serverId?: string }>).detail
+        ?.serverId;
+      if (requested && openServerIds.includes(requested)) {
+        // Disconnecting a server also removes its Files tab. Other server
+        // tabs in the same file panel remain available.
+        closeServerTab(requested);
+      }
+    };
+    window.addEventListener("opsnest-disconnect-server", disconnect);
+    return () =>
+      window.removeEventListener("opsnest-disconnect-server", disconnect);
+  }, [activeServerId, closeServerTab, openServerIds]);
   const openServerTab = (id: string) => {
     setOpenServerIds((current) =>
       current.includes(id) ? current : [...current, id],
@@ -613,6 +965,7 @@ function FileManagerPanel({
           <button
             className="file-manager-tab-select"
             type="button"
+            title={`${item.name} 文件`}
             onClick={() => {
               setActiveServerId(item.id);
               setRemotePath("/root");
@@ -632,6 +985,19 @@ function FileManagerPanel({
           </button>
         </div>
       ))}
+      {editorTab && editorTab.serverId === activeServer.id && onSelectEditor && (
+        <div className={`file-manager-tab ${editorActive ? "is-active" : ""}`}>
+          <button
+            className="file-manager-tab-select"
+            type="button"
+            title={editorTab.name}
+            onClick={onSelectEditor}
+          >
+            <FilePenLine className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
+            <span className="file-manager-tab-label">{editorTab.name}</span>
+          </button>
+        </div>
+      )}
       <div className="file-manager-add-slot">
         <button
           type="button"
@@ -673,10 +1039,17 @@ function FileManagerPanel({
       username,
       authMethod: activeServer.authMethod ?? "password",
       password,
-      privateKeyPath: null,
+      privateKeyPath: activeServer.privateKeyPath ?? null,
       passphrase: null,
     };
-  }, [activeServer]);
+  }, [
+    activeServer.authMethod,
+    activeServer.host,
+    activeServer.id,
+    activeServer.password,
+    activeServer.port,
+    activeServer.privateKeyPath,
+  ]);
 
   const openSession = React.useCallback(
     async () =>
@@ -697,12 +1070,14 @@ function FileManagerPanel({
       });
       setRemoteFiles(entries);
       setSelectedRemote(null);
-    } catch {
+      markRemoteConnection(true);
+    } catch (error) {
+      markRemoteFailure(error);
       setRemoteFiles([]);
     } finally {
       setBusy(false);
     }
-  }, [connectionRequest, remotePath]);
+  }, [connectionRequest, markRemoteConnection, markRemoteFailure, remotePath]);
 
   // Directory reads use a dedicated Rust command so shell parsing and locale
   // formatting cannot corrupt names or sizes in the file list.
@@ -715,12 +1090,14 @@ function FileManagerPanel({
       });
       setRemoteFiles(entries);
       setSelectedRemote(null);
-    } catch {
+      markRemoteConnection(true);
+    } catch (error) {
+      markRemoteFailure(error);
       setRemoteFiles([]);
     } finally {
       setBusy(false);
     }
-  }, [connectionRequest, remotePath]);
+  }, [connectionRequest, markRemoteConnection, markRemoteFailure, remotePath]);
 
   const loadLocal = React.useCallback(async () => {
     try {
@@ -741,8 +1118,27 @@ function FileManagerPanel({
     if (openServerIds.length > 0) void loadLocal();
   }, [loadLocal, openServerIds.length]);
 
-  const transferRemoteToLocal = async () => {
-    if (!selectedRemote || selectedRemote.isDir || busy) return;
+  React.useEffect(() => {
+    if (!contextMenu) return;
+    const close = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target?.closest(".file-manager-context-menu")) {
+        setContextMenu(null);
+      }
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", escape);
+    };
+  }, [contextMenu]);
+
+  const transferRemoteToLocal = async (entry = selectedRemote) => {
+    if (!entry || entry.isDir || busy) return;
     if (!localPath) {
       setTransfer({
         label: "下载失败：请先选择本地目标目录",
@@ -754,27 +1150,29 @@ function FileManagerPanel({
     }
     setBusy(true);
     setTransfer({
-      label: `下载 ${selectedRemote.name}`,
+      label: `下载 ${entry.name}`,
       progress: 0,
       rate: "准备中",
     });
     try {
       const request = await connectionRequest();
       const started = performance.now();
-      const target = `${localPath || "."}\\${selectedRemote.name}`;
+      const target = `${localPath || "."}\\${entry.name}`;
       const size = await invoke<number>("download_remote_file", {
         request,
-        remotePath: selectedRemote.path,
+        remotePath: entry.path,
         localPath: target,
       });
+      markRemoteConnection(true);
       setTransfer({
-        label: `下载 ${selectedRemote.name}`,
+        label: `下载 ${entry.name}`,
         progress: 100,
         rate: `${Math.max(1, Math.round(size / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s`,
       });
       await loadLocal();
       window.setTimeout(() => setTransfer(null), 1400);
     } catch (error) {
+      markRemoteFailure(error);
       setTransfer({
         label: `下载失败：${String(error)}`,
         progress: 0,
@@ -786,31 +1184,33 @@ function FileManagerPanel({
     }
   };
 
-  const transferLocalToRemote = async () => {
-    if (!selectedLocal || selectedLocal.isDir || busy) return;
+  const transferLocalToRemote = async (entry = selectedLocal) => {
+    if (!entry || entry.isDir || busy) return;
     setBusy(true);
     setTransfer({
-      label: `上传 ${selectedLocal.name}`,
+      label: `上传 ${entry.name}`,
       progress: 0,
       rate: "准备中",
     });
     try {
       const request = await connectionRequest();
-      const target = `${remotePath.replace(/\/$/, "")}/${selectedLocal.name}`;
+      const target = `${remotePath.replace(/\/$/, "")}/${entry.name}`;
       const started = performance.now();
       const size = await invoke<number>("upload_remote_file", {
         request,
-        localPath: selectedLocal.path,
+        localPath: entry.path,
         remotePath: target,
       });
+      markRemoteConnection(true);
       setTransfer({
-        label: `上传 ${selectedLocal.name}`,
+        label: `上传 ${entry.name}`,
         progress: 100,
         rate: `${Math.max(1, Math.round(size / Math.max(1, (performance.now() - started) / 1000) / 1024))} KB/s`,
       });
       await loadRemoteWithBackend();
       window.setTimeout(() => setTransfer(null), 1400);
     } catch (error) {
+      markRemoteFailure(error);
       setTransfer({
         label: `上传失败：${String(error)}`,
         progress: 0,
@@ -820,6 +1220,202 @@ function FileManagerPanel({
     } finally {
       setBusy(false);
     }
+  };
+
+  const showFileActionError = (label: string, error: unknown) => {
+    setTransfer({
+      label: label + "失败：" + String(error),
+      progress: 0,
+      rate: "请检查连接、权限和文件路径",
+    });
+    window.setTimeout(() => setTransfer(null), 6000);
+  };
+
+  const renameRemote = async () => {
+    const target = renameTarget;
+    const newName = renameDraft.trim();
+    if (!target || !newName || busy) return;
+    setBusy(true);
+    try {
+      if (target.scope === "local") {
+        await invoke("rename_local_file", {
+          path: target.entry.path,
+          newName,
+        });
+      } else {
+        await invoke("rename_remote_file", {
+          request: await connectionRequest(),
+          remotePath: target.entry.path,
+          newName,
+        });
+        markRemoteConnection(true);
+      }
+      setRenameTarget(null);
+      setRenameDraft("");
+      if (target.scope === "local") await loadLocal();
+      else await loadRemoteWithBackend();
+    } catch (error) {
+      if (target.scope === "remote") markRemoteFailure(error);
+      showFileActionError("重命名", error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteRemote = async (entry = selectedRemote) => {
+    const target = entry;
+    if (!target || busy) return;
+    if (
+      !(await appConfirm(
+        "确定删除" + (target.isDir ? "目录" : "文件") + "“" + target.name + "”？",
+      ))
+    )
+      return;
+    setBusy(true);
+    try {
+      await invoke("delete_remote_file", {
+        request: await connectionRequest(),
+        remotePath: target.path,
+        isDir: target.isDir,
+      });
+      markRemoteConnection(true);
+      await loadRemoteWithBackend();
+    } catch (error) {
+      markRemoteFailure(error);
+      showFileActionError("删除", error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteLocal = async (entry = selectedLocal) => {
+    const target = entry;
+    if (!target || busy) return;
+    if (
+      !(await appConfirm(
+        "确定删除" + (target.isDir ? "目录" : "文件") + "“" + target.name + "”？",
+      ))
+    )
+      return;
+    setBusy(true);
+    try {
+      await invoke("delete_local_file", {
+        path: target.path,
+        isDir: target.isDir,
+      });
+      await loadLocal();
+    } catch (error) {
+      showFileActionError("删除", error);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const beginRename = (
+    scope: "remote" | "local",
+    entry: RemoteFileEntry | LocalFileEntry,
+  ) => {
+    setRenameDraft(entry.name);
+    setRenameTarget({ scope, entry });
+    setContextMenu(null);
+  };
+
+  const showContextMenu = (
+    event: React.MouseEvent,
+    scope: "remote" | "local",
+    entry: RemoteFileEntry | LocalFileEntry,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (scope === "remote") {
+      setSelectedRemote(entry as RemoteFileEntry);
+      setSelectedLocal(null);
+    } else {
+      setSelectedLocal(entry as LocalFileEntry);
+      setSelectedRemote(null);
+    }
+    const width = 194;
+    const height = entry.isDir ? 220 : 270;
+    setContextMenu({
+      scope,
+      entry,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)),
+    });
+  };
+
+  const copyEntryValue = async (entry: LocalFileEntry | RemoteFileEntry, value: string) => {
+    await copyFileText(value);
+    setContextMenu(null);
+    setTransfer({ label: `已复制 ${entry.name}`, progress: 100, rate: "" });
+    window.setTimeout(() => setTransfer(null), 1200);
+  };
+
+  const renderContextMenu = () => {
+    if (!contextMenu) return null;
+    const { scope, entry } = contextMenu;
+    const remote = scope === "remote";
+    const menuItem = (
+      label: string,
+      icon: React.ReactNode,
+      action: () => void,
+      options: { danger?: boolean; disabled?: boolean } = {},
+    ) => (
+      <button
+        key={label}
+        type="button"
+        role="menuitem"
+        className={options.danger ? "danger-text" : undefined}
+        disabled={options.disabled || busy}
+        onClick={() => {
+          setContextMenu(null);
+          action();
+        }}
+      >
+        {icon}
+        <span>{label}</span>
+      </button>
+    );
+    return (
+      <div
+        className="file-manager-context-menu"
+        role="menu"
+        style={{ left: contextMenu.x, top: contextMenu.y }}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {entry.isDir &&
+          menuItem("打开", <FolderOpen size={14} />, () => folder(entry, remote))}
+        {!entry.isDir && remote && onOpenEditor &&
+          menuItem("编辑", <Pencil size={14} />, () =>
+            onOpenEditor(activeServer.id, entry.path, entry.name),
+          )}
+        {!entry.isDir && remote &&
+          menuItem("下载到本地", <Download size={14} />, () =>
+            void transferRemoteToLocal(entry as RemoteFileEntry),
+          )}
+        {!entry.isDir && !remote &&
+          menuItem("上传到服务器", <Upload size={14} />, () =>
+            void transferLocalToRemote(entry as LocalFileEntry),
+          )}
+        {menuItem("复制文件名", <Copy size={14} />, () =>
+          void copyEntryValue(entry, entry.name),
+        )}
+        {menuItem("复制路径", <Copy size={14} />, () =>
+          void copyEntryValue(entry, entry.path),
+        )}
+        {menuItem("重命名", <Pencil size={14} />, () =>
+          beginRename(scope, entry),
+        )}
+        {menuItem(
+          "删除",
+          <Trash2 size={14} />,
+          () => void (remote
+            ? deleteRemote(entry as RemoteFileEntry)
+            : deleteLocal(entry as LocalFileEntry)),
+          { danger: true },
+        )}
+      </div>
+    );
   };
 
   const folder = (entry: { isDir: boolean; path: string }, remote: boolean) => {
@@ -904,6 +1500,27 @@ function FileManagerPanel({
       >
         上传
       </button>
+      <button
+        className="secondary"
+        type="button"
+        onClick={() => {
+          if (!selectedRemote) return;
+          beginRename("remote", selectedRemote);
+        }}
+        disabled={!selectedRemote || busy}
+        aria-label="重命名服务器文件"
+      >
+        重命名
+      </button>
+      <button
+        className="secondary danger-text"
+        type="button"
+        onClick={() => void deleteRemote()}
+        disabled={!selectedRemote || busy}
+        aria-label="删除服务器文件"
+      >
+        删除
+      </button>
     </div>
   );
   if (openServerIds.length === 0)
@@ -924,11 +1541,14 @@ function FileManagerPanel({
           <div className="file-manager-pane-heading">
             <strong>服务器</strong>
             <button
+              className="icon-button file-manager-refresh"
               type="button"
               onClick={() => void loadRemote()}
               disabled={busy}
+              title="刷新服务器文件"
+              aria-label="刷新服务器文件"
             >
-              刷新
+              <RefreshCw size={14} className={busy ? "is-spinning" : ""} />
             </button>
           </div>
           <div className="file-manager-path">{remotePath}</div>
@@ -941,14 +1561,41 @@ function FileManagerPanel({
                   selectedRemote?.path === entry.path ? "is-selected" : ""
                 }
                 type="button"
-                onClick={() => setSelectedRemote(entry)}
-                onDragStart={() => setSelectedRemote(entry)}
-                onDoubleClick={() => folder(entry, true)}
+                onClick={() => {
+                  setSelectedRemote(entry);
+                  setSelectedLocal(null);
+                }}
+                onContextMenu={(event) => showContextMenu(event, "remote", entry)}
+                onDragStart={() => {
+                  setSelectedRemote(entry);
+                  setSelectedLocal(null);
+                }}
+                onDoubleClick={() =>
+                  entry.isDir
+                    ? folder(entry, true)
+                    : onOpenEditor?.(activeServer.id, entry.path, entry.name)
+                }
               >
                 <span>{entry.isDir ? "▰" : "▱"}</span>
                 <span className="file-manager-entry-name" title={entry.name}>
                   {entry.name}
                 </span>
+                {!entry.isDir && onOpenEditor ? (
+                  <span
+                    className="file-manager-entry-action"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelectedRemote(entry);
+                      setSelectedLocal(null);
+                      onOpenEditor(activeServer.id, entry.path, entry.name);
+                    }}
+                    aria-label={`编辑 ${entry.name}`}
+                  >
+                    编辑
+                  </span>
+                ) : (
+                  <span className="file-manager-entry-action-placeholder" aria-hidden="true" />
+                )}
                 <small>{entry.isDir ? "文件夹" : `${entry.size} B`}</small>
               </button>
             ))}
@@ -964,11 +1611,14 @@ function FileManagerPanel({
             <strong>本地电脑</strong>
             <span className="file-manager-pane-actions">
               <button
+                className="icon-button file-manager-refresh"
                 type="button"
                 onClick={() => void loadLocal()}
                 disabled={busy}
+                title="刷新本地文件"
+                aria-label="刷新本地文件"
               >
-                刷新
+                <RefreshCw size={14} className={busy ? "is-spinning" : ""} />
               </button>
               <button
                 type="button"
@@ -994,8 +1644,15 @@ function FileManagerPanel({
                     selectedLocal?.path === entry.path ? "is-selected" : ""
                   }
                   type="button"
-                  onClick={() => setSelectedLocal(entry)}
-                  onDragStart={() => setSelectedLocal(entry)}
+                  onClick={() => {
+                    setSelectedLocal(entry);
+                    setSelectedRemote(null);
+                  }}
+                  onContextMenu={(event) => showContextMenu(event, "local", entry)}
+                  onDragStart={() => {
+                    setSelectedLocal(entry);
+                    setSelectedRemote(null);
+                  }}
                   onDoubleClick={() => folder(entry, false)}
                 >
                   <span>{entry.isDir ? "▰" : "▱"}</span>
@@ -1010,6 +1667,7 @@ function FileManagerPanel({
         </section>
       </div>
       {localCollapsed && renderTransferActions()}
+      {renderContextMenu()}
       {transfer && (
         <div className="file-manager-transfer">
           <div>
@@ -1021,6 +1679,50 @@ function FileManagerPanel({
           <div className="file-manager-progress">
             <i style={{ width: `${transfer.progress}%` }} />
           </div>
+        </div>
+      )}
+      {renameTarget && (
+        <div className="rename-modal-backdrop" role="presentation">
+          <section
+            className="rename-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remote-file-rename-title"
+          >
+            <h2 id="remote-file-rename-title">重命名文件</h2>
+            <input
+              autoFocus
+              value={renameDraft}
+              onChange={(event) => setRenameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void renameRemote();
+                if (event.key === "Escape") {
+                  setRenameTarget(null);
+                  setRenameDraft("");
+                }
+              }}
+            />
+            <div className="rename-modal-actions">
+              <button
+                className="secondary"
+                type="button"
+                onClick={() => {
+                  setRenameTarget(null);
+                  setRenameDraft("");
+                }}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                type="button"
+                disabled={!renameDraft.trim() || busy}
+                onClick={() => void renameRemote()}
+              >
+                确定
+              </button>
+            </div>
+          </section>
         </div>
       )}
     </div>
@@ -1047,6 +1749,7 @@ function HomePage({
   onOpenTerminal,
   onOpenFiles,
   servers,
+  iconRefreshKeys,
   aiConfigured,
 }: {
   language: Language;
@@ -1056,6 +1759,7 @@ function HomePage({
   onOpenTerminal: (id: string) => void;
   onOpenFiles: (id: string) => void;
   servers: ServerSummary[];
+  iconRefreshKeys: Record<string, number>;
   aiConfigured: boolean;
 }) {
   const isEnglish = language === "en";
@@ -1177,6 +1881,7 @@ function HomePage({
                     <ServiceIcon
                       kind="system"
                       name={serverIdentity || "linux"}
+                      refreshKey={iconRefreshKeys[server.id] ?? 0}
                     />
                   </span>
                   <div>
@@ -1197,12 +1902,24 @@ function HomePage({
                         ? "WAN"
                         : "外网"}
                   </em>
-                  <em className={server.connected ? "is-connected" : ""}>
+                  <em
+                    className={
+                      server.connected
+                        ? "is-connected"
+                        : server.connectionError
+                          ? "is-error"
+                          : ""
+                    }
+                  >
                     ●{" "}
                     {server.connected
                       ? isEnglish
                         ? "Connected"
                         : "已连接"
+                      : server.connectionError
+                        ? isEnglish
+                          ? "Connection failed"
+                          : "连接失败"
                       : isEnglish
                         ? "Not connected"
                         : "未连接"}
@@ -1742,6 +2459,8 @@ function ServerManagerPage({
   language,
   servers,
   onSelect,
+  onOpenFiles,
+  onOpenEditor,
   onConfigureModel,
   onServerAdded,
   debugLogging = false,
@@ -1750,6 +2469,8 @@ function ServerManagerPage({
   language: Language;
   servers: ServerSummary[];
   onSelect: (id: string) => void;
+  onOpenFiles?: (id: string) => void;
+  onOpenEditor?: (serverId: string, path: string, name: string, placement?: EditorPlacement) => void;
   onConfigureModel: () => void;
   onServerAdded: (
     server: ServerSummary,
@@ -1769,8 +2490,10 @@ function ServerManagerPage({
     port: number;
     username: string;
     authMethod: "password" | "key";
+    privateKeyPath?: string;
   } | null>(null);
   const [draftPassword, setDraftPassword] = React.useState("");
+  const [draftPrivateKeyPath, setDraftPrivateKeyPath] = React.useState("");
   const [draftSudoPassword, setDraftSudoPassword] = React.useState("");
   const [draftStatus, setDraftStatus] = React.useState<string | null>(null);
   const [draftTesting, setDraftTesting] = React.useState(false);
@@ -1787,6 +2510,7 @@ function ServerManagerPage({
   } | null>(null);
   const managerChatHydrated = React.useRef(false);
   const server = servers[0];
+  const managerWorkspaceId = "server-manager";
   React.useEffect(() => {
     void readPortableJson<Partial<ModelPreferences>>(MODEL_FILE, {}).then(
       (saved) => setActiveModel({ ...DEFAULT_MODEL, ...saved }),
@@ -1881,10 +2605,23 @@ function ServerManagerPage({
       title: `服务器总管${server ? ` · ${server.name}` : ""}`,
       detail: `用户: ${prompt}`,
     }).catch(() => undefined);
+    const serverAdditionGuidance =
+      "添加服务器是独立流程：无论当前是否已有服务器，只要用户要新增服务器并提供了名称、地址、端口、用户名和认证方式，就调用 prepare_server_addition。password 认证不要在模型中索取或传输密码；key 认证必须把用户提供的本机 PEM 文件路径放入 private_key_path，不要索取或传输私钥内容。调用工具后等待前端草稿卡片完成认证测试和保存，不能声称已经添加。历史消息里关于工具只支持密码或需要前端上传文件的旧说法可能已经过时，以当前工具定义和本提示为准。";
+    const managerSystemPrompt = [
+      "你是 OpsNest 服务器总管，负责帮助用户管理服务器和 OpsNest。",
+      servers.length
+        ? "你可以检查和管理已保存的服务器。执行服务器命令前必须调用 request_server_command，并等待用户确认。用户明确要求打开文件管理器或查看刚才修改的文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor。"
+        : "当前还没有保存的服务器。请主动收集新增服务器的名称、地址、端口、用户名和认证方式。",
+      serverAdditionGuidance,
+      "当前总管会话也绑定了一个 OpsNest 本地 workspace。用户要求保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file 或 workspace_delete_file；这里的 workspace 是本机工作区，不是远程服务器目录。",
+      "密码和私钥口令永远由前端安全输入，不要索取、复述或写入聊天、日志、模型上下文或 JSON。若用户在对话中直接写出疑似明文密码，必须提醒：下次您不需要在对话中直接写上密码，OpsNest 会提供专用的密码输入界面；明文密码泄露给模型，特别是第三方中转类模型接口，会有严重安全风险。同时继续使用脱敏后的内容，不要引用或重复密码。",
+      "只有连接测试成功且用户确认后，才能说服务器已添加。普通聊天、感谢和确认直接自然回答，不要用固定关键词分类。",
+      `服务器列表：${servers.map((item) => `${item.id}=${item.name} (${item.host}:${item.port})`).join("；") || "（暂无）"}`,
+    ].join(" ");
     const apiMessages: Array<Record<string, unknown>> = [
       {
         role: "system",
-        content: `你是 OpsNest 服务器总管，负责帮助用户管理服务器和 OpsNest。${servers.length ? "你可以检查和管理已保存的服务器。执行服务器命令前必须调用 request_server_command，并等待用户确认。" : "当前还没有保存的服务器。请主动收集服务器名称、地址、端口和用户名；信息齐全后调用 prepare_server_addition，让前端安全完成密码输入、连接测试和保存。当前添加流程使用 SSH 密码认证。"} 密码永远由前端安全输入，不要索取、复述或写入聊天、日志、模型上下文或 JSON。若用户在对话中直接写出疑似明文密码，必须提醒：“下次您不需要在对话中直接写上密码，OpsNest 会提供专用的密码输入界面；明文密码泄露给模型，特别是第三方中转类模型接口，会有严重安全风险。” 同时继续使用脱敏后的内容，不要引用或重复密码。只有连接测试成功且用户确认后，才能说服务器已添加。普通聊天、感谢和确认直接自然回答，不要用固定关键词分类。服务器列表：${servers.map((item) => `${item.id}=${item.name} (${item.host}:${item.port})`).join("；") || "（暂无）"}`,
+        content: managerSystemPrompt,
       },
       ...next.map((item) => ({ role: item.role, content: item.text })),
     ];
@@ -1894,7 +2631,7 @@ function ServerManagerPage({
         function: {
           name: "prepare_server_addition",
           description:
-            "当用户提供了添加服务器所需的非敏感信息后，准备服务器草稿。当前使用密码认证，绝不包含密码。",
+            "当用户提供了添加服务器所需的非敏感信息后，准备服务器草稿。支持 password 或 key 认证；key 认证必须提供本机 PEM 私钥路径，绝不包含密码、私钥内容或私钥口令。",
           parameters: {
             type: "object",
             properties: {
@@ -1902,7 +2639,11 @@ function ServerManagerPage({
               host: { type: "string" },
               port: { type: "integer", minimum: 1, maximum: 65535 },
               username: { type: "string" },
-              auth_method: { type: "string", enum: ["password"] },
+              auth_method: { type: "string", enum: ["password", "key"] },
+              private_key_path: {
+                type: "string",
+                description: "key 认证时使用的本机 PEM 私钥路径，不是私钥内容。",
+              },
             },
             required: ["name", "host", "port", "username", "auth_method"],
           },
@@ -1932,6 +2673,99 @@ function ServerManagerPage({
           },
         },
       });
+    if (servers.length)
+      tools.push(
+        {
+          type: "function",
+          function: {
+            name: "opsnest_open_file_manager",
+            description:
+              "打开 OpsNest 中指定服务器的远程文件管理器。仅用于界面导航，不读取或修改远程文件。",
+            parameters: {
+              type: "object",
+              properties: {
+                server_id: { type: "string", enum: servers.map((item) => item.id) },
+              },
+              required: ["server_id"],
+              additionalProperties: false,
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "opsnest_open_file_editor",
+            description:
+              "在 OpsNest 编辑器中打开指定服务器上的远程 UTF-8 文本文件。仅打开界面，不修改文件；适合用户要求查看刚才修改的配置文件时使用。",
+            parameters: {
+              type: "object",
+              properties: {
+                server_id: { type: "string", enum: servers.map((item) => item.id) },
+                path: { type: "string" },
+                placement: { type: "string", enum: ["right", "bottom"] },
+              },
+              required: ["server_id", "path"],
+              additionalProperties: false,
+            },
+          },
+        },
+      );
+    tools.push(
+      {
+        type: "function",
+        function: {
+          name: "workspace_list_files",
+          description:
+            "列出当前服务器总管会话的本地 OpsNest workspace 文件。它位于用户电脑，不是远程服务器目录。",
+          parameters: {
+            type: "object",
+            properties: {
+              path: { type: "string", description: "workspace 相对目录，可省略。" },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "workspace_read_file",
+          description: "读取当前总管会话本地 workspace 中的 UTF-8 文件。",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "workspace_write_file",
+          description: "将文本写入当前总管会话本地 workspace，不会写入远程服务器。",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" }, content: { type: "string" } },
+            required: ["path", "content"],
+            additionalProperties: false,
+          },
+        },
+      },
+      {
+        type: "function",
+        function: {
+          name: "workspace_delete_file",
+          description: "删除当前总管会话本地 workspace 中的单个文件，不会删除远程文件。",
+          parameters: {
+            type: "object",
+            properties: { path: { type: "string" } },
+            required: ["path"],
+            additionalProperties: false,
+          },
+        },
+      },
+    );
     try {
       const configTools = [
         {
@@ -2043,13 +2877,17 @@ function ServerManagerPage({
           const args = JSON.parse(call.function?.arguments || "{}");
           if (name === "prepare_server_addition") {
             const port = Number(args.port);
+            const authMethod = (args.auth_method === "key" ? "key" : "password") as
+              "password" | "key";
+            const privateKeyPath = String(args.private_key_path || "").trim();
             if (
               !String(args.name || "").trim() ||
               !String(args.host || "").trim() ||
               !String(args.username || "").trim() ||
               !Number.isInteger(port) ||
               port < 1 ||
-              port > 65535
+              port > 65535 ||
+              (authMethod === "key" && !privateKeyPath)
             ) {
               apiMessages.push({
                 role: "tool",
@@ -2064,23 +2902,24 @@ function ServerManagerPage({
               host: String(args.host).trim(),
               port,
               username: String(args.username).trim(),
-              authMethod:
-                args.auth_method === "key"
-                  ? ("key" as const)
-                  : ("password" as const),
+              authMethod,
+              privateKeyPath,
             };
             setServerDraft(draft);
             setDraftPassword("");
+            setDraftPrivateKeyPath(String(args.private_key_path || "").trim());
             setDraftSudoPassword("");
             setDraftTested(false);
             setDraftStatus(
-              "请在下方输入 SSH 密码后测试连接。可选的 sudo 密码同样不会发送给 AI。",
+              draft.authMethod === "key"
+                ? "请在下方填写本机 PEM 私钥路径后测试连接。私钥内容不会发送给 AI。"
+                : "请在下方输入 SSH 密码后测试连接。可选的 sudo 密码同样不会发送给 AI。",
             );
             apiMessages.push({
               role: "tool",
               tool_call_id: call.id || "opsnest-tool",
               content:
-                "已准备服务器信息。请让用户在前端安全输入密码并测试连接；不要声称服务器已经保存。",
+                "已准备服务器信息。请让用户在前端安全输入 SSH 密码或 PEM 私钥路径并测试连接；不要声称服务器已经保存。",
             });
             continue;
           }
@@ -2113,6 +2952,136 @@ function ServerManagerPage({
               role: "tool",
               tool_call_id: call.id || "opsnest-tool",
               content: result,
+            });
+            continue;
+          }
+          if (name === "workspace_list_files") {
+            const path = String(args.path || "");
+            let content: string;
+            try {
+              const entries = await listWorkspaceFiles(managerWorkspaceId, path);
+              content = JSON.stringify({
+                workspaceId: managerWorkspaceId,
+                path,
+                entries,
+              });
+            } catch (error) {
+              content = `无法读取本地 workspace：${String(error)}`;
+            }
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content,
+            });
+            continue;
+          }
+          if (name === "workspace_read_file") {
+            const path = String(args.path || "").trim();
+            const content = await readWorkspaceText(managerWorkspaceId, path, "");
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content: content
+                ? JSON.stringify({ path, content })
+                : `本地 workspace 文件不存在：${path}`,
+            });
+            continue;
+          }
+          if (name === "workspace_write_file") {
+            const path = String(args.path || "").trim();
+            const content = String(args.content || "");
+            if (!path) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "workspace 文件路径不能为空。",
+              });
+              continue;
+            }
+            try {
+              await writeWorkspaceText(managerWorkspaceId, path, content);
+            } catch (error) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `无法写入本地 workspace：${String(error)}`,
+              });
+              continue;
+            }
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content: `已写入本地 workspace：${path}（${content.length} 字符）。`,
+            });
+            continue;
+          }
+          if (name === "workspace_delete_file") {
+            const path = String(args.path || "").trim();
+            if (!path) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "workspace 文件路径不能为空。",
+              });
+              continue;
+            }
+            try {
+              await deleteWorkspaceFile(managerWorkspaceId, path);
+            } catch (error) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `无法删除本地 workspace 文件：${String(error)}`,
+              });
+              continue;
+            }
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content: `已删除本地 workspace 文件：${path}。`,
+            });
+            continue;
+          }
+          if (name === "opsnest_open_file_manager") {
+            const target = servers.find((item) => item.id === args.server_id);
+            if (!target || !onOpenFiles) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "指定的服务器不存在或文件管理器不可用。",
+              });
+              continue;
+            }
+            onOpenFiles(target.id);
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content: `已打开 OpsNest 的“${target.name}”文件管理器。`,
+            });
+            continue;
+          }
+          if (name === "opsnest_open_file_editor") {
+            const target = servers.find((item) => item.id === args.server_id);
+            const path = String(args.path || "").trim();
+            if (!target || !path || !onOpenEditor) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "指定的服务器、文件路径或编辑器不可用。",
+              });
+              continue;
+            }
+            const name = path.split(/[\\/]/).pop() || path;
+            onOpenEditor(
+              target.id,
+              path,
+              name,
+              args.placement === "bottom" ? "bottom" : "right",
+            );
+            apiMessages.push({
+              role: "tool",
+              tool_call_id: call.id || "opsnest-tool",
+              content: `已在 OpsNest 中打开“${target.name}”的文件编辑器：${path}`,
             });
             continue;
           }
@@ -2172,7 +3141,7 @@ function ServerManagerPage({
             username,
             authMethod: target.authMethod ?? "password",
             password: sshPassword,
-            privateKeyPath: null,
+            privateKeyPath: target.privateKeyPath ?? null,
             passphrase: null,
           };
           let result = "";
@@ -2236,7 +3205,13 @@ function ServerManagerPage({
     }
   };
   const testDraft = async () => {
-    if (!serverDraft || !draftPassword || draftTesting) return;
+    const usesPrivateKey = serverDraft?.authMethod === "key";
+    if (
+      !serverDraft ||
+      draftTesting ||
+      (usesPrivateKey ? !draftPrivateKeyPath.trim() : !draftPassword)
+    )
+      return;
     setDraftTesting(true);
     setDraftStatus("正在测试 SSH 连接…");
     setDraftTested(false);
@@ -2247,15 +3222,16 @@ function ServerManagerPage({
           port: serverDraft.port,
           username: serverDraft.username,
           authMethod: serverDraft.authMethod,
-          password:
-            serverDraft.authMethod === "password" ? draftPassword : null,
-          privateKeyPath: null,
+          password: usesPrivateKey ? null : draftPassword,
+          privateKeyPath: usesPrivateKey ? draftPrivateKeyPath.trim() : null,
           passphrase: null,
         },
       });
       setDraftTested(true);
       setDraftStatus(
-        "SSH 认证成功。确认后将保存服务器，密码只保存到系统凭据管理器。",
+        usesPrivateKey
+          ? "SSH 认证成功。确认后将保存服务器，PEM 路径仅保存在本机配置中。"
+          : "SSH 认证成功。确认后将保存服务器，密码只保存到系统凭据管理器。",
       );
     } catch (error) {
       setDraftStatus(`连接失败：${String(error)}`);
@@ -2278,6 +3254,10 @@ function ServerManagerPage({
           authMethod: serverDraft.authMethod,
           password:
             serverDraft.authMethod === "password" ? draftPassword : undefined,
+          privateKeyPath:
+            serverDraft.authMethod === "key"
+              ? draftPrivateKeyPath.trim()
+              : undefined,
           sudoConfigured: Boolean(draftSudoPassword),
           connected: true,
           connectionError: false,
@@ -2296,6 +3276,7 @@ function ServerManagerPage({
       }).catch(() => undefined);
       setServerDraft(null);
       setDraftPassword("");
+      setDraftPrivateKeyPath("");
       setDraftSudoPassword("");
       setDraftStatus(null);
       setDraftTested(false);
@@ -2397,16 +3378,29 @@ function ServerManagerPage({
           <span>
             {serverDraft.username}@{serverDraft.host}:{serverDraft.port}
           </span>
-          <input
-            type="password"
-            value={draftPassword}
-            onChange={(event) => {
-              setDraftPassword(event.target.value);
-              setDraftTested(false);
-            }}
-            placeholder="SSH 密码（不会发送给 AI）"
-            disabled={draftTesting || draftTested || draftSaving}
-          />
+          {serverDraft.authMethod === "key" ? (
+            <input
+              type="text"
+              value={draftPrivateKeyPath}
+              onChange={(event) => {
+                setDraftPrivateKeyPath(event.target.value);
+                setDraftTested(false);
+              }}
+              placeholder="PEM 私钥文件路径（不会发送给 AI）"
+              disabled={draftTesting || draftTested || draftSaving}
+            />
+          ) : (
+            <input
+              type="password"
+              value={draftPassword}
+              onChange={(event) => {
+                setDraftPassword(event.target.value);
+                setDraftTested(false);
+              }}
+              placeholder="SSH 密码（不会发送给 AI）"
+              disabled={draftTesting || draftTested || draftSaving}
+            />
+          )}
           <input
             type="password"
             value={draftSudoPassword}
@@ -2423,7 +3417,12 @@ function ServerManagerPage({
               type="button"
               onClick={() => void testDraft()}
               disabled={
-                !draftPassword || draftTesting || draftTested || draftSaving
+                (serverDraft.authMethod === "key"
+                  ? !draftPrivateKeyPath.trim()
+                  : !draftPassword) ||
+                draftTesting ||
+                draftTested ||
+                draftSaving
               }
             >
               {draftTesting ? "测试中…" : "测试连接"}
@@ -2435,6 +3434,21 @@ function ServerManagerPage({
               disabled={!draftTested || draftSaving}
             >
               {draftSaving ? "保存中…" : "确认保存"}
+            </button>
+            <button
+              className="secondary"
+              type="button"
+              onClick={() => {
+                setServerDraft(null);
+                setDraftPassword("");
+                setDraftPrivateKeyPath("");
+                setDraftSudoPassword("");
+                setDraftStatus(null);
+                setDraftTested(false);
+              }}
+              disabled={draftTesting || draftSaving}
+            >
+              取消
             </button>
           </div>
           {draftStatus && <p>{draftStatus}</p>}
@@ -2720,7 +3734,13 @@ function ServerForm({
   const [username, setUsername] = React.useState(
     initialAt > 0 ? initialServer!.host.slice(0, initialAt) : "root",
   );
+  const [authMethod, setAuthMethod] = React.useState<"password" | "key">(
+    initialServer?.authMethod ?? "password",
+  );
   const [password, setPassword] = React.useState("");
+  const [privateKeyPath, setPrivateKeyPath] = React.useState(
+    initialServer?.privateKeyPath ?? "",
+  );
   const [sudoPassword, setSudoPassword] = React.useState("");
   const [message, setMessage] = React.useState<string | null>(null);
   const [messageKind, setMessageKind] = React.useState<"success" | "error">(
@@ -2756,16 +3776,23 @@ function ServerForm({
     setMessage(null);
   };
   const testConnection = async () => {
+    const usesPrivateKey = authMethod === "key";
     if (
       !name.trim() ||
       !host.trim() ||
-      !(password || initialServer?.password)
+      (usesPrivateKey
+        ? !privateKeyPath.trim()
+        : !(password || initialServer?.password))
     ) {
       setMessageKind("error");
       setMessage(
         isEnglish
-          ? "Enter a server name, host, and password before testing."
-          : "请填写服务器名称、地址和密码后再测试。",
+          ? usesPrivateKey
+            ? "Enter a server name, host, and PEM private-key path before testing."
+            : "Enter a server name, host, and password before testing."
+          : usesPrivateKey
+            ? "请填写服务器名称、地址和 PEM 私钥路径后再测试。"
+            : "请填写服务器名称、地址和密码后再测试。",
       );
       return;
     }
@@ -2787,9 +3814,9 @@ function ServerForm({
           host: host.trim(),
           port: parsedPort,
           username: username.trim() || "root",
-          authMethod: "password",
-          password: password || initialServer?.password || null,
-          privateKeyPath: null,
+          authMethod,
+          password: usesPrivateKey ? null : password || initialServer?.password || null,
+          privateKeyPath: usesPrivateKey ? privateKeyPath.trim() : null,
           passphrase: null,
         },
       });
@@ -2842,12 +3869,15 @@ function ServerForm({
         name: name.trim(),
         host: `${username.trim() || "root"}@${host.trim()}`,
         port: parsedPort,
-        password: password || initialServer?.password,
+        password:
+          authMethod === "password"
+            ? password || initialServer?.password
+            : undefined,
+        privateKeyPath:
+          authMethod === "key" ? privateKeyPath.trim() : undefined,
         sudoConfigured:
           Boolean(sudoPassword) || Boolean(initialServer?.sudoConfigured),
-        authMethod: password
-          ? "password"
-          : (initialServer?.authMethod ?? "password"),
+        authMethod,
         connected: true,
         connectionError: false,
         kernel: undefined,
@@ -2921,19 +3951,56 @@ function ServerForm({
           </label>
         </div>
         <label className="model-field">
-          <span>{isEnglish ? "Password" : "密码"}</span>
-          <input
-            type="password"
-            value={password}
+          <span>{isEnglish ? "Authentication" : "认证方式"}</span>
+          <select
+            value={authMethod}
             onChange={(event) => {
-              setPassword(event.target.value);
+              const next = event.target.value === "key" ? "key" : "password";
+              setAuthMethod(next);
               invalidateTest();
             }}
-            placeholder={
-              isEnglish ? "Used for the initial connection" : "用于首次连接"
-            }
-          />
+          >
+            <option value="password">
+              {isEnglish ? "SSH password" : "SSH 密码"}
+            </option>
+            <option value="key">
+              {isEnglish ? "PEM private key" : "PEM 私钥"}
+            </option>
+          </select>
         </label>
+        {authMethod === "key" ? (
+          <label className="model-field">
+            <span>{isEnglish ? "PEM private-key path" : "PEM 私钥文件路径"}</span>
+            <input
+              type="text"
+              value={privateKeyPath}
+              onChange={(event) => {
+                setPrivateKeyPath(event.target.value);
+                invalidateTest();
+              }}
+              placeholder={
+                isEnglish
+                  ? "Path on this computer, e.g. C:\\Keys\\aws.pem"
+                  : "本机文件路径，例如：C:\\Keys\\aws.pem"
+              }
+            />
+          </label>
+        ) : (
+          <label className="model-field">
+            <span>{isEnglish ? "Password" : "密码"}</span>
+            <input
+              type="password"
+              value={password}
+              onChange={(event) => {
+                setPassword(event.target.value);
+                invalidateTest();
+              }}
+              placeholder={
+                isEnglish ? "Used for the initial connection" : "用于首次连接"
+              }
+            />
+          </label>
+        )}
         <label className="model-field">
           <span>
             {isEnglish ? "sudo password (optional)" : "sudo 提权密码（可选）"}
@@ -2950,9 +4017,13 @@ function ServerForm({
           />
         </label>
         <p className="form-note">
-          {isEnglish
-            ? "SSH and optional sudo passwords are stored only in the system credential manager. They are never written to the portable JSON file or sent to AI."
-            : "SSH 密码和可选 sudo 提权密码仅保存于系统凭据管理器，不会写入便携版 JSON 存档，也不会发送给 AI。"}
+          {authMethod === "key"
+            ? isEnglish
+              ? "The PEM path stays in local server metadata; the key content is never read by the model or sent to AI."
+              : "PEM 路径仅保存于本机服务器配置，私钥内容不会被模型读取或发送给 AI。"
+            : isEnglish
+              ? "SSH and optional sudo passwords are stored only in the system credential manager. They are never written to the portable JSON file or sent to AI."
+              : "SSH 密码和可选 sudo 提权密码仅保存于系统凭据管理器，不会写入便携版 JSON 存档，也不会发送给 AI。"}
         </p>
         {message && (
           <p className={`model-test-message is-${messageKind}`}>{message}</p>
@@ -2993,6 +4064,7 @@ function LinuxServerHomeContent({
   onScan,
   onOpenTerminal,
   onOpenFiles,
+  iconRefreshKey,
 }: {
   language: Language;
   server: ServerSummary;
@@ -3000,6 +4072,7 @@ function LinuxServerHomeContent({
   onScan: () => void;
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
+  iconRefreshKey: number;
 }) {
   const isEnglish = language === "en";
   const profileKernel =
@@ -3038,6 +4111,7 @@ function LinuxServerHomeContent({
       <ServiceIcon
         kind="system"
         name={`${server.name} ${server.system || "linux"}`}
+        refreshKey={iconRefreshKey}
       />
     );
   const recordedHomeMessages = React.useRef(0);
@@ -3138,16 +4212,20 @@ function LinuxServerHomeContent({
                 : "外网"}
           </span>
           <span
-            className={`home-status ${server.connected ? "is-connected" : ""}`}
+            className={`home-status ${server.connected ? "is-connected" : server.connectionError ? "is-error" : ""}`}
           >
             ●{" "}
             {server.connected
               ? isEnglish
                 ? "Connected"
                 : "已连接"
-              : isEnglish
-                ? "Not connected"
-                : "未连接"}
+              : server.connectionError
+                ? isEnglish
+                  ? "Connection failed"
+                  : "连接失败"
+                : isEnglish
+                  ? "Not connected"
+                  : "未连接"}
           </span>
         </div>
       </header>
@@ -3360,6 +4438,7 @@ function RouterServerHome({
   onOpenFiles,
   onOpenManager,
   onServicesUpdated,
+  iconRefreshKey,
 }: {
   language: Language;
   server: ServerSummary;
@@ -3368,6 +4447,7 @@ function RouterServerHome({
   onOpenFiles: () => void;
   onOpenManager: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
+  iconRefreshKey: number;
 }) {
   const isEnglish = language === "en";
   const router = server.router || {};
@@ -3410,7 +4490,12 @@ function RouterServerHome({
             </span>
             <span
               className={
-                "home-status " + (server.connected ? "is-connected" : "")
+                "home-status " +
+                (server.connected
+                  ? "is-connected"
+                  : server.connectionError
+                    ? "is-error"
+                    : "")
               }
             >
               ●{" "}
@@ -3418,9 +4503,13 @@ function RouterServerHome({
                 ? isEnglish
                   ? "Connected"
                   : "已连接"
-                : isEnglish
-                  ? "Not connected"
-                  : "未连接"}
+                : server.connectionError
+                  ? isEnglish
+                    ? "Connection failed"
+                    : "连接失败"
+                  : isEnglish
+                    ? "Not connected"
+                    : "未连接"}
             </span>
           </div>
         </header>
@@ -3431,6 +4520,7 @@ function RouterServerHome({
             <ServiceIcon
               kind="system"
               name={routerIdentity || routerDistribution}
+              refreshKey={iconRefreshKey}
             />
           </div>
           <div>
@@ -3542,6 +4632,7 @@ function NasServerHome({
   onOpenTerminal,
   onOpenFiles,
   onServicesUpdated,
+  iconRefreshKey,
 }: {
   language: Language;
   server: ServerSummary;
@@ -3549,6 +4640,7 @@ function NasServerHome({
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
+  iconRefreshKey: number;
 }) {
   const isEnglish = language === "en";
   const nas = server.nas || {};
@@ -3604,22 +4696,30 @@ function NasServerHome({
                   : "外网"}
             </span>
             <span
-              className={`home-status ${server.connected ? "is-connected" : ""}`}
+              className={`home-status ${server.connected ? "is-connected" : server.connectionError ? "is-error" : ""}`}
             >
               ●{" "}
               {server.connected
                 ? isEnglish
                   ? "Connected"
                   : "已连接"
-                : isEnglish
-                  ? "Not connected"
-                  : "未连接"}
+                : server.connectionError
+                  ? isEnglish
+                    ? "Connection failed"
+                    : "连接失败"
+                  : isEnglish
+                    ? "Not connected"
+                    : "未连接"}
             </span>
           </div>
         </header>
         <section className="server-profile-banner router-profile-banner">
           <div className="server-profile-icon nas-profile-icon">
-            <ServiceIcon kind="system" name="fnOS NAS" />
+            <ServiceIcon
+              kind="system"
+              name="fnOS NAS"
+              refreshKey={iconRefreshKey}
+            />
           </div>
           <div>
             <strong>{isEnglish ? "Feiniu fnOS NAS" : "飞牛 fnOS NAS"}</strong>
@@ -4112,12 +5212,25 @@ function ModelSettings({
     setTesting(true);
     setTestMessage(null);
     try {
-      const result = await invoke<string>("test_model_connection", {
+      const raw = await invoke<string>("test_model_connection", {
         baseUrl: value.baseUrl,
         apiKey: value.apiKey,
         model: value.model,
       });
-      setTestMessage(result);
+      try {
+        const result = JSON.parse(raw) as {
+          message?: string;
+          contextLength?: number | null;
+        };
+        if (typeof result.contextLength === "number" && result.contextLength > 0) {
+          update("contextLength", Math.floor(result.contextLength));
+          setTestMessage(`${result.message ?? "Connection successful"} · 上下文约 ${Math.round(result.contextLength / 1000)}K tokens`);
+        } else {
+          setTestMessage(`${result.message ?? raw} · 未返回上下文长度，将使用回退值`);
+        }
+      } catch {
+        setTestMessage(raw);
+      }
     } catch (error) {
       setTestMessage(String(error));
     } finally {
@@ -4320,6 +5433,7 @@ function LinuxServerHome({
   onOpenTerminal,
   onOpenFiles,
   onServicesUpdated,
+  iconRefreshKey,
 }: {
   language: Language;
   server: ServerSummary;
@@ -4328,6 +5442,7 @@ function LinuxServerHome({
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
+  iconRefreshKey: number;
 }) {
   return (
     <div className="server-home-center">
@@ -4338,6 +5453,7 @@ function LinuxServerHome({
         onScan={onScan}
         onOpenTerminal={onOpenTerminal}
         onOpenFiles={onOpenFiles}
+        iconRefreshKey={iconRefreshKey}
       />
       <WebServiceDiscoveryPanel
         server={server}
@@ -4377,7 +5493,7 @@ function ServerTerminalPanel({
         username,
         authMethod: server.authMethod ?? "password",
         password: server.password ?? null,
-        privateKeyPath: null,
+        privateKeyPath: server.privateKeyPath ?? null,
         passphrase: null,
       },
     })
@@ -4465,10 +5581,12 @@ function ServerTerminalPanel({
           apiKey: model.apiKey,
           model: model.model,
           sessionId,
+          serverId: server.id,
           prompt: approved
             ? `请执行已批准的命令：${pendingCommand}`
             : aiInput.trim(),
           approved,
+          contextLength: model.contextLength,
           sudoPassword,
         },
       });
@@ -4478,7 +5596,10 @@ function ServerTerminalPanel({
         output?: string;
         content?: string;
         executed?: Array<{ command: string; output: string }>;
+        uiActions?: Array<Record<string, unknown>>;
       };
+      for (const action of result.uiActions ?? [])
+        window.dispatchEvent(new CustomEvent("opsnest-ui-action", { detail: action }));
       if (result.status === "approval_required" && result.command) {
         setPendingCommand(result.command);
         setAiReply(`AI 请求执行：${result.command}`);
@@ -4587,14 +5708,29 @@ function TerminalWorkspace({
   servers,
   model,
   onConnectionState,
+  editorTab = null,
+  editorActive = false,
+  onSelectEditor,
+  onSelectTerminal,
+  onCloseEditor,
 }: {
   server: ServerSummary;
   servers: ServerSummary[];
   model: ModelPreferences;
-  onConnectionState?: (serverId: string, connected: boolean) => void;
+  onConnectionState?: (
+    serverId: string,
+    connected: boolean,
+    connectionError?: boolean,
+  ) => void;
+  editorTab?: RemoteEditorTab | null;
+  editorActive?: boolean;
+  onSelectEditor?: () => void;
+  onSelectTerminal?: () => void;
+  onCloseEditor?: () => void;
 }) {
   const [tabIds, setTabIds] = React.useState<string[]>([server.id]);
   const [focusedId, setFocusedId] = React.useState(server.id);
+  const [terminalGeneration, setTerminalGeneration] = React.useState(0);
   const [showAddMenu, setShowAddMenu] = React.useState(false);
   const [closeTarget, setCloseTarget] = React.useState<ServerSummary | null>(
     null,
@@ -4606,18 +5742,59 @@ function TerminalWorkspace({
     tabs.find((item) => item.id === focusedId) ?? tabs[0] ?? server;
   React.useEffect(() => {
     const reopen = (event: Event) => {
-      const requested = (event as CustomEvent<{ serverId?: string }>).detail
-        ?.serverId;
+      const detail = (event as CustomEvent<{ serverId?: string; reconnect?: boolean }>).detail;
+      const requested = detail?.serverId;
       const target =
         (requested && servers.find((item) => item.id === requested)) || server;
+      if (detail?.reconnect === true) {
+        intentionallyClosedSessions.add(target.id);
+        void invoke("close_interactive_ssh_terminal", {
+          sessionId: target.id,
+        })
+          .catch(() => undefined)
+          .finally(() => {
+            setTabIds((current) =>
+              current.includes(target.id) ? current : [...current, target.id],
+            );
+            setFocusedId(target.id);
+            onSelectTerminal?.();
+            setTerminalGeneration((value) => value + 1);
+          });
+        return;
+      }
       setTabIds((current) =>
         current.includes(target.id) ? current : [...current, target.id],
       );
       setFocusedId(target.id);
+      onSelectTerminal?.();
     };
     window.addEventListener("opsnest-open-ssh", reopen);
     return () => window.removeEventListener("opsnest-open-ssh", reopen);
-  }, [server.id, servers]);
+  }, [onSelectTerminal, server.id, servers]);
+  React.useEffect(() => {
+    const disconnect = (event: Event) => {
+      const requested = (event as CustomEvent<{ serverId?: string }>).detail
+        ?.serverId;
+      if (!requested || !tabIds.includes(requested)) return;
+      intentionallyClosedSessions.add(requested);
+      void invoke("close_interactive_ssh_terminal", {
+        sessionId: requested,
+      });
+      onConnectionState?.(requested, false, false);
+      setTabIds((current) => {
+        const next = current.filter((id) => id !== requested);
+        if (focusedId === requested) {
+          setFocusedId(next[0] ?? "");
+        }
+        if (next.length === 0)
+          window.dispatchEvent(new Event("opsnest-close-ssh"));
+        return next;
+      });
+    };
+    window.addEventListener("opsnest-disconnect-server", disconnect);
+    return () =>
+      window.removeEventListener("opsnest-disconnect-server", disconnect);
+  }, [focusedId, onConnectionState, tabIds]);
   React.useEffect(() => {
     const tabsBar = document.querySelector<HTMLElement>(".terminal-tabs");
     const addSlot = tabsBar?.querySelector<HTMLElement>(".terminal-add-slot");
@@ -4640,6 +5817,7 @@ function TerminalWorkspace({
           option.onclick = () => {
             setTabIds((current) => [...current, item.id]);
             setFocusedId(item.id);
+            onSelectTerminal?.();
             setShowAddMenu(false);
           };
           menu.appendChild(option);
@@ -4655,7 +5833,7 @@ function TerminalWorkspace({
       add.removeEventListener("click", toggle, true);
       addSlot.querySelector(".terminal-add-menu")?.remove();
     };
-  }, [showAddMenu, servers, tabIds]);
+  }, [onSelectTerminal, showAddMenu, servers, tabIds]);
   const closeTab = (id: string) => {
     const target = tabs.find((item) => item.id === id);
     if (!target) return;
@@ -4671,6 +5849,7 @@ function TerminalWorkspace({
     if (nextTabs.length === 0)
       window.dispatchEvent(new CustomEvent("opsnest-close-ssh"));
     intentionallyClosedSessions.add(id);
+    onConnectionState?.(id, false, false);
     void invoke("close_interactive_ssh_terminal", { sessionId: id });
   };
   return (
@@ -4680,9 +5859,9 @@ function TerminalWorkspace({
           {tabs.map((item) => (
             <div
               key={item.id}
-              className={`terminal-tab ${item.id === focused.id ? "is-active" : ""}`}
+              className={`terminal-tab ${item.id === focused.id && !editorActive ? "is-active" : ""}`}
             >
-              <button type="button" onClick={() => setFocusedId(item.id)}>
+              <button type="button" onClick={() => { setFocusedId(item.id); onSelectTerminal?.(); }}>
                 <TerminalGlyph size={14} strokeWidth={1.8} />
                 <span>{item.name}</span>
               </button>
@@ -4696,6 +5875,19 @@ function TerminalWorkspace({
               </button>
             </div>
           ))}
+          {editorTab && (
+            <div key={`editor:${editorTab.id}`} className={`terminal-tab ${editorActive ? "is-active" : ""}`}>
+              <button type="button" onClick={onSelectEditor} title={editorTab.path}>
+                <FilePenLine size={14} strokeWidth={1.8} />
+                <span>{editorTab.name}</span>
+              </button>
+              {onCloseEditor && (
+                <button className="terminal-tab-close" type="button" onClick={onCloseEditor} aria-label={`关闭 ${editorTab.name}`}>
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          )}
           <div className="terminal-add-slot">
             <button
               className="terminal-tab-add"
@@ -4705,6 +5897,7 @@ function TerminalWorkspace({
                 if (next) {
                   setTabIds((current) => [...current, next.id]);
                   setFocusedId(next.id);
+                  onSelectTerminal?.();
                 }
               }}
               aria-label="新建 SSH 连接"
@@ -4713,14 +5906,23 @@ function TerminalWorkspace({
             </button>
           </div>
         </div>
-        {tabs.length > 0 && (
-          <InteractiveTerminalPanel
-            key={focused.id}
-            server={focused}
-            model={model}
-            onConnectionState={onConnectionState}
+        {editorTab && (
+          <div
+            data-opsnest-bottom-editor-host="true"
+            className={`terminal-content-panel ${editorActive ? "is-active" : "is-hidden"}`}
+            aria-hidden={!editorActive}
           />
         )}
+        <div className={`terminal-content-panel ${editorActive ? "is-hidden" : "is-active"}`}>
+          {tabs.length > 0 && (
+            <InteractiveTerminalPanel
+              key={`${focused.id}:${terminalGeneration}`}
+              server={focused}
+              model={model}
+              onConnectionState={onConnectionState}
+            />
+          )}
+        </div>
       </div>
       {closeTarget && (
         <div className="rename-modal-backdrop" role="presentation">
@@ -4878,6 +6080,27 @@ type SessionContextItem = {
     "user_command" | "result" | "user_question" | "ai_reply" | "tool_result";
   content: string;
 };
+
+function collectAiSshMemory(
+  items: SessionContextItem[],
+  maxChars = AI_SSH_MEMORY_STORAGE_MAX_CHARS,
+): PersistedAiSshTurn[] {
+  const result: PersistedAiSshTurn[] = [];
+  for (const item of items) {
+    if (item.role === "user_question") {
+      result.push({ role: "user", content: item.content });
+    } else if (item.role === "ai_reply") {
+      result.push({ role: "assistant", content: item.content });
+    } else if (item.role === "tool_result") {
+      result.push({
+        role: "assistant",
+        content: `[历史工具结果]\n${item.content}`,
+      });
+    }
+  }
+  return normalizeAiSshMemory(result, maxChars);
+}
+
 function looksLikeShellCommand(input: string) {
   const value = input.trim();
   if (!value) return false;
@@ -5047,6 +6270,11 @@ function InteractiveTerminalPanel({
   const [pendingApproval, setPendingApproval] = React.useState<string | null>(
     null,
   );
+  const inlineApprovalCommandRef = React.useRef<string | null>(null);
+  const inlineApprovalKindRef = React.useRef<"ai" | "command" | null>(null);
+  const inlineApprovalResolverRef = React.useRef<
+    ((approved: boolean) => void) | null
+  >(null);
   const [workStatus, setWorkStatus] = React.useState<WorkStatus | null>(null);
   const workStatusRef = React.useRef<WorkStatus | null>(null);
   const cancelRequestedRef = React.useRef(false);
@@ -5060,17 +6288,53 @@ function InteractiveTerminalPanel({
     },
     [],
   );
+  const requestInlineApproval = React.useCallback(
+    (command: string, kind: "ai" | "command") =>
+      new Promise<boolean>((resolve) => {
+        inlineApprovalCommandRef.current = command;
+        inlineApprovalKindRef.current = kind;
+        inlineApprovalResolverRef.current = resolve;
+        setPendingApproval(command);
+        window.setTimeout(() => termRef.current?.focus(), 0);
+      }),
+    [],
+  );
   React.useEffect(() => {
     if (!workStatus) return;
     const timer = window.setInterval(() => setStatusNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [workStatus]);
-  // Each mounted terminal gets its own backend session. Reusing the server id
-  // lets a delayed close event from the previous PTY appear in the new tab.
+  // Each server record owns one stable opaque key. It is used for the backend
+  // PTY and its local AI/editor workspace, so the generated directory name
+  // (for example 1786763217383-2kf0y3) is a session key rather than a title.
   // One long-lived PTY per server. Switching the bottom tabs only changes the
   // visible panel; it must not create a new SSH connection or close the old one.
   const sessionRef = React.useRef<string>(server.id);
+  // The current terminal session and its local AI/editor workspace share the
+  // same stable id, so closing/reopening the app can recover its memory while
+  // different servers never share drafts or snapshots.
+  const workspaceIdRef = React.useRef<string>(sessionRef.current);
+  const persistentMemoryReadyRef = React.useRef<Promise<void>>(Promise.resolve());
   const [error, setError] = React.useState<string | null>(null);
+  React.useEffect(() => {
+    let active = true;
+    sessionContextRef.current = [];
+    persistentMemoryReadyRef.current = ensureWorkspace(
+      workspaceIdRef.current,
+      server.name,
+    )
+      .then(() => loadAiSshMemory(server.id, workspaceIdRef.current))
+      .then((turns) => {
+        if (!active) return;
+        sessionContextRef.current = turns.map((turn) => ({
+          role: turn.role === "user" ? ("user_question" as const) : ("ai_reply" as const),
+          content: turn.content,
+        }));
+      });
+    return () => {
+      active = false;
+    };
+  }, [server.id]);
   React.useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -5436,7 +6700,7 @@ function InteractiveTerminalPanel({
       username,
       authMethod: server.authMethod ?? "password",
       password: server.password ?? null,
-      privateKeyPath: null,
+      privateKeyPath: server.privateKeyPath ?? null,
       passphrase: null,
     };
     const write = (data: string) =>
@@ -5509,6 +6773,7 @@ function InteractiveTerminalPanel({
         // Python, etc.). Do not consume Backspace in the AI-SSH local editor;
         // let xterm emit the erase byte to the remote PTY.
         if (rawPtyModeRef.current) return true;
+        if (inlineApprovalResolverRef.current) return false;
         event.preventDefault();
         if (terminalOperationInFlight) return false;
         keyBackspaceHandled = true;
@@ -5552,11 +6817,21 @@ function InteractiveTerminalPanel({
         return;
       }
       beginAiOrchestration();
+      await persistentMemoryReadyRef.current.catch(() => undefined);
       render("\r\n\x1b[38;5;114m• AI 正在处理…\x1b[0m\r\n");
       sessionContextRef.current.push({
         role: "user_question",
         content: prompt,
       });
+      void persistAiSshMemory(
+        server,
+        collectAiSshMemory(
+          sessionContextRef.current,
+          aiSshMemoryCharLimit(modelRef.current.contextLength),
+        ),
+        modelRef.current.contextLength,
+        workspaceIdRef.current,
+      );
       void appendActivity({
         category: "ai",
         title: `AI-SSH · ${server.name}`,
@@ -5568,13 +6843,14 @@ function InteractiveTerminalPanel({
           model: currentModel.model,
         });
         const context = [
-          `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}`,
+          serverAiContext(server),
+          "以下是本地持久化的这台服务器历史，仅作上下文参考；涉及当前状态时必须以实时终端输出或工具结果为准。",
           ...sessionContextRef.current
             .slice(-50)
             .map((item) => `[${item.role}] ${item.content}`),
         ]
           .join("\n")
-          .slice(-12000);
+          .slice(-aiSshMemoryCharLimit(currentModel.contextLength));
         const sudoPassword = await invoke<string | null>(
           "load_server_sudo_credential",
           { serverId: server.id },
@@ -5585,9 +6861,11 @@ function InteractiveTerminalPanel({
             apiKey: currentModel.apiKey,
             model: currentModel.model,
             sessionId: sessionRef.current,
+            serverId: server.id,
             prompt,
             approved,
             context,
+            contextLength: currentModel.contextLength,
             sudoPassword,
           },
         });
@@ -5596,6 +6874,7 @@ function InteractiveTerminalPanel({
           command?: string;
           content?: string;
           summary?: string;
+          uiActions?: Array<Record<string, unknown>>;
           executed?: Array<{
             command: string;
             output: string;
@@ -5638,6 +6917,8 @@ function InteractiveTerminalPanel({
           );
           return;
         }
+        for (const action of result.uiActions ?? [])
+          window.dispatchEvent(new CustomEvent("opsnest-ui-action", { detail: action }));
         if (result.status === "approval_required" && result.command) {
           updateWorkStatus("approval", "等待确认执行", false);
           const command = result.command;
@@ -5646,14 +6927,13 @@ function InteractiveTerminalPanel({
             title: `AI-SSH · ${server.name}`,
             detail: `AI 请求确认命令: ${command}`,
           }).catch(() => undefined);
-          const approved = await appConfirm(
-            `AI 请求执行以下命令：\n\n${command}\n\n确认执行？`,
-          );
+          const approved = await requestInlineApproval(command, "ai");
           if (approved) {
             pendingRef.current = null;
             setPendingApproval(null);
             await executeApprovedCommand(command, true);
           } else {
+            updateWorkStatus("stopped", "已取消 AI 命令执行", false);
             finishAiSummary(
               completedMarkers.length > 0,
               completedMarkers.length === 0,
@@ -5679,6 +6959,16 @@ function InteractiveTerminalPanel({
               detail: `$ ${item.command}\n${item.output}`,
             }).catch(() => undefined);
           }
+        if (executedToolCount)
+          void persistAiSshMemory(
+            server,
+            collectAiSshMemory(
+              sessionContextRef.current,
+              aiSshMemoryCharLimit(modelRef.current.contextLength),
+            ),
+            modelRef.current.contextLength,
+            workspaceIdRef.current,
+          );
         const resultFailed = result.status === "error";
         let conclusion = "";
         if (result.content) {
@@ -5686,6 +6976,15 @@ function InteractiveTerminalPanel({
             role: "ai_reply",
             content: result.content,
           });
+          void persistAiSshMemory(
+            server,
+            collectAiSshMemory(
+              sessionContextRef.current,
+              aiSshMemoryCharLimit(modelRef.current.contextLength),
+            ),
+            modelRef.current.contextLength,
+            workspaceIdRef.current,
+          );
           conclusion = formatAiConclusion(
             result.content,
             term.cols,
@@ -5777,16 +7076,19 @@ function InteractiveTerminalPanel({
             apiKey: currentModel.apiKey,
             model: currentModel.model,
             sessionId: sessionRef.current,
+            serverId: server.id,
             prompt: `用户已确认执行命令：${command}。请根据真实终端输出继续回复，不要重复执行该命令。`,
             approved: true,
             approvedCommand: command,
-            context: `服务器：${server.name}；地址：${server.host}:${server.port}；系统：${server.system || "尚未扫描"}`,
+            context: serverAiContext(server),
+            contextLength: currentModel.contextLength,
             sudoPassword,
           },
         });
         const result = JSON.parse(raw) as {
           status?: string;
           content?: string;
+          uiActions?: Array<Record<string, unknown>>;
           executed?: Array<{
             command: string;
             output: string;
@@ -5801,6 +7103,22 @@ function InteractiveTerminalPanel({
         );
         completedMarkers.forEach((marker) => expectedToolMarkers.add(marker));
         if (completedMarkers.length) aiOperationHadTools = true;
+        for (const item of result.executed ?? []) {
+          sessionContextRef.current.push({
+            role: "tool_result",
+            content: `$ ${item.command}\n${item.output}`,
+          });
+        }
+        if (result.executed?.length)
+          void persistAiSshMemory(
+            server,
+            collectAiSshMemory(
+              sessionContextRef.current,
+              aiSshMemoryCharLimit(modelRef.current.contextLength),
+            ),
+            modelRef.current.contextLength,
+            workspaceIdRef.current,
+          );
         if (cancelRequestedRef.current) {
           updateWorkStatus("stopped", "已停止", false);
           finishAiSummary(
@@ -5821,12 +7139,23 @@ function InteractiveTerminalPanel({
           );
           return;
         }
+        for (const action of result.uiActions ?? [])
+          window.dispatchEvent(new CustomEvent("opsnest-ui-action", { detail: action }));
         pendingRef.current = null;
         setPendingApproval(null);
         const resultFailed = result.status === "error";
         let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({ role: "ai_reply", content: result.content });
+          void persistAiSshMemory(
+            server,
+            collectAiSshMemory(
+              sessionContextRef.current,
+              aiSshMemoryCharLimit(modelRef.current.contextLength),
+            ),
+            modelRef.current.contextLength,
+            workspaceIdRef.current,
+          );
           conclusion = formatAiConclusion(
             result.content,
             term.cols,
@@ -6207,7 +7536,8 @@ function InteractiveTerminalPanel({
         approveHandlerRef.current?.(command);
       },
       pendingCommand: () => pendingRef.current,
-      isBusy: () => terminalOperationInFlight,
+      isBusy: () =>
+        terminalOperationInFlight || inlineApprovalResolverRef.current !== null,
       onBusy: () =>
         render("\r\n\x1b[38;5;220mAI is still handling the previous request. Please wait.\x1b[0m\r\n"),
       looksLikeCommand: looksLikeShellCommand,
@@ -6246,10 +7576,7 @@ function InteractiveTerminalPanel({
         }
       },
       isRiskyCommand: isRiskyShellCommand,
-      confirmRisky: (command) =>
-        appConfirm(
-          `此命令可能改变服务器状态：\n\n${command}\n\n确认直接执行？`,
-        ),
+      confirmRisky: (command) => requestInlineApproval(command, "command"),
       onCommand: (command) => {
         sessionContextRef.current.push({
           role: "user_command",
@@ -6284,6 +7611,11 @@ function InteractiveTerminalPanel({
         // The visible prompt is deliberately withheld while OpsNest orders
         // tool output and the AI conclusion. Do not let local keystrokes race
         // a late real prompt and create another same-line collision.
+        return;
+      }
+      if (inlineApprovalResolverRef.current) {
+        // A risky command is awaiting the inline terminal confirmation. Keep
+        // the editable line stable until the user chooses execute/edit/reject.
         return;
       }
       // Bracketed paste delivers the whole clipboard payload in one onData
@@ -6339,6 +7671,11 @@ function InteractiveTerminalPanel({
     };
     const input = term.onData((data) => {
       if (data === "\x03") {
+        if (inlineApprovalResolverRef.current && !rawPtyModeRef.current) {
+          // The inline approval owns the terminal until the user chooses an
+          // action; do not leak Ctrl+C into the remote shell underneath it.
+          return;
+        }
         if (terminalOperationInFlight && !rawPtyModeRef.current) {
           stopHandlerRef.current?.();
           return;
@@ -6390,6 +7727,12 @@ function InteractiveTerminalPanel({
       disposed = true;
       clearFinalizationTimers();
       clearMarkerCarryTimer();
+      const pendingInlineApproval = inlineApprovalResolverRef.current;
+      inlineApprovalResolverRef.current = null;
+      inlineApprovalCommandRef.current = null;
+      inlineApprovalKindRef.current = null;
+      if (pendingInlineApproval) pendingInlineApproval(false);
+      setPendingApproval(null);
       approveHandlerRef.current = null;
       stopHandlerRef.current = null;
       void writeDebugLog("debug", "AI-SSH terminal unmounted", {
@@ -6432,6 +7775,17 @@ function InteractiveTerminalPanel({
     };
   }, [server.id]);
   const approvePending = () => {
+    const inlineResolve = inlineApprovalResolverRef.current;
+    const inlineCommand = inlineApprovalCommandRef.current;
+    if (inlineResolve && inlineCommand) {
+      inlineApprovalResolverRef.current = null;
+      inlineApprovalCommandRef.current = null;
+      inlineApprovalKindRef.current = null;
+      setPendingApproval(null);
+      inlineResolve(true);
+      window.setTimeout(() => termRef.current?.focus(), 0);
+      return;
+    }
     const approvedCommand = pendingRef.current;
     if (!approvedCommand) return;
     pendingRef.current = null;
@@ -6439,6 +7793,21 @@ function InteractiveTerminalPanel({
     approveHandlerRef.current?.(approvedCommand);
   };
   const editPending = () => {
+    const inlineResolve = inlineApprovalResolverRef.current;
+    const inlineCommand = inlineApprovalCommandRef.current;
+    if (inlineResolve && inlineCommand) {
+      inlineApprovalResolverRef.current = null;
+      inlineApprovalCommandRef.current = null;
+      inlineApprovalKindRef.current = null;
+      setPendingApproval(null);
+      inlineResolve(false);
+      inputRef.current = inlineCommand;
+      window.setTimeout(() => {
+        termRef.current?.write(inlineCommand);
+        termRef.current?.focus();
+      }, 0);
+      return;
+    }
     const command = pendingRef.current;
     if (!command) return;
     pendingRef.current = null;
@@ -6448,6 +7817,16 @@ function InteractiveTerminalPanel({
     termRef.current?.focus();
   };
   const rejectPending = () => {
+    const inlineResolve = inlineApprovalResolverRef.current;
+    if (inlineResolve) {
+      inlineApprovalResolverRef.current = null;
+      inlineApprovalCommandRef.current = null;
+      inlineApprovalKindRef.current = null;
+      setPendingApproval(null);
+      inlineResolve(false);
+      window.setTimeout(() => termRef.current?.focus(), 0);
+      return;
+    }
     pendingRef.current = null;
     setPendingApproval(null);
   };
@@ -6475,13 +7854,19 @@ function InteractiveTerminalPanel({
         <div className="interactive-terminal-approval" role="alert">
           <div className="interactive-terminal-approval-title">
             <span className="approval-dot" />
-            AI 请求执行命令
+            {inlineApprovalKindRef.current === "command"
+              ? "确认执行命令"
+              : "AI 请求执行命令"}
           </div>
-          <p>是否同意执行以下命令并查看输出？</p>
+          <p>
+            {inlineApprovalKindRef.current === "command"
+              ? "此命令可能改变服务器状态，是否继续？"
+              : "是否同意执行以下命令并查看输出？"}
+          </p>
           <pre>{pendingApproval}</pre>
           <div className="interactive-terminal-approval-actions">
             <button
-              className="secondary"
+              className="primary"
               type="button"
               onClick={approvePending}
             >
@@ -6520,7 +7905,7 @@ function ServiceDiscoveryPanel({ server }: { server: ServerSummary }) {
           username,
           authMethod: server.authMethod ?? "password",
           password: server.password ?? null,
-          privateKeyPath: null,
+          privateKeyPath: server.privateKeyPath ?? null,
           passphrase: null,
         },
       });
@@ -6529,7 +7914,14 @@ function ServiceDiscoveryPanel({ server }: { server: ServerSummary }) {
     } catch (reason) {
       setState(`扫描失败：${String(reason)}`);
     }
-  }, [server.id]);
+  }, [
+    server.authMethod,
+    server.host,
+    server.id,
+    server.password,
+    server.port,
+    server.privateKeyPath,
+  ]);
   React.useEffect(() => {
     void scan();
   }, [scan]);
@@ -6731,7 +8123,7 @@ function WebServiceDiscoveryPanel({
             username,
             authMethod: server.authMethod ?? "password",
             password: credential ?? null,
-            privateKeyPath: null,
+            privateKeyPath: server.privateKeyPath ?? null,
             passphrase: null,
           },
         },
@@ -6792,7 +8184,15 @@ function WebServiceDiscoveryPanel({
         error: String(reason),
       });
     }
-  }, [server.id, server.password, server.port, hideDocker, onServicesUpdated]);
+  }, [
+    server.authMethod,
+    server.id,
+    server.password,
+    server.port,
+    server.privateKeyPath,
+    hideDocker,
+    onServicesUpdated,
+  ]);
   React.useEffect(() => {
     void scan();
   }, [scan]);
@@ -7074,6 +8474,7 @@ function App() {
     React.useState<AppearancePreferences>(DEFAULT_APPEARANCE);
   const [model, setModel] = React.useState<ModelPreferences>(DEFAULT_MODEL);
   const [servers, setServers] = React.useState<ServerSummary[]>([]);
+  const [iconRefreshKeys, setIconRefreshKeys] = React.useState<Record<string, number>>({});
   const [appearanceLoaded, setAppearanceLoaded] = React.useState(false);
   const [modelLoaded, setModelLoaded] = React.useState(false);
   const [serversLoaded, setServersLoaded] = React.useState(false);
@@ -7092,6 +8493,7 @@ function App() {
   );
   const [confirmRequest, setConfirmRequest] =
     React.useState<AppConfirmRequest | null>(null);
+  const confirmFocusRef = React.useRef<HTMLElement | null>(null);
   const [editingServer, setEditingServer] =
     React.useState<ServerSummary | null>(null);
   const [passwordTarget, setPasswordTarget] =
@@ -7102,18 +8504,92 @@ function App() {
   >(null);
   const [openManagerBottomSignal, setOpenManagerBottomSignal] =
     React.useState(0);
+  const [openBottomPanelSignal, setOpenBottomPanelSignal] = React.useState(0);
   const [openFileManagerSignal, setOpenFileManagerSignal] = React.useState(0);
   const [closeFileManagerSignal, setCloseFileManagerSignal] = React.useState(0);
+  const [editorTabs, setEditorTabs] = React.useState<RemoteEditorTab[]>([]);
+  const [activeEditorTabId, setActiveEditorTabId] = React.useState<string | null>(
+    null,
+  );
+  const [editorPlacement, setEditorPlacement] = React.useState<EditorPlacement | null>(
+    null,
+  );
+  const [editorView, setEditorView] = React.useState<"files" | "editor">("files");
 
   React.useEffect(() => {
-    appConfirmHandler = (message) =>
-      new Promise<boolean>((resolve) =>
-        setConfirmRequest({ message, resolve }),
-      );
+    const handler = (message: string) =>
+      new Promise<boolean>((resolve) => {
+        const activeElement = document.activeElement;
+        confirmFocusRef.current =
+          activeElement instanceof HTMLElement ? activeElement : null;
+        setConfirmRequest({ message, resolve });
+    });
+    appConfirmHandler = handler;
+    const queued = pendingAppConfirms.splice(0);
+    queued.forEach(({ message, resolve }) => {
+      void handler(message).then(resolve);
+    });
     return () => {
-      appConfirmHandler = null;
+      // A dev reload or StrictMode remount can briefly leave an older App
+      // instance cleaning up after the newer one has already registered its
+      // handler. Only clear the global when it still belongs to this App.
+      if (appConfirmHandler === handler) appConfirmHandler = null;
     };
   }, []);
+
+  React.useEffect(() => {
+    const disconnect = (event: Event) => {
+      const serverId = (
+        event as CustomEvent<{ serverId?: string }>
+      ).detail?.serverId;
+      if (!serverId) return;
+      const editorTabsForServer = editorTabs.filter(
+        (tab) => tab.serverId === serverId,
+      );
+      editorTabsForServer.forEach((tab) => clearRemoteEditorDocumentCache(tab.id));
+      if (editorTabsForServer.length > 0) {
+        setEditorTabs((current) =>
+          current.filter((tab) => tab.serverId !== serverId),
+        );
+        if (
+          activeEditorTabId &&
+          editorTabsForServer.some((tab) => tab.id === activeEditorTabId)
+        ) {
+          setActiveEditorTabId(null);
+          setEditorPlacement(null);
+          setEditorView("files");
+        }
+      }
+      // The terminal workspace may not be mounted when the user disconnects
+      // from the navigation context menu. Always release the backend PTY at
+      // the application boundary so a later reconnect cannot hit a stale
+      // session id.
+      intentionallyClosedSessions.add(serverId);
+      void invoke("close_interactive_ssh_terminal", {
+        sessionId: serverId,
+      }).catch(() => undefined);
+    };
+    window.addEventListener("opsnest-disconnect-server", disconnect);
+    return () =>
+      window.removeEventListener("opsnest-disconnect-server", disconnect);
+  }, [activeEditorTabId, editorTabs]);
+
+  const closeConfirmRequest = React.useCallback(
+    (approved: boolean) => {
+      const restoreTarget = confirmFocusRef.current;
+      confirmFocusRef.current = null;
+      confirmRequest?.resolve(approved);
+      setConfirmRequest(null);
+      window.setTimeout(() => {
+        if (restoreTarget?.isConnected) {
+          restoreTarget.focus();
+        } else {
+          window.dispatchEvent(new Event("opsnest-focus-ssh-terminal"));
+        }
+      }, 0);
+    },
+    [confirmRequest],
+  );
 
   React.useEffect(() => {
     let active = true;
@@ -7335,7 +8811,7 @@ function App() {
                 username,
                 authMethod: target.authMethod ?? "password",
                 password,
-                privateKeyPath: null,
+                privateKeyPath: target.privateKeyPath ?? null,
                 passphrase: null,
               },
             });
@@ -7346,6 +8822,8 @@ function App() {
                   : item,
               ),
             );
+            // “连接” only verifies reachability and credentials. Opening an
+            // interactive PTY belongs to the separate SSH context-menu action.
             void writeDebugLog("info", "SSH connection verified", {
               serverId: id,
             });
@@ -7478,10 +8956,103 @@ function App() {
       0,
     );
   };
-  const openServerFiles = (id: string) => {
+  const openServerFiles = React.useCallback((id: string) => {
     if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
+    setEditorView("files");
     setOpenFileManagerSignal((value) => value + 1);
-  };
+  }, [navigate, selectedMenu]);
+  const openRemoteEditor = React.useCallback(
+    (
+      serverId: string,
+      path: string,
+      name: string,
+      placement: EditorPlacement = "right",
+    ) => {
+      const id = `${serverId}:${path}`;
+      // Keep one editor document inside the server-level Files tab. The
+      // file manager remains the place for browsing and opening another file.
+      setEditorTabs([{ id, serverId, path, name }]);
+      setActiveEditorTabId(id);
+      setEditorPlacement(placement);
+      setEditorView("editor");
+      if (selectedMenu !== `server-${serverId}`) navigate(`server-${serverId}`);
+      if (placement === "bottom")
+        setOpenBottomPanelSignal((value) => value + 1);
+      else setOpenFileManagerSignal((value) => value + 1);
+    },
+    [navigate, selectedMenu],
+  );
+  React.useEffect(() => {
+    const handleUiAction = (event: Event) => {
+      const action = (event as CustomEvent<Record<string, unknown>>).detail;
+      const serverId = typeof action?.serverId === "string" ? action.serverId : "";
+      if (!serverId || !servers.some((item) => item.id === serverId)) return;
+      if (action.type === "open_file_manager") {
+        openServerFiles(serverId);
+        return;
+      }
+      if (action.type !== "open_file_editor" || typeof action.path !== "string") return;
+      const path = action.path.trim();
+      if (!path) return;
+      const name = typeof action.name === "string" && action.name.trim()
+        ? action.name.trim()
+        : path.split(/[\\/]/).pop() || path;
+      const placement = action.placement === "bottom" ? "bottom" : "right";
+      openRemoteEditor(serverId, path, name, placement);
+    };
+    window.addEventListener("opsnest-ui-action", handleUiAction);
+    return () => window.removeEventListener("opsnest-ui-action", handleUiAction);
+  }, [openRemoteEditor, openServerFiles, servers]);
+  const closeRemoteEditor = React.useCallback(
+    (id: string, dirty: boolean) => {
+      void (async () => {
+        if (
+          dirty &&
+          !(await appConfirm(
+            appearance.language === "en"
+              ? "This file has unsaved changes. Close it anyway?"
+              : "文件有未保存的修改，确定关闭吗？",
+          ))
+        )
+          return;
+        const next = editorTabs.filter((tab) => tab.id !== id);
+        clearRemoteEditorDocumentCache(id);
+        setEditorTabs(next);
+        if (activeEditorTabId === id) {
+          const fallbackTab = next[0];
+          setActiveEditorTabId(fallbackTab?.id ?? null);
+          if (!fallbackTab) {
+            setEditorPlacement(null);
+            setEditorView("files");
+          }
+          else if (selectedMenu !== `server-${fallbackTab.serverId}`)
+            navigate(`server-${fallbackTab.serverId}`);
+        }
+      })();
+    },
+    [activeEditorTabId, appearance.language, editorTabs, navigate, selectedMenu],
+  );
+  const activeEditorTab = editorTabs.find((tab) => tab.id === activeEditorTabId);
+  const activeEditorServer = activeEditorTab
+    ? servers.find((item) => item.id === activeEditorTab.serverId)
+    : undefined;
+  const moveEditor = React.useCallback((placement: EditorPlacement) => {
+    setEditorPlacement(placement);
+    setEditorView("editor");
+    if (placement === "bottom")
+      setOpenBottomPanelSignal((value) => value + 1);
+    else {
+      setOpenFileManagerSignal((value) => value + 1);
+      // The editor is moving out of the bottom workspace. Hide that panel so
+      // its SSH/editor tab strip cannot remain mounted as a stale duplicate.
+      window.dispatchEvent(new Event("opsnest-close-ssh"));
+    }
+  }, []);
+  const backToFiles = React.useCallback(() => setEditorView("files"), []);
+  const selectEditorView = React.useCallback((placement: EditorPlacement) => {
+    setEditorPlacement(placement);
+    setEditorView("editor");
+  }, []);
   const closeEmptyFileManager = React.useCallback(
     () => setCloseFileManagerSignal((value) => value + 1),
     [],
@@ -7526,6 +9097,10 @@ function App() {
     server: ServerSummary,
     passwordOverride?: string,
   ) => {
+    setIconRefreshKeys((current) => ({
+      ...current,
+      [server.id]: (current[server.id] ?? 0) + 1,
+    }));
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
     const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -7548,7 +9123,7 @@ function App() {
           username,
           authMethod: server.authMethod ?? "password",
           password: password ?? null,
-          privateKeyPath: null,
+          privateKeyPath: server.privateKeyPath ?? null,
           passphrase: null,
         },
       });
@@ -7706,6 +9281,9 @@ function App() {
             onTogglePin={toggleServerPin}
             onRename={(id) => navigate(`__edit:${id}`)}
             onOpenSsh={(id) => {
+              // Selecting SSH from the navigation must take focus away from
+              // a bottom editor while preserving its tab for later return.
+              setEditorView("files");
               navigate(`server-${id}`);
               window.setTimeout(
                 () =>
@@ -7725,6 +9303,8 @@ function App() {
               language={appearance.language}
               servers={servers}
               onSelect={navigate}
+              onOpenFiles={openServerFiles}
+              onOpenEditor={openRemoteEditor}
               onConfigureModel={openModelSettings}
               onServerAdded={handleConversationalServerAdded}
               debugLogging={appearance.debugLogging}
@@ -7757,12 +9337,37 @@ function App() {
         }
         right={
           selectedServer ? (
-            <FileManagerPanel
-              server={selectedServer}
-              servers={servers}
-              openSignal={openFileManagerSignal}
-              onEmpty={closeEmptyFileManager}
-            />
+            <div className="workspace-view-stack">
+              <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" && activeEditorServer?.id === selectedServer.id ? "is-hidden" : "is-active"}`}>
+                <FileManagerPanel
+                  server={selectedServer}
+                  servers={servers}
+                  openSignal={openFileManagerSignal}
+                  onEmpty={closeEmptyFileManager}
+                  onOpenEditor={openRemoteEditor}
+                  onConnectionState={updateConnectionState}
+                   editorTab={editorPlacement === "right" ? activeEditorTab : null}
+                   editorActive={editorView === "editor" && editorPlacement === "right"}
+                   onSelectEditor={() => selectEditorView("right")}
+                />
+              </div>
+              {activeEditorServer?.id === selectedServer.id && activeEditorTab && (
+                <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" ? "is-active" : "is-hidden"}`}>
+                  <RemoteEditorPanel
+                    language={appearance.language}
+                    server={selectedServer}
+                    tabs={editorTabs}
+                    activeTabId={activeEditorTabId}
+                    placement={editorPlacement ?? "right"}
+                    showTabs={editorPlacement === "right"}
+                    onConnectionState={updateConnectionState}
+                    onCloseTab={closeRemoteEditor}
+                    onBackToFiles={backToFiles}
+                    onMove={moveEditor}
+                  />
+                </div>
+              )}
+            </div>
           ) : (
             <EmptySlot
               label={isEnglish ? "Side panel reserved" : "侧栏功能暂未规划"}
@@ -7792,6 +9397,7 @@ function App() {
                 <RouterServerHome
                   language={appearance.language}
                   server={selectedServer}
+                  iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
@@ -7802,6 +9408,7 @@ function App() {
                 <NasServerHome
                   language={appearance.language}
                   server={selectedServer}
+                  iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
@@ -7812,6 +9419,7 @@ function App() {
                   language={appearance.language}
                   server={selectedServer}
                   model={model}
+                  iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
@@ -7829,6 +9437,7 @@ function App() {
                 onOpenTerminal={openServerTerminal}
                 onOpenFiles={openServerFiles}
                 servers={servers}
+                iconRefreshKeys={iconRefreshKeys}
                 aiConfigured={Boolean(model.baseUrl.trim())}
               />
             ),
@@ -7843,7 +9452,7 @@ function App() {
           Boolean(forwardSettings) || forwardHistory.length > 0
         }
         onSettingsClosed={handleSettingsClosed}
-        openBottomSignal={openManagerBottomSignal}
+        openBottomSignal={openManagerBottomSignal + openBottomPanelSignal}
         openRightSignal={openFileManagerSignal}
         closeRightSignal={closeFileManagerSignal}
         bottomRouteKey={selectedMenu}
@@ -7853,6 +9462,8 @@ function App() {
               language={appearance.language}
               servers={servers}
               onSelect={navigate}
+              onOpenFiles={openServerFiles}
+              onOpenEditor={openRemoteEditor}
               onConfigureModel={openModelSettings}
               onServerAdded={handleConversationalServerAdded}
               debugLogging={appearance.debugLogging}
@@ -7863,6 +9474,21 @@ function App() {
               server={selectedServer}
               servers={servers}
               model={model}
+              onConnectionState={updateConnectionState}
+              editorTab={
+                editorPlacement === "bottom" && activeEditorServer?.id === selectedServer.id
+                  ? activeEditorTab
+                  : null
+              }
+              editorActive={
+                editorPlacement === "bottom" &&
+                editorView === "editor" &&
+                activeEditorServer?.id === selectedServer.id &&
+                Boolean(activeEditorTab)
+              }
+              onSelectEditor={() => selectEditorView("bottom")}
+              onSelectTerminal={() => setEditorView("files")}
+              onCloseEditor={() => window.dispatchEvent(new Event("opsnest-close-active-editor"))}
             />
           ) : (
             <EmptySlot
@@ -7979,20 +9605,14 @@ function App() {
               <button
                 className="secondary"
                 type="button"
-                onClick={() => {
-                  confirmRequest.resolve(false);
-                  setConfirmRequest(null);
-                }}
+                onClick={() => closeConfirmRequest(false)}
               >
                 取消
               </button>
               <button
                 className="primary"
                 type="button"
-                onClick={() => {
-                  confirmRequest.resolve(true);
-                  setConfirmRequest(null);
-                }}
+                onClick={() => closeConfirmRequest(true)}
               >
                 确定
               </button>

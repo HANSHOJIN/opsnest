@@ -10,6 +10,7 @@ mod file_manager;
 mod ssh_scan;
 mod ssh_session;
 mod tools;
+mod workspace;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -108,7 +109,7 @@ fn portable_data_dir() -> Result<PathBuf, String> {
 fn portable_file_path(file_name: &str) -> Result<PathBuf, String> {
     let path = Path::new(file_name);
     let valid_name = path.file_name().and_then(|value| value.to_str()) == Some(file_name)
-        && file_name.ends_with(".json")
+        && (file_name.ends_with(".json") || file_name.ends_with(".md"))
         && !file_name.is_empty();
     if !valid_name {
         return Err("invalid portable data filename".to_string());
@@ -133,6 +134,25 @@ fn write_portable_json(file_name: String, content: String) -> Result<(), String>
     }
     let path = portable_file_path(&file_name)?;
     fs::write(path, content).map_err(|error| format!("unable to write portable data: {error}"))
+}
+
+#[tauri::command]
+fn read_portable_text(file_name: String) -> Result<Option<String>, String> {
+    let path = portable_file_path(&file_name)?;
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("unable to read portable text: {error}")),
+    }
+}
+
+#[tauri::command]
+fn write_portable_text(file_name: String, content: String) -> Result<(), String> {
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("portable text file is too large".to_string());
+    }
+    let path = portable_file_path(&file_name)?;
+    fs::write(path, content).map_err(|error| format!("unable to write portable text: {error}"))
 }
 
 fn credential_entry(server_id: &str) -> Result<keyring::Entry, String> {
@@ -334,6 +354,7 @@ async fn test_model_connection(
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| format!("unable to create HTTP client: {error}"))?;
+    let context_length = discover_model_context_length(&client, base_url, &api_key, model).await;
     let mut request =
         client
             .post(format!("{base_url}/chat/completions"))
@@ -376,7 +397,96 @@ async fn test_model_connection(
         "model connection test succeeded".to_string(),
         Some(format!("model={}", model)),
     );
-    Ok("Connection successful".to_string())
+    Ok(serde_json::json!({
+        "message": "Connection successful",
+        "contextLength": context_length,
+    })
+    .to_string())
+}
+
+fn positive_u64(value: &Value) -> Option<u64> {
+    if let Some(number) = value.as_u64() {
+        return (number > 0).then_some(number);
+    }
+    let raw = value.as_str()?.trim().to_ascii_lowercase();
+    let (number, multiplier) = if let Some(value) = raw.strip_suffix('k') {
+        (value.trim().parse::<f64>().ok()?, 1_000f64)
+    } else if let Some(value) = raw.strip_suffix('m') {
+        (value.trim().parse::<f64>().ok()?, 1_000_000f64)
+    } else {
+        (raw.parse::<f64>().ok()?, 1f64)
+    };
+    let result = (number * multiplier).round() as u64;
+    (result > 0).then_some(result)
+}
+
+fn find_context_length(value: &Value) -> Option<u64> {
+    const KEYS: &[&str] = &[
+        "context_length",
+        "contextLength",
+        "max_context_length",
+        "maxContextLength",
+        "max_model_len",
+        "maxModelLen",
+        "context_window",
+        "contextWindow",
+        "n_ctx",
+        "num_ctx",
+    ];
+    if let Some(object) = value.as_object() {
+        for key in KEYS {
+            if let Some(length) = object.get(*key).and_then(positive_u64) {
+                return Some(length);
+            }
+        }
+        for child in object.values() {
+            if let Some(length) = find_context_length(child) {
+                return Some(length);
+            }
+        }
+    } else if let Some(items) = value.as_array() {
+        for child in items {
+            if let Some(length) = find_context_length(child) {
+                return Some(length);
+            }
+        }
+    }
+    None
+}
+
+async fn discover_model_context_length(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+) -> Option<u64> {
+    let mut request = client.get(format!("{base_url}/models"));
+    if !api_key.trim().is_empty() {
+        request = request.bearer_auth(api_key.trim());
+    }
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), request.send())
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let payload = tokio::time::timeout(std::time::Duration::from_secs(5), response.json::<Value>())
+        .await
+        .ok()?
+        .ok()?;
+    let data = payload.get("data").unwrap_or(&payload);
+    if let Some(items) = data.as_array() {
+        if let Some(item) = items.iter().find(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == model)
+        }) {
+            return find_context_length(item);
+        }
+        return items.iter().find_map(find_context_length);
+    }
+    find_context_length(data)
 }
 
 #[tauri::command]
@@ -446,6 +556,8 @@ pub fn run() {
             resolve_service_url,
             read_portable_json,
             write_portable_json,
+            read_portable_text,
+            write_portable_text,
             save_server_credential,
             load_server_credential,
             delete_server_credential,
@@ -476,11 +588,22 @@ pub fn run() {
             read_debug_log,
             clear_debug_log,
             file_manager::list_local_directory,
+            file_manager::rename_local_file,
+            file_manager::delete_local_file,
             file_manager::list_remote_directory,
+            file_manager::read_remote_text_file,
+            file_manager::write_remote_text_file,
+            file_manager::rename_remote_file,
+            file_manager::delete_remote_file,
             file_manager::download_remote_file,
             file_manager::upload_remote_file,
             file_manager::read_local_file_base64,
-            file_manager::write_local_file_base64
+            file_manager::write_local_file_base64,
+            workspace::ensure_workspace,
+            workspace::list_workspace_directory,
+            workspace::read_workspace_text,
+            workspace::write_workspace_text,
+            workspace::delete_workspace_file
         ])
         .setup(|app| {
             let show_item = MenuItem::with_id(app, "show", "Show OpsNest", true, None::<&str>)?;

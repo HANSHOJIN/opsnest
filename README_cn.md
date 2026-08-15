@@ -39,6 +39,7 @@ OpsNest，顾名思义，就是“运维小窝”。是一款集中管理您拥�
 ## 特别感谢
 
 - [CodexShell](https://github.com/HANSHOJIN/codex-shell)：提供 UI 界面外壳。
+- [CodeMirror](https://codemirror.net/)（[源码仓库](https://github.com/codemirror/dev)）：提供文件编辑器核心，以及多种编程语言的语法支持模块。
 - 内核及基础技术：感谢 [Tauri](https://tauri.app/)、[Rust](https://www.rust-lang.org/)、[React](https://react.dev/)、[TypeScript](https://www.typescriptlang.org/)、[Vite](https://vite.dev/)、[xterm.js](https://xtermjs.org/)、[russh](https://github.com/warp-tech/russh) 等开源项目和社区。
 
 ## 推荐免费 AI 部署软件

@@ -123,9 +123,14 @@ pub struct AiSshRequest {
     pub api_key: String,
     pub model: String,
     pub session_id: String,
+    /// Stable OpsNest server id used when an AI tool needs to request a UI
+    /// action for the same server. It is never used as an SSH credential.
+    pub server_id: Option<String>,
     pub prompt: String,
     pub approved: bool,
     pub context: Option<String>,
+    /// Model context window in tokens, discovered by the model connection test.
+    pub context_length: Option<u64>,
     /// Kept outside model messages. This is read from the local system
     /// credential store only when the user configured optional sudo access.
     pub sudo_password: Option<String>,
@@ -133,6 +138,20 @@ pub struct AiSshRequest {
     /// backend executes this exact command once, then asks the model to
     /// interpret the real terminal result instead of starting a second plan.
     pub approved_command: Option<String>,
+}
+
+const FALLBACK_AI_CONTEXT_TOKENS: usize = 32_000;
+const MIN_AI_CONTEXT_CHARS: usize = 12_000;
+const MAX_AI_CONTEXT_CHARS: usize = 1_500_000;
+
+fn ai_context_max_chars(context_length: Option<u64>) -> usize {
+    let tokens = context_length
+        .filter(|value| *value > 0)
+        .map(|value| value.min(usize::MAX as u64) as usize)
+        .unwrap_or(FALLBACK_AI_CONTEXT_TOKENS);
+    tokens
+        .saturating_mul(3)
+        .clamp(MIN_AI_CONTEXT_CHARS, MAX_AI_CONTEXT_CHARS)
 }
 
 fn summarize_execution(executed: &[Value]) -> String {
@@ -191,6 +210,8 @@ fn summarize_execution(executed: &[Value]) -> String {
 const MAX_LIST_ENTRIES: usize = 200;
 const DEFAULT_READ_BYTES: usize = 32 * 1024;
 const MAX_READ_BYTES: usize = 64 * 1024;
+const DEFAULT_WORKSPACE_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_DOWNLOAD_BYTES: usize = 8 * 1024 * 1024;
 
 /// Execute a read-only model tool without touching the interactive PTY. The
 /// existing terminal session supplies the credentials locally; only the
@@ -282,7 +303,148 @@ async fn execute_read_only_tool(
             remember_service_discovery(session_id, output.clone());
             Ok(("discover_services".to_string(), output))
         }
+        ToolKind::WorkspaceListFiles => {
+            let path = arguments.get("path").and_then(Value::as_str);
+            let (info, entries) = crate::workspace::list_workspace_files(session_id, path)?;
+            let truncated = entries.len() > MAX_LIST_ENTRIES;
+            let entries = entries
+                .into_iter()
+                .take(MAX_LIST_ENTRIES)
+                .collect::<Vec<_>>();
+            let output = serde_json::to_string(&serde_json::json!({
+                "workspaceId": info.workspace_id,
+                "root": info.root,
+                "path": path.unwrap_or(""),
+                "entries": entries,
+                "truncated": truncated,
+                "limit": MAX_LIST_ENTRIES
+            }))
+            .map_err(|error| format!("failed to encode workspace_list_files result: {error}"))?;
+            Ok(("workspace_list_files".to_string(), output))
+        }
+        ToolKind::WorkspaceReadFile => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "workspace_read_file path is required".to_string())?
+                .trim();
+            if path.is_empty() {
+                return Err("workspace_read_file path must not be empty".to_string());
+            }
+            let max_bytes = match arguments.get("max_bytes").and_then(Value::as_u64) {
+                Some(value) if (1..=MAX_READ_BYTES as u64).contains(&value) => value as usize,
+                Some(_) => {
+                    return Err(format!(
+                        "workspace_read_file max_bytes must be between 1 and {MAX_READ_BYTES}"
+                    ));
+                }
+                None => DEFAULT_READ_BYTES,
+            };
+            let content =
+                crate::workspace::read_workspace_text(session_id.to_string(), path.to_string())?
+                    .ok_or_else(|| "workspace file does not exist".to_string())?;
+            if content.as_bytes().len() > max_bytes {
+                return Err(format!(
+                    "workspace file exceeds the {max_bytes}-byte read limit"
+                ));
+            }
+            let output = serde_json::to_string(&serde_json::json!({
+                "path": path,
+                "content": content,
+                "maxBytes": max_bytes
+            }))
+            .map_err(|error| format!("failed to encode workspace_read_file result: {error}"))?;
+            Ok((format!("workspace_read_file {path}"), output))
+        }
+        ToolKind::WorkspaceWriteFile => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "workspace_write_file path is required".to_string())?
+                .trim();
+            let content = arguments
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "workspace_write_file content is required".to_string())?;
+            if path.is_empty() {
+                return Err("workspace_write_file path must not be empty".to_string());
+            }
+            crate::workspace::write_workspace_text(
+                session_id.to_string(),
+                path.to_string(),
+                content.to_string(),
+            )?;
+            let output = serde_json::to_string(&serde_json::json!({
+                "written": true,
+                "path": path,
+                "bytes": content.as_bytes().len(),
+                "location": "local_workspace"
+            }))
+            .map_err(|error| format!("failed to encode workspace_write_file result: {error}"))?;
+            Ok((format!("workspace_write_file {path}"), output))
+        }
+        ToolKind::WorkspaceDeleteFile => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "workspace_delete_file path is required".to_string())?
+                .trim();
+            if path.is_empty() {
+                return Err("workspace_delete_file path must not be empty".to_string());
+            }
+            crate::workspace::delete_workspace_file(session_id.to_string(), path.to_string())?;
+            let output = serde_json::to_string(&serde_json::json!({
+                "deleted": true,
+                "path": path,
+                "location": "local_workspace"
+            }))
+            .map_err(|error| format!("failed to encode workspace_delete_file result: {error}"))?;
+            Ok((format!("workspace_delete_file {path}"), output))
+        }
+        ToolKind::DownloadToWorkspace => {
+            let remote_path = arguments
+                .get("remote_path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "download_to_workspace remote_path is required".to_string())?
+                .trim();
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "download_to_workspace path is required".to_string())?
+                .trim();
+            if remote_path.is_empty() || path.is_empty() {
+                return Err("download_to_workspace paths must not be empty".to_string());
+            }
+            let max_bytes = match arguments.get("max_bytes").and_then(Value::as_u64) {
+                Some(value) if (1..=MAX_WORKSPACE_DOWNLOAD_BYTES as u64).contains(&value) => {
+                    value as usize
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "download_to_workspace max_bytes must be between 1 and {MAX_WORKSPACE_DOWNLOAD_BYTES}"
+                    ));
+                }
+                None => DEFAULT_WORKSPACE_DOWNLOAD_BYTES,
+            };
+            let data = file_manager::read_remote_bytes(&request, remote_path, max_bytes).await?;
+            crate::workspace::write_workspace_bytes(session_id, path, &data)?;
+            let output = serde_json::to_string(&serde_json::json!({
+                "downloaded": true,
+                "remotePath": remote_path,
+                "path": path,
+                "bytes": data.len(),
+                "location": "local_workspace"
+            }))
+            .map_err(|error| format!("failed to encode download_to_workspace result: {error}"))?;
+            Ok((
+                format!("download_to_workspace {remote_path} -> {path}"),
+                output,
+            ))
+        }
         ToolKind::RunCommand => Err("run_command is not a read-only tool".to_string()),
+        ToolKind::OpenFileManager | ToolKind::OpenFileEditor => {
+            Err("OpsNest UI tools use the UI action executor".to_string())
+        }
     }
 }
 
@@ -430,8 +592,10 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     };
     let mut workflow = AgentTurn::start(cancellation_generation);
     record_agent_phase(&request.session_id, &workflow);
-    let board_context = ssh_session::session_context(&request.session_id, 12000);
-    let conversation_history = ssh_session::conversation_history(&request.session_id, 12000);
+    let context_max_chars = ai_context_max_chars(request.context_length);
+    let board_context = ssh_session::session_context(&request.session_id, context_max_chars);
+    let conversation_history =
+        ssh_session::conversation_history(&request.session_id, context_max_chars);
     let _ = ssh_session::record_session_event(
         &request.session_id,
         "user_message",
@@ -442,7 +606,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let context = request
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
-    let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。回答长度规则：默认先给结论，控制在 3-6 行或不超过 5 个要点；成功执行后只报告结果、异常和必要的下一步，不复述原始终端输出，不写背景教程、长篇风险清单或多个备选方案。只有用户明确要求详细解释、教程或完整排障步骤时才展开。");
+    let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n当前会话同时绑定了一个 OpsNest 本地 workspace（工作区）。它位于用户电脑上，与远程服务器文件系统分离；需要保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file、workspace_delete_file 或 download_to_workspace。用户说“保存到 workspace/工作区/本地”时，必须使用这些本地工具，不要通过 run_command 在远程创建同名工作目录；但用户明确指定远程路径，或任务确实需要在远程服务器准备工作目录时，仍可使用远程工具。\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。用户明确要求打开 OpsNest 文件管理器或查看刚才修改的远程文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor；这些工具只改变 OpsNest 界面，不读取或修改远程文件。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。回答长度规则：默认先给结论，控制在 3-6 行或不超过 5 个要点；成功执行后只报告结果、异常和必要的下一步，不复述原始终端输出，不写背景教程、长篇风险清单或多个备选方案。只有用户明确要求详细解释、教程或完整排障步骤时才展开。");
     let system = format!("{system}\n共享终端黑板（最近事件）：\n{board_context}\n");
     // The PTY output is already visible in the xterm surface. Keep replies
     // focused on interpretation and next steps instead of copying a full
@@ -474,6 +638,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         .map(ToOwned::to_owned);
     let mut approved_for_this_turn = request.approved;
     let mut executed = Vec::new();
+    let mut ui_actions = Vec::new();
     if let Some(command) = approved_followup.as_deref() {
         workflow.tool_requested(true);
         workflow.approval_granted();
@@ -557,7 +722,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 return Ok(serde_json::json!({
                     "status": "error",
                     "content": format!("AI 请求失败，重试后仍未恢复：{error}"),
-                    "executed": executed
+                    "executed": executed,
+                    "uiActions": ui_actions
                 })
                 .to_string());
             }
@@ -596,6 +762,48 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 .and_then(Value::as_str)
                 .and_then(|value| serde_json::from_str::<Value>(value).ok())
                 .unwrap_or_default();
+            if matches!(
+                tool_kind,
+                ToolKind::OpenFileManager | ToolKind::OpenFileEditor
+            ) {
+                workflow.tool_requested(false);
+                record_agent_phase(&request.session_id, &workflow);
+                let tool_call_id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("opsnest-call")
+                    .to_string();
+                let (display, output, action) = match execute_opsnest_ui_tool(
+                    tool_kind,
+                    &arguments,
+                    request.server_id.as_deref(),
+                ) {
+                    Ok(result) => result,
+                    Err(error) => (
+                        tool_name.to_string(),
+                        format!("__OPSNEST_UI_ERROR__{error}"),
+                        Value::Null,
+                    ),
+                };
+                if !action.is_null() {
+                    ui_actions.push(action);
+                }
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_tool_result",
+                    format!("工具：{}\n结果：{}", display, output),
+                );
+                workflow.tool_completed();
+                record_agent_phase(&request.session_id, &workflow);
+                messages.push(message);
+                messages.push(serde_json::json!({
+                    "role":"tool",
+                    "tool_call_id":tool_call_id,
+                    "content":output
+                }));
+                approved_for_this_turn = false;
+                continue;
+            }
             if tool_kind != ToolKind::RunCommand {
                 workflow.tool_requested(false);
                 record_agent_phase(&request.session_id, &workflow);
@@ -617,6 +825,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                             ToolKind::ListFiles => "list_files".to_string(),
                             ToolKind::ReadFile => "read_file".to_string(),
                             ToolKind::DiscoverServices => "discover_services".to_string(),
+                            ToolKind::OpenFileManager => "opsnest_open_file_manager".to_string(),
+                            ToolKind::OpenFileEditor => "opsnest_open_file_editor".to_string(),
+                            ToolKind::WorkspaceListFiles => "workspace_list_files".to_string(),
+                            ToolKind::WorkspaceReadFile => "workspace_read_file".to_string(),
+                            ToolKind::WorkspaceWriteFile => "workspace_write_file".to_string(),
+                            ToolKind::WorkspaceDeleteFile => "workspace_delete_file".to_string(),
+                            ToolKind::DownloadToWorkspace => "download_to_workspace".to_string(),
                             ToolKind::RunCommand => "run_command".to_string(),
                         };
                         (display, format!("__OPSNEST_READONLY_ERROR__{error}"))
@@ -794,17 +1009,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         let summary = summarize_execution(&executed);
         workflow.complete();
         record_agent_phase(&request.session_id, &workflow);
-        return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
+        return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed,"uiActions":ui_actions}).to_string());
     }
     if recovery_attempts > 0 {
         workflow.fail();
         record_agent_phase(&request.session_id, &workflow);
         let summary = summarize_execution(&executed);
-        return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed}).to_string());
+        return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed,"uiActions":ui_actions}).to_string());
     }
     workflow.fail();
     record_agent_phase(&request.session_id, &workflow);
-    Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed}).to_string())
+    Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed,"uiActions":ui_actions}).to_string())
 }
 
 fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
@@ -918,6 +1133,75 @@ fn is_read_only_command(command: &str) -> bool {
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .all(|part| read_only.iter().any(|prefix| part.starts_with(prefix)))
+}
+
+fn execute_opsnest_ui_tool(
+    kind: ToolKind,
+    arguments: &Value,
+    server_id: Option<&str>,
+) -> Result<(String, String, Value), String> {
+    let server_id = server_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "当前 AI-SSH 会话没有可定位的 OpsNest 服务器".to_string())?;
+    match kind {
+        ToolKind::OpenFileManager => {
+            let action = serde_json::json!({
+                "type": "open_file_manager",
+                "serverId": server_id,
+            });
+            Ok((
+                "opsnest_open_file_manager".to_string(),
+                serde_json::to_string(&serde_json::json!({
+                    "accepted": true,
+                    "action": action,
+                }))
+                .map_err(|error| error.to_string())?,
+                action,
+            ))
+        }
+        ToolKind::OpenFileEditor => {
+            let path = arguments
+                .get("path")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "opsnest_open_file_editor path is required".to_string())?;
+            if path.contains('\0') {
+                return Err("opsnest_open_file_editor path is invalid".to_string());
+            }
+            let placement = match arguments
+                .get("placement")
+                .and_then(Value::as_str)
+                .unwrap_or("right")
+            {
+                "bottom" => "bottom",
+                _ => "right",
+            };
+            let name = path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(path);
+            let action = serde_json::json!({
+                "type": "open_file_editor",
+                "serverId": server_id,
+                "path": path,
+                "name": name,
+                "placement": placement,
+            });
+            Ok((
+                "opsnest_open_file_editor".to_string(),
+                serde_json::to_string(&serde_json::json!({
+                    "accepted": true,
+                    "action": action,
+                }))
+                .map_err(|error| error.to_string())?,
+                action,
+            ))
+        }
+        _ => Err("requested tool is not an OpsNest UI tool".to_string()),
+    }
 }
 
 #[cfg(test)]

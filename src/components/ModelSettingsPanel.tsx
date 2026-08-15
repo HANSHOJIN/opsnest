@@ -7,6 +7,7 @@ type ModelPreferences = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  contextLength?: number;
 };
 
 export function ModelSettingsPanel({ value, onChange }: { value: ModelPreferences; onChange: (next: ModelPreferences) => void }) {
@@ -22,9 +23,18 @@ export function ModelSettingsPanel({ value, onChange }: { value: ModelPreference
     setMessage(null);
     void writeDebugLog("info", "model connection test requested", { endpoint: value.baseUrl, model: value.model });
     try {
-      const result = await invoke<string>("test_model_connection", { baseUrl: value.baseUrl, apiKey: value.apiKey, model: value.model });
-      setMessage(result);
-      void writeDebugLog("info", "model connection test completed", { endpoint: value.baseUrl, model: value.model });
+      const raw = await invoke<string>("test_model_connection", { baseUrl: value.baseUrl, apiKey: value.apiKey, model: value.model });
+      let result: { message?: string; contextLength?: number | null } | null = null;
+      try { result = JSON.parse(raw) as { message?: string; contextLength?: number | null }; } catch { /* legacy backend response */ }
+      const messageText = result?.message ?? raw;
+      const contextLength = result?.contextLength;
+      if (typeof contextLength === "number" && Number.isFinite(contextLength) && contextLength > 0) {
+        onChange({ ...value, contextLength: Math.floor(contextLength) });
+        setMessage(`${messageText} · 上下文约 ${Math.round(contextLength / 1000)}K tokens`);
+      } else {
+        setMessage(`${messageText} · 未返回上下文长度，将使用回退值`);
+      }
+      void writeDebugLog("info", "model connection test completed", { endpoint: value.baseUrl, model: value.model, contextLength: contextLength ?? null });
     } catch (error) {
       setMessage(String(error));
       void writeDebugLog("error", "model connection test failed", { endpoint: value.baseUrl, model: value.model, error: String(error) });
@@ -61,7 +71,7 @@ export function ModelSettingsPanel({ value, onChange }: { value: ModelPreference
         <label className="model-field"><span>API Key</span><input type="password" value={value.apiKey} onChange={(event) => update("apiKey", event.target.value)} placeholder="输入 API Key" /></label>
         <label className="model-field"><span>模型名称（暂不支持添加多个模型）</span><div className="model-name-row"><input value={value.model} onChange={(event) => update("model", event.target.value)} placeholder="例如：gpt-4o-mini" />{models.length > 0 && <select value={models.includes(value.model) ? value.model : ""} onChange={(event) => update("model", event.target.value)} aria-label="选择已拉取的模型"><option value="">选择模型</option>{models.map((name) => <option value={name} key={name}>{name}</option>)}</select>}</div></label>
         {models.length > 0 && <div className="model-picker"><button className="model-picker-trigger" type="button" onClick={() => setModelMenuOpen((open) => !open)} aria-expanded={modelMenuOpen}>{value.model || "选择模型"}<span>⌄</span></button>{modelMenuOpen && <div className="model-picker-menu" role="listbox">{models.map((name) => <button type="button" role="option" aria-selected={value.model === name} key={name} onClick={() => { update("model", name); setModelMenuOpen(false); }}>{name}</button>)}</div>}</div>}
-        {message && <p className={"model-test-message " + (message === "Connection successful" || saved ? "is-success" : "is-error")}>{message}</p>}
+        {message && <p className={"model-test-message " + ((message.includes("Connection successful") || saved) ? "is-success" : "is-error")}>{message}</p>}
         <div className="model-actions"><button className="secondary" type="button" onClick={() => void fetchModels()} disabled={fetching}>{fetching ? "拉取中…" : "拉取模型名称"}</button><button className="secondary" type="button" onClick={() => void testConnection()} disabled={testing}>{testing ? "测试中…" : "测试连接"}</button><button className="primary" type="button">保存模型</button></div>
       </section>
     </div>

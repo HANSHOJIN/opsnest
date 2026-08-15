@@ -27,3 +27,91 @@ export async function writePortableJson(fileName: string, value: unknown): Promi
     throw error;
   }
 }
+
+export async function readPortableText(fileName: string, fallback = ""): Promise<string> {
+  try {
+    return (await invoke<string | null>("read_portable_text", { fileName })) ?? fallback;
+  } catch (error) {
+    void writeDebugLog("warn", "portable text read failed", { fileName, error: String(error) });
+    return fallback;
+  }
+}
+
+export async function writePortableText(fileName: string, content: string): Promise<void> {
+  try {
+    await invoke("write_portable_text", { fileName, content });
+  } catch (error) {
+    void writeDebugLog("warn", "portable text write failed", { fileName, error: String(error) });
+    throw error;
+  }
+}
+
+export type WorkspaceInfo = {
+  workspaceId: string;
+  root: string;
+  drafts: string;
+  snapshots: string;
+  artifacts: string;
+};
+
+export async function ensureWorkspace(
+  workspaceId: string,
+  displayName?: string,
+): Promise<WorkspaceInfo> {
+  return invoke<WorkspaceInfo>("ensure_workspace", {
+    workspaceId,
+    displayName: displayName?.trim() || null,
+  });
+}
+
+export type WorkspaceFileEntry = {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+};
+
+export async function listWorkspaceFiles(
+  workspaceId: string,
+  relativePath = "",
+): Promise<WorkspaceFileEntry[]> {
+  return invoke<WorkspaceFileEntry[]>("list_workspace_directory", {
+    workspaceId,
+    relativePath: relativePath || null,
+  });
+}
+
+export async function readWorkspaceText(
+  workspaceId: string,
+  relativePath: string,
+  fallback = "",
+): Promise<string> {
+  try {
+    return (await invoke<string | null>("read_workspace_text", {
+      workspaceId,
+      relativePath,
+    })) ?? fallback;
+  } catch (error) {
+    void writeDebugLog("warn", "workspace text read failed", {
+      workspaceId,
+      relativePath,
+      error: String(error),
+    });
+    return fallback;
+  }
+}
+
+export async function writeWorkspaceText(
+  workspaceId: string,
+  relativePath: string,
+  content: string,
+): Promise<void> {
+  await invoke("write_workspace_text", { workspaceId, relativePath, content });
+}
+
+export async function deleteWorkspaceFile(
+  workspaceId: string,
+  relativePath: string,
+): Promise<void> {
+  await invoke("delete_workspace_file", { workspaceId, relativePath });
+}

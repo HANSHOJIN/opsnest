@@ -54,6 +54,7 @@ The screenshots below use fictional demo servers and addresses for illustration 
 ## Special thanks
 
 - [CodexShell](https://github.com/HANSHOJIN/codex-shell) for providing the UI shell.
+- [CodeMirror](https://codemirror.net/) ([source repository](https://github.com/codemirror/dev)) for the file editor core and language support modules.
 - Core technologies: [Tauri](https://tauri.app/), [Rust](https://www.rust-lang.org/), [React](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Vite](https://vite.dev/), [xterm.js](https://xtermjs.org/), [russh](https://github.com/warp-tech/russh), and the wider open-source community.
 
 ## Recommended free AI deployment software

@@ -29,7 +29,7 @@ export function iconDirectory(kind: string, name: string): IconDirectory {
 /** V2 keeps the V1 two-directory contract; individual keys live inside a directory. */
 export const ICON_CATALOG: Record<IconDirectory, readonly string[]> = {
   services: ["docker", "nginx", "apache", "mysql", "postgres", "redis", "mongodb", "openlist", "alist", "web", "port", "generic"],
-  systems: ["linux", "debian", "ubuntu", "alibaba", "alpine", "istoreos", "openwrt", "fnos", "mac", "proxmox-pve", "nas", "windows", "generic"],
+  systems: ["linux", "debian", "ubuntu", "alibaba", "amazon", "alpine", "istoreos", "openwrt", "fnos", "mac", "proxmox-pve", "nas", "windows", "generic"],
 };
 
 export function normalizeIconKey(value: string | undefined): string {
