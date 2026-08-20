@@ -1,4 +1,4 @@
-import { Check, FileCode2, FolderOpen, LoaderCircle, MoreHorizontal, Play, Plus, Power, RefreshCw, RotateCcw, Search, Upload, X } from "lucide-react";
+import { Check, FileCode2, FolderOpen, FolderPlus, LoaderCircle, MoreHorizontal, Play, Plus, Power, RefreshCw, RotateCcw, Search, Trash2, Upload, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DockerComposeProject, DockerPanelAction, DockerPanelActionResult } from "./docker-panel";
 import "./compose-panel.css";
@@ -76,11 +76,14 @@ export function ComposePanel({
   const [detailProject, setDetailProject] = useState<DockerComposeProject | null>(null);
   const [detailContent, setDetailContent] = useState("");
   const [detailDraft, setDetailDraft] = useState("");
-  const [projectOperation, setProjectOperation] = useState<{ path: string; operation: "build" | "up" | "down" | "restart" } | null>(null);
+  const [projectOperation, setProjectOperation] = useState<{ path: string; operation: "build" | "up" | "down" | "restart" | "remove" } | null>(null);
+  const [deleteProject, setDeleteProject] = useState<DockerComposeProject | null>(null);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
   const [directoryPickerPath, setDirectoryPickerPath] = useState("");
   const [directoryEntries, setDirectoryEntries] = useState<Array<{ name: string; path: string }>>([]);
   const [directoryBusy, setDirectoryBusy] = useState(false);
+  const [newFolderMode, setNewFolderMode] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
   const pathCheckTimer = useRef<number | undefined>(undefined);
   const visibleProjects = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -107,6 +110,8 @@ export function ComposePanel({
               ? (zhMode ? "正在校验 Compose 配置…" : "Validating Compose configuration…")
               : action.operation === "browse"
                 ? (zhMode ? "正在读取远程目录…" : "Reading remote directory…")
+              : action.operation === "mkdir"
+                ? (zhMode ? "正在创建文件夹…" : "Creating folder…")
               : action.operation === "create"
                 ? (zhMode ? "正在创建 Compose 项目…" : "Creating Compose project…")
                 : (zhMode ? "正在扫描 Compose 项目…" : "Scanning Compose projects…")
@@ -171,7 +176,7 @@ export function ComposePanel({
       if (!onAction) continue;
       try {
         const inspected = await onAction({ kind: "compose", operation: "inspect", path: knownProject.configPath });
-        if (inspected?.composeExists !== false) mergedProjects.push({ ...knownProject, status: "unbuilt(0)", containerCount: 0 });
+        if (inspected?.composeExists !== false) mergedProjects.push(knownProject);
       } catch {
         mergedProjects.push(knownProject);
       }
@@ -231,27 +236,45 @@ export function ComposePanel({
     }
   };
 
-  const projectAction = async (project: DockerComposeProject, operation: "config" | "build" | "up" | "down" | "restart" | "logs") => {
+  const projectAction = async (project: DockerComposeProject, operation: "config" | "build" | "up" | "down" | "restart" | "remove" | "logs"): Promise<boolean> => {
     setSelectedPath(project.configPath);
     setOpenMenuPath("");
-    const isTrackedOperation = operation === "build" || operation === "up" || operation === "down" || operation === "restart";
+    const isTrackedOperation = operation === "build" || operation === "up" || operation === "down" || operation === "restart" || operation === "remove";
     if (isTrackedOperation) setProjectOperation({ path: project.configPath, operation });
     try {
-      await run({ kind: "compose", operation, path: project.configPath });
-      if (operation === "down") {
-        const stoppedProject = { ...project, status: "exited(0)", containerCount: 0 };
-        setProjects((current) => current.map((item) => item.configPath === project.configPath ? stoppedProject : item));
-        if (detailProject?.configPath === project.configPath) setDetailProject(stoppedProject);
-        window.setTimeout(() => void refresh(stoppedProject), 1800);
-      } else if (operation !== "config" && operation !== "logs") {
+      const result = await run({ kind: "compose", operation, path: project.configPath });
+      if (result && operation === "remove") {
+        setProjects((current) => current.filter((item) => item.configPath !== project.configPath));
+        if (detailProject?.configPath === project.configPath) setDetailProject(null);
+        setSelectedPath((current) => current === project.configPath ? "" : current);
+        setMessage(zhMode ? `已删除 Compose 项目：${project.name}` : `Compose project deleted: ${project.name}`);
+        window.setTimeout(() => void refresh(), 1000);
+      } else if (result && isTrackedOperation) {
+        const nextProject = operation === "down"
+          ? { ...project, status: "exited(0)", containerCount: 0 }
+          : operation === "build"
+            ? { ...project, status: "created(1)", containerCount: Math.max(1, project.containerCount || 0) }
+            : { ...project, status: "running(1)", containerCount: Math.max(1, project.containerCount || 0) };
+        setProjects((current) => current.map((item) => item.configPath === project.configPath ? nextProject : item));
+        if (detailProject?.configPath === project.configPath) setDetailProject(nextProject);
+        window.setTimeout(() => void refresh(nextProject), 1800);
+      } else if (result && operation !== "config" && operation !== "logs") {
         window.setTimeout(() => void refresh(), 1800);
       }
       if (operation === "build" || operation === "up" || operation === "down" || operation === "restart") {
         window.setTimeout(() => window.dispatchEvent(new CustomEvent("opsnest-refresh-docker-state")), 2800);
       }
+      return Boolean(result);
     } finally {
       if (isTrackedOperation) setProjectOperation((current) => current?.path === project.configPath ? null : current);
     }
+  };
+
+  const confirmDeleteProject = async () => {
+    if (!deleteProject) return;
+    const target = deleteProject;
+    const result = await projectAction(target, "remove");
+    if (result) setDeleteProject(null);
   };
 
   const createProject = async () => {
@@ -278,6 +301,12 @@ export function ComposePanel({
       overwriteExisting: Boolean(existingComposePath),
     });
     if (!result) return;
+    const createdProject: DockerComposeProject = {
+      name: savedName,
+      status: "unbuilt(0)",
+      configPath: savedPath,
+      containerCount: 0,
+    };
     setShowCreate(false);
     setCreateName("");
     setCreatePath("");
@@ -285,19 +314,11 @@ export function ComposePanel({
     setUploadedName("");
     setStartAfterCreate(false);
     setDetectedComposePath("");
-    await refresh({
-      name: savedName,
-      status: "unbuilt(0)",
-      configPath: savedPath,
-      containerCount: 0,
-    });
+    setSelectedPath(savedPath);
     setProjects((current) => current.some((project) => project.configPath === savedPath)
-      ? current
-      : [...current, { name: savedName, status: "unbuilt(0)", configPath: savedPath, containerCount: 0 }]);
-    if (!existingComposePath && onOpenEditor) {
-      const createdPath = defaultComposePath(path);
-      onOpenEditor(createdPath, fileName(createdPath));
-    }
+      ? current.map((project) => project.configPath === savedPath ? createdProject : project)
+      : [...current, createdProject]);
+    await refresh(createdProject);
   };
 
   const inspectCreatePath = async (rawPath: string) => {
@@ -345,6 +366,22 @@ export function ComposePanel({
     if (result?.composeDirectories) setDirectoryEntries(result.composeDirectories);
   };
 
+  const createRemoteFolder = async () => {
+    const name = newFolderName.trim();
+    if (!name || name === "." || name === ".." || /[\\/]/.test(name)) {
+      setError(zhMode ? "文件夹名称不能为空，且不能包含斜杠。" : "Enter a folder name without slashes.");
+      return;
+    }
+    const parent = normalizeRemotePath(directoryPickerPath) || "/";
+    const target = parent === "/" ? `/${name}` : `${parent}/${name}`;
+    setError("");
+    const result = await run({ kind: "compose", operation: "mkdir", path: target });
+    if (!result || busy) return;
+    setNewFolderMode(false);
+    setNewFolderName("");
+    await browseDirectory(target);
+  };
+
   const openDirectoryPicker = () => {
     const currentPath = normalizeRemotePath(createPath);
     const current = currentPath && !/\.(?:ya?ml)$/i.test(currentPath)
@@ -352,6 +389,8 @@ export function ComposePanel({
       : normalizeRemotePath(dockerRootDir || "/");
     setDirectoryPickerOpen(true);
     setDirectoryEntries([]);
+    setNewFolderMode(false);
+    setNewFolderName("");
     void browseDirectory(current);
   };
 
@@ -398,8 +437,10 @@ export function ComposePanel({
             ? (zhMode ? "重启中" : "Restarting")
             : activeOperation === "down"
               ? (zhMode ? "停止中" : "Stopping")
-              : activeOperation === "build"
-                ? (zhMode ? "构建中" : "Building")
+                : activeOperation === "build"
+                  ? (zhMode ? "构建中" : "Building")
+                : activeOperation === "remove"
+                  ? (zhMode ? "删除中" : "Deleting")
                 : activeOperation === "up"
                   ? (zhMode ? "启动中" : "Starting")
                 : state.label;
@@ -426,9 +467,10 @@ export function ComposePanel({
                       {state.running ? <>
                         <button type="button" onClick={() => void projectAction(project, "down")} disabled={Boolean(activeOperation)}><Power size={15} />{zhMode ? "停止" : "Stop"}</button>
                         <button type="button" onClick={() => void projectAction(project, "restart")} disabled={Boolean(activeOperation)}><RotateCcw size={15} />{zhMode ? "重启" : "Restart"}</button>
-                      </> : <button type="button" onClick={() => void projectAction(project, state.unbuilt ? "build" : "up")} disabled={Boolean(activeOperation)}><Play size={15} />{state.unbuilt ? (zhMode ? "构建" : "Build") : (zhMode ? "启动" : "Start")}</button>}
-                      <button type="button" onClick={() => void openProject(project)}><Check size={15} />{zhMode ? "详情" : "Details"}</button>
-                    </span>}
+                       </> : <button type="button" onClick={() => void projectAction(project, state.unbuilt ? "build" : "up")} disabled={Boolean(activeOperation)}><Play size={15} />{state.unbuilt ? (zhMode ? "构建" : "Build") : (zhMode ? "启动" : "Start")}</button>}
+                       <button type="button" onClick={() => void openProject(project)}><Check size={15} />{zhMode ? "详情" : "Details"}</button>
+                       <button className="is-danger" type="button" onClick={() => { setDeleteProject(project); setOpenMenuPath(""); }} disabled={Boolean(activeOperation)}><Trash2 size={15} />{zhMode ? "删除" : "Delete"}</button>
+                     </span>}
                   </span>
                 </div>
               </div>
@@ -464,6 +506,19 @@ export function ComposePanel({
           </section>
         </div>
       )}
+      {deleteProject && (
+        <div className="docker-compose-modal-backdrop docker-compose-delete-backdrop" role="presentation">
+          <section className="docker-compose-delete-modal" role="dialog" aria-modal="true" aria-labelledby="compose-delete-title">
+            <header>
+              <strong id="compose-delete-title">{zhMode ? "删除 Compose 项目" : "Delete Compose project"}</strong>
+              <button type="button" onClick={() => setDeleteProject(null)} aria-label={zhMode ? "关闭" : "Close"}><X size={17} /></button>
+            </header>
+            <p>{zhMode ? `确定删除“${deleteProject.name}”吗？将移除 Compose 容器和配置文件，不删除挂载数据目录。` : `Delete “${deleteProject.name}”? Its Compose containers and configuration file will be removed; mounted data directories are kept.`}</p>
+            <small>{deleteProject.configPath}</small>
+            <footer><button type="button" onClick={() => setDeleteProject(null)} disabled={busy === "remove"}>{zhMode ? "取消" : "Cancel"}</button><button className="docker-compose-danger" type="button" onClick={() => void confirmDeleteProject()} disabled={busy === "remove"}>{busy === "remove" ? (zhMode ? "删除中…" : "Deleting…") : (zhMode ? "确认删除" : "Delete")}</button></footer>
+          </section>
+        </div>
+      )}
       {directoryPickerOpen && (
         <div className="docker-compose-modal-backdrop docker-compose-directory-backdrop" role="presentation">
           <section className="docker-compose-directory-modal" role="dialog" aria-modal="true" aria-labelledby="compose-directory-title">
@@ -475,7 +530,9 @@ export function ComposePanel({
               <input value={directoryPickerPath} onChange={(event) => setDirectoryPickerPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void browseDirectory(directoryPickerPath); } }} />
               <button type="button" onClick={() => void browseDirectory(parentDirectory(directoryPickerPath))} disabled={directoryBusy || directoryPickerPath === "/"} title={zhMode ? "上级目录" : "Parent directory"}>↑</button>
               <button type="button" onClick={() => void browseDirectory(directoryPickerPath)} disabled={directoryBusy} title={zhMode ? "刷新目录" : "Refresh directory"}><RefreshCw size={14} className={directoryBusy ? "is-spinning" : ""} /></button>
+              <button type="button" onClick={() => { setNewFolderMode((value) => !value); setNewFolderName(""); setError(""); }} disabled={directoryBusy} title={zhMode ? "新建文件夹" : "New folder"} aria-label={zhMode ? "新建文件夹" : "New folder"}><FolderPlus size={14} /></button>
             </div>
+            {newFolderMode && <div className="docker-compose-new-folder-row"><input autoFocus value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void createRemoteFolder(); } }} placeholder={zhMode ? "文件夹名称" : "Folder name"} /><button type="button" onClick={() => void createRemoteFolder()} disabled={directoryBusy || !newFolderName.trim()} title={zhMode ? "创建" : "Create"}><Check size={14} /></button><button type="button" onClick={() => { setNewFolderMode(false); setNewFolderName(""); }} disabled={directoryBusy} title={zhMode ? "取消" : "Cancel"}><X size={14} /></button></div>}
             <div className="docker-compose-directory-list">
               {directoryEntries.length ? directoryEntries.map((entry) => (
                 <button type="button" key={entry.path} onClick={() => void browseDirectory(entry.path)} disabled={directoryBusy}><FolderOpen size={15} /><span>{entry.name}</span></button>

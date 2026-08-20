@@ -53,6 +53,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { listen } from "@tauri-apps/api/event";
 import { ImeGate } from "./features/terminal/ime-gate";
+import { RemoteIcon as CachedRemoteIcon } from "./features/icons/catalog";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
 import { formatAiConclusion } from "./features/terminal/ai-format";
@@ -71,6 +72,7 @@ import {
   type DockerPanelPlacement,
 } from "./features/docker/docker-panel";
 import dockerIcon from "../icons/packed/services/docker.svg";
+import dockerIconMarkup from "../icons/packed/services/docker.svg?raw";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -219,6 +221,18 @@ function dockerActionCommand(action: DockerPanelAction) {
     const reference = action.reference?.trim() || "";
     if (action.operation !== "list" && action.operation !== "check" && !reference)
       throw new Error("请填写镜像名称或 ID");
+    if (action.operation === "list") {
+      return [
+        "if command -v docker >/dev/null 2>&1; then image_engine=docker; elif command -v podman >/dev/null 2>&1; then image_engine=podman; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi",
+        '"$image_engine" image ls --no-trunc --format \'{{json .}}\'',
+        'for container_id in $("$image_engine" ps -aq 2>/dev/null); do',
+        '  usage_image_id=$("$image_engine" inspect --format \'{{.Image}}\' "$container_id" 2>/dev/null || true)',
+        '  usage_image_ref=$("$image_engine" inspect --format \'{{.Config.Image}}\' "$container_id" 2>/dev/null || true)',
+        '  usage_container_name=$("$image_engine" inspect --format \'{{.Name}}\' "$container_id" 2>/dev/null | sed \'s#^/##\' || true)',
+        '  [ -n "$usage_container_name" ] && printf \'__OPSNEST_IMAGE_USAGE__\\t%s\\t%s\\t%s\\n\' "$usage_image_id" "$usage_image_ref" "$usage_container_name"',
+        "done",
+      ].join("\n");
+    }
     if (action.operation === "check") {
       return [
         "if ! command -v docker >/dev/null 2>&1; then echo '镜像更新检查仅支持 Docker' >&2; exit 127; fi",
@@ -258,9 +272,7 @@ function dockerActionCommand(action: DockerPanelAction) {
         "printf '__OPSNEST_IMAGE_UPGRADE__\\t%s\\t%s\\t%s\\n' " + shellQuote(reference) + " " + composeTargets.length + " " + standaloneCount,
       ].join("\n");
     }
-    const args = action.operation === "list"
-      ? "image ls --no-trunc --format '{{json .}}'"
-      : action.operation === "inspect"
+    const args = action.operation === "inspect"
         ? "image inspect " + shellQuote(reference)
         : action.operation === "pull"
           ? "pull " + shellQuote(reference)
@@ -286,6 +298,10 @@ function dockerActionCommand(action: DockerPanelAction) {
       const target = shellQuote(composePath);
       return "target=" + target + "; if [ ! -d \"$target\" ]; then echo '__OPSNEST_COMPOSE_DIR_MISSING__' >&2; exit 2; fi; for entry in \"$target\"/* \"$target\"/.[!.]* \"$target\"/..?*; do [ -d \"$entry\" ] || continue; name=${entry##*/}; printf '%s\\t%s\\n' \"$name\" \"$entry\"; done | sort -f";
     }
+    if (action.operation === "mkdir") {
+      const target = shellQuote(composePath);
+      return "target=" + target + "; if [ -e \"$target\" ]; then echo '目标目录已存在' >&2; exit 2; fi; mkdir -p -- \"$target\"; printf '已创建目录：%s\\n' \"$target\"";
+    }
     const composeRun = (args: string) => "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose " + args + "; elif command -v docker-compose >/dev/null 2>&1; then docker-compose " + args + "; else echo '未找到 Docker Compose' >&2; exit 127; fi";
     const resolve = "target=" + shellQuote(composePath) + "; case \"$target\" in *.yml|*.yaml) ;; *) if [ -d \"$target\" ]; then found=0; for candidate in \"$target/compose.yaml\" \"$target/compose.yml\" \"$target/docker-compose.yml\" \"$target/docker-compose.yaml\"; do if [ -f \"$candidate\" ]; then target=\"$candidate\"; found=1; break; fi; done; if [ \"$found\" -eq 0 ]; then target=\"$target/compose.yaml\"; fi; else target=\"$target/compose.yaml\"; fi ;; esac;";
     if (action.operation === "list") {
@@ -307,6 +323,9 @@ function dockerActionCommand(action: DockerPanelAction) {
       const create = resolve + " if [ ! -f \"$target\" ] || [ \"" + writeExisting + "\" = \"1\" ]; then " + (content ? "mkdir -p \"$(dirname \"$target\")\"; printf '%s\\n' " + shellQuote(content) + " > \"$target\";" : "echo '未找到 Compose 配置文件；请选择直接编辑或上传本地文件' >&2; exit 2;") + " else printf '使用现有 Compose 文件：%s\\n' \"$target\"; fi;";
       const start = action.startAfterCreate ? " " + composeRun('-f "$target" up -d') + ";" : "";
       return create + start + " printf 'Compose 项目已准备：%s\\n' \"$target\"";
+    }
+    if (action.operation === "remove") {
+      return resolve + " project_dir=$(dirname \"$target\"); " + composeRun('-f "$target" down --remove-orphans') + "; rc=$?; [ \"$rc\" -eq 0 ] || exit \"$rc\"; rm -f -- \"$target\"; printf 'Compose 项目已删除：%s\\n' \"$project_dir\"";
     }
     // The UI action named `down` is the user-facing power/stop control. Keep
     // the Compose project and its container metadata intact so it remains
@@ -383,40 +402,22 @@ function NamedDockerServiceIcon({
   refreshKey: number;
 }) {
   const iconKey = normalizeIconKey(name);
-  const sources = React.useMemo(() => {
-    if (!iconKey) return [];
-    const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
-    return [
-      bundledIconUrl("services", iconKey, "svg"),
-      `/icons/packed/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
-      `${remoteIconUrl("services", iconKey, "svg")}${refreshSuffix}`,
-      `${remoteIconUrl("services", iconKey, "png")}${refreshSuffix}`,
-      `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
-      `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
-      `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
-      `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
-    ].filter((source): source is string => Boolean(source));
-  }, [iconKey, refreshKey]);
-  const [sourceIndex, setSourceIndex] = React.useState(0);
-  React.useEffect(() => setSourceIndex(0), [iconKey, refreshKey]);
-
-  if (sourceIndex >= sources.length)
-    return (
-      <img className="service-icon-image service-docker" src={dockerIcon} alt="Docker" aria-hidden="true" width={18} height={18} />
-    );
-
+  const candidates = React.useMemo(
+    () => iconCandidates(iconKey),
+    [iconKey],
+  );
   return (
-    <img
+    <CachedRemoteIcon
+      directory="services"
+      candidates={candidates}
+      fallback={dockerIconMarkup}
       className={`service-icon-image service-${iconKey}`}
-      src={sources[sourceIndex]}
-      alt=""
-      aria-hidden="true"
-      width={18}
-      height={18}
-      onError={() => setSourceIndex((value) => value + 1)}
+      refreshKey={refreshKey}
     />
   );
 }
+
+const appIconSourceCache = new Map<string, string | null>();
 
 function ServiceIcon({
   kind,
@@ -514,24 +515,32 @@ function ServiceIcon({
       : found;
   }, [baseKey, name, directory]);
   const amazonRemoteIcon = isAmazonSystem
-    ? `${remoteIconUrl("systems", "amazon", "png")}?opsnest-icon-refresh=${refreshKey}`
+    ? `${remoteIconUrl("systems", "amazon", "png")}${refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : ""}`
     : null;
-  const [remote, setRemote] = React.useState<string | null>(amazonRemoteIcon);
-  const [onlineIconFailed, setOnlineIconFailed] = React.useState(false);
-  React.useEffect(() => {
-    setOnlineIconFailed(false);
-  }, [baseKey, refreshKey]);
+  const resolutionCacheKey = `${directory}:${candidates.join("|")}:${refreshKey}`;
+  const [remote, setRemote] = React.useState<string | null>(() => {
+    const cached = appIconSourceCache.get(resolutionCacheKey);
+    return cached !== undefined ? cached : amazonRemoteIcon;
+  });
   React.useEffect(() => {
     let active = true;
+    const cached = appIconSourceCache.get(resolutionCacheKey);
+    if (cached !== undefined) {
+      setRemote(cached);
+      return () => {
+        active = false;
+      };
+    }
     if (isAmazonSystem) {
       // Amazon Linux is an online-only asset. Use an <img>-loaded URL rather
       // than a fetch probe so WebView CORS policy cannot hide a valid PNG.
+      appIconSourceCache.set(resolutionCacheKey, amazonRemoteIcon);
       setRemote(amazonRemoteIcon);
       return () => {
         active = false;
       };
     }
-    setRemote(null);
+    if (refreshKey <= 0) setRemote(null);
     if (isNamedDockerContainer) return () => {
       active = false;
     };
@@ -548,16 +557,18 @@ function ServiceIcon({
               const packed = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.svg`;
               const localResponse = await fetch(packed);
               if (localResponse.ok) {
+                appIconSourceCache.set(resolutionCacheKey, packed);
                 if (active) setRemote(packed);
                 return;
               }
             }
             const bundled = type === "svg" ? bundledIconUrl(directory, candidate, type) : undefined;
             if (bundled) {
+              appIconSourceCache.set(resolutionCacheKey, bundled);
               if (active) setRemote(bundled);
               return;
             }
-            const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
+            const refreshSuffix = refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : "";
             const remoteUrls = [
               `${remoteIconUrl(directory, candidate, type)}${refreshSuffix}`,
               `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
@@ -566,6 +577,7 @@ function ServiceIcon({
             for (const remoteUrl of remoteUrls) {
               const response = await fetch(remoteUrl);
               if (response.ok) {
+                appIconSourceCache.set(resolutionCacheKey, remoteUrl);
                 if (active) setRemote(remoteUrl);
                 return;
               }
@@ -575,26 +587,24 @@ function ServiceIcon({
           }
         }
       }
-      if (active && isAlibabaSystem)
-        setRemote(`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${refreshKey}`);
+      if (isAlibabaSystem) {
+        const source = `${remoteIconUrl("systems", "alibaba", "png")}${refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : ""}`;
+        appIconSourceCache.set(resolutionCacheKey, source);
+        if (active) setRemote(source);
+      } else {
+        appIconSourceCache.set(resolutionCacheKey, null);
+        if (active) setRemote(null);
+      }
     })();
     return () => {
       active = false;
     };
-  }, [amazonRemoteIcon, candidates.join("|"), directory, isAlibabaSystem, isAmazonSystem, isNamedDockerContainer, refreshKey]);
+  }, [amazonRemoteIcon, candidates.join("|"), directory, isAlibabaSystem, isAmazonSystem, isNamedDockerContainer, refreshKey, resolutionCacheKey]);
   if (isNamedDockerContainer)
     return <NamedDockerServiceIcon name={nameOnly} refreshKey={refreshKey} />;
   if (isOpenListService)
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="service-icon-image service-openlist"
-          src={`${remoteIconUrl("services", "openlist", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt="OpenList"
-          aria-hidden="true"
-          width={18}
-          height={18}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="services" candidates={["openlist", "alist", "open-list"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image service-openlist" refreshKey={refreshKey} />
     );
   if (isDockerService)
     return (
@@ -602,62 +612,23 @@ function ServiceIcon({
     );
   if (isLuckyService)
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="service-icon-image service-lucky"
-          src={`${remoteIconUrl("services", "lucky", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt="Lucky"
-          aria-hidden="true"
-          width={18}
-          height={18}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="services" candidates={["lucky"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image service-lucky" refreshKey={refreshKey} />
     );
   if (isLuciService)
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="service-icon-image service-luci"
-          src={`${remoteIconUrl("services", "luci", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt="LuCI"
-          aria-hidden="true"
-          width={18}
-          height={18}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="services" candidates={["luci", "uhttpd"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image service-luci" refreshKey={refreshKey} />
     );
   if (isAlibabaSystem || baseKey === "alibaba")
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="service-icon-image system-alibaba"
-          src={`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt=""
-          aria-hidden="true"
-          width={18}
-          height={18}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="systems" candidates={["alibaba"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image system-alibaba" refreshKey={refreshKey} />
     );
   if (isIStoreSystem)
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="system-istoreos-mark"
-          src={`${remoteIconUrl("systems", "istoreos", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt="iStoreOS"
-          width={400}
-          height={400}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="systems" candidates={["istoreos"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="system-istoreos-mark" refreshKey={refreshKey} />
     );
   if (isFnosSystem)
     return (
-      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
-          className="service-icon-image system-fnos"
-          src={`${remoteIconUrl("systems", "fnos", "png")}?opsnest-icon-refresh=${refreshKey}`}
-          alt="fnOS"
-          aria-hidden="true"
-          width={18}
-          height={18}
-          onError={() => setOnlineIconFailed(true)}
-        />
+      <CachedRemoteIcon directory="systems" candidates={["fnos"]} fallbackNode={<Icon size={18} strokeWidth={1.8} />} className="service-icon-image system-fnos" refreshKey={refreshKey} />
     );
   if (remote)
     return (
@@ -668,7 +639,10 @@ function ServiceIcon({
         aria-hidden="true"
         width={18}
         height={18}
-        onError={() => setRemote(null)}
+        onError={() => {
+          appIconSourceCache.set(resolutionCacheKey, null);
+          setRemote(null);
+        }}
       />
     );
   return <Icon size={18} strokeWidth={1.8} />;
@@ -4570,13 +4544,12 @@ function LinuxServerHomeContent({
   const [thinking, setThinking] = React.useState(false);
   const Server = (_props: { size?: number }) =>
     isAlibabaLabel(`${server.name} ${server.system || ""}`) ? (
-      <img
+      <CachedRemoteIcon
+        directory="systems"
+        candidates={["alibaba"]}
+        fallbackNode={<CircleGauge size={22} strokeWidth={1.8} />}
         className="service-icon-image system-alibaba"
-        src={`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${iconRefreshKey}`}
-        alt=""
-        aria-hidden="true"
-        width={22}
-        height={22}
+        refreshKey={iconRefreshKey}
       />
     ) : (
       <ServiceIcon
@@ -5094,6 +5067,7 @@ function RouterServerHome({
         onServicesUpdated={onServicesUpdated}
         onOpenDocker={onOpenDocker}
         hideDocker
+        iconRefreshKey={iconRefreshKey}
       />
     </div>
   );
@@ -5353,6 +5327,7 @@ function NasServerHome({
         onOpenDocker={onOpenDocker}
         nasMode
         language={language}
+        iconRefreshKey={iconRefreshKey}
       />
       <NasApplicationCenter language={language} server={server} onScan={onScan} />
     </div>
@@ -5861,6 +5836,7 @@ function LinuxServerHome({
         server={server}
         onServicesUpdated={onServicesUpdated}
         onOpenDocker={onOpenDocker}
+        iconRefreshKey={iconRefreshKey}
       />
     </div>
   );
@@ -6125,6 +6101,7 @@ function TerminalWorkspace({
   onDockerAction,
   onRefreshDocker,
   onOpenComposeEditor,
+  iconRefreshKey = 0,
 }: {
   server: ServerSummary;
   servers: ServerSummary[];
@@ -6148,6 +6125,7 @@ function TerminalWorkspace({
   onDockerAction?: (action: DockerPanelAction) => Promise<DockerPanelActionResult | void>;
   onRefreshDocker?: () => void;
   onOpenComposeEditor?: (path: string, name: string) => void;
+  iconRefreshKey?: number;
 }) {
   const [tabIds, setTabIds] = React.useState<string[]>([server.id]);
   const [focusedId, setFocusedId] = React.useState(server.id);
@@ -6384,6 +6362,7 @@ function TerminalWorkspace({
               onRefresh={onRefreshDocker}
               onAction={onDockerAction}
               onOpenComposeEditor={onOpenComposeEditor}
+              iconRefreshKey={iconRefreshKey}
               onClose={() => { onCloseDocker?.(); focusAfterDockerClose(); }}
             />
           </div>
@@ -8535,6 +8514,7 @@ function WebServiceDiscoveryPanel({
   hideDocker = false,
   nasMode = false,
   language,
+  iconRefreshKey = 0,
 }: {
   server: ServerSummary;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
@@ -8542,6 +8522,7 @@ function WebServiceDiscoveryPanel({
   hideDocker?: boolean;
   nasMode?: boolean;
   language?: Language;
+  iconRefreshKey?: number;
 }) {
   const [services, setServices] = React.useState<DiscoveredServiceSummary[]>(
     () =>
@@ -8549,7 +8530,8 @@ function WebServiceDiscoveryPanel({
         isVisibleWebService(service, server.port, hideDocker),
       ),
   );
-  const [iconRefreshKey, setIconRefreshKey] = React.useState(0);
+  const [serviceIconRefreshKey, setServiceIconRefreshKey] = React.useState(0);
+  const effectiveIconRefreshKey = Math.max(iconRefreshKey, serviceIconRefreshKey);
   const [state, setState] = React.useState("正在扫描");
   const serviceLabel = hideDocker ? "路由器服务" : "服务";
   const serviceTitle = hideDocker ? "内置服务与管理入口" : "常用入口";
@@ -8576,12 +8558,12 @@ function WebServiceDiscoveryPanel({
     server.services ?? [],
   );
   savedServicesRef.current = server.services ?? [];
-  const scan = React.useCallback(async () => {
+  const scan = React.useCallback(async (refreshIcons = false) => {
     setState("正在扫描");
     // A rescan is also the explicit signal to re-read user-added packed
     // icons. Keep the service row keys stable, but make each icon resolver
     // retry its local/online sources once the scan completes.
-    setIconRefreshKey((value) => value + 1);
+    if (refreshIcons) setServiceIconRefreshKey(Date.now());
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
     const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -8822,7 +8804,7 @@ function WebServiceDiscoveryPanel({
         <button
           className="text-button"
           type="button"
-          onClick={() => void scan()}
+          onClick={() => void scan(true)}
         >
           重新扫描
         </button>
@@ -8866,6 +8848,7 @@ function WebServiceDiscoveryPanel({
         services={server.services ?? []}
         language={language ?? "zh-CN"}
         onManage={onOpenDocker}
+        iconRefreshKey={effectiveIconRefreshKey}
       />
       {services.length > 0 ? (
         <div className="discovered-service-list">
@@ -8903,7 +8886,7 @@ function WebServiceDiscoveryPanel({
                       : service.kind
                   }
                   name={service.name}
-                  refreshKey={iconRefreshKey}
+                  refreshKey={effectiveIconRefreshKey}
                 />
               </span>
               <div>
@@ -9551,26 +9534,59 @@ function App() {
         const message = cleanOutput.replace(/__OPSNEST_DOCKER_ACTION_RC=\d+/g, "").trim();
         if (action.kind === "image") {
           if (action.operation === "list") {
-            const images = message
+            const lines = message
               .split(/\r?\n/)
               .map((line) => line.trim())
-              .filter(Boolean)
+              .filter(Boolean);
+            const usageByImageId = new Map<string, string[]>();
+            const usageByReference = new Map<string, string[]>();
+            const imageIdKey = (value: string) => value.trim().toLowerCase().replace(/^sha256:/, "");
+            const referenceKey = (value: string) => value
+              .trim()
+              .toLowerCase()
+              .replace(/^docker\.io\/(?:library\/)?/, "");
+            const addUsage = (target: Map<string, string[]>, key: string, containerName: string) => {
+              if (!key || !containerName) return;
+              const names = target.get(key) || [];
+              if (!names.includes(containerName)) names.push(containerName);
+              target.set(key, names);
+            };
+            for (const line of lines) {
+              if (!line.startsWith("__OPSNEST_IMAGE_USAGE__\t")) continue;
+              const [, rawImageId = "", rawImageReference = "", rawContainerName = ""] = line.split("\t");
+              const containerName = rawContainerName.trim().replace(/^\/+/, "");
+              addUsage(usageByImageId, imageIdKey(rawImageId), containerName);
+              addUsage(usageByReference, referenceKey(rawImageReference), containerName);
+            }
+            const images = lines
+              .filter((line) => !line.startsWith("__OPSNEST_IMAGE_USAGE__\t"))
               .map((line) => {
                 try {
                   const item = JSON.parse(line) as Record<string, unknown>;
+                  const id = String(item.ID ?? item.Id ?? item.id ?? "").trim();
+                  const repository = String(item.Repository ?? item.repository ?? "<none>").trim();
+                  const tag = String(item.Tag ?? item.tag ?? "<none>").trim();
+                  const reference = repository !== "<none>" && tag !== "<none>"
+                    ? `${repository}:${tag}`
+                    : "";
+                  const usedBy = Array.from(new Set([
+                    ...(usageByImageId.get(imageIdKey(id)) || []),
+                    ...(usageByReference.get(referenceKey(reference)) || []),
+                  ]));
                   return {
-                    id: String(item.ID ?? item.Id ?? item.id ?? "").trim(),
-                    repository: String(item.Repository ?? item.repository ?? "<none>").trim(),
-                    tag: String(item.Tag ?? item.tag ?? "<none>").trim(),
+                    id,
+                    repository,
+                    tag,
                     size: String(item.Size ?? item.size ?? "").trim(),
                     createdAt: String(item.CreatedSince ?? item.CreatedAt ?? item.createdAt ?? "").trim(),
                     digest: String(item.Digest ?? item.digest ?? "").trim() || undefined,
+                    usedBy,
                   };
                 } catch {
                   return null;
                 }
               })
-              .filter((image): image is { id: string; repository: string; tag: string; size: string; createdAt: string; digest: string | undefined } => Boolean(image?.id));
+              .filter((image): image is NonNullable<typeof image> => Boolean(image?.id));
             return { images, message: images.length ? "" : "未发现本地镜像" };
           }
           if (action.operation === "check") {
@@ -9945,11 +9961,14 @@ function App() {
   const scanServer = async (
     server: ServerSummary,
     passwordOverride?: string,
+    refreshIcons = false,
   ) => {
-    setIconRefreshKeys((current) => ({
-      ...current,
-      [server.id]: (current[server.id] ?? 0) + 1,
-    }));
+    if (refreshIcons) {
+      setIconRefreshKeys((current) => ({
+        ...current,
+        [server.id]: Date.now(),
+      }));
+    }
     const at = server.host.indexOf("@");
     const username = at > 0 ? server.host.slice(0, at) : "root";
     const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -10208,6 +10227,7 @@ function App() {
                 onRefresh={() => void scanServer(selectedServer)}
                 onAction={(action) => runDockerAction(selectedServer, action)}
                 onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "right")}
+                iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
                 onClose={closeDockerPanel}
               />
             ) : (
@@ -10274,7 +10294,7 @@ function App() {
                   language={appearance.language}
                   server={selectedServer}
                   iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
-                  onScan={() => void scanServer(selectedServer)}
+                  onScan={() => void scanServer(selectedServer, undefined, true)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
                   onOpenDocker={() => openDockerPanel(selectedServer.id)}
@@ -10286,7 +10306,7 @@ function App() {
                   language={appearance.language}
                   server={selectedServer}
                   iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
-                  onScan={() => void scanServer(selectedServer)}
+                  onScan={() => void scanServer(selectedServer, undefined, true)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
                   onOpenDocker={() => openDockerPanel(selectedServer.id)}
@@ -10298,7 +10318,7 @@ function App() {
                   server={selectedServer}
                   model={model}
                   iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
-                  onScan={() => void scanServer(selectedServer)}
+                  onScan={() => void scanServer(selectedServer, undefined, true)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
                   onOpenDocker={() => openDockerPanel(selectedServer.id)}
@@ -10377,6 +10397,7 @@ function App() {
               onRefreshDocker={() => void scanServer(selectedServer)}
               onDockerAction={(action) => runDockerAction(selectedServer, action)}
               onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "bottom")}
+              iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
             />
           ) : (
             <EmptySlot

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 export type IconDirectory = "services" | "systems";
 
@@ -12,6 +12,7 @@ export function remoteIconUrl(directory: IconDirectory, candidate: string, type:
 }
 const iconMemoryCache = new Map<string, string | null>();
 const iconRequests = new Map<string, Promise<string | null>>();
+const iconRefreshMarkers = new Map<string, number>();
 
 export function normalizeIconKey(value: string | undefined) {
   return (value ?? "").trim().toLowerCase().replace(/[_\s]+/g, "-").replace(/[^a-z0-9@.-]/g, "").replace(/-+/g, "-");
@@ -49,6 +50,19 @@ function readCachedIcon(directory: IconDirectory, key: string) {
   return undefined;
 }
 
+function prepareIconRefresh(directory: IconDirectory, key: string, refreshKey: number) {
+  if (refreshKey <= 0) return;
+  const memoryKey = `${directory}/${key}`;
+  if (iconRefreshMarkers.get(memoryKey) === refreshKey) return;
+  iconRefreshMarkers.set(memoryKey, refreshKey);
+  iconMemoryCache.delete(memoryKey);
+  try {
+    window.localStorage.removeItem(iconCacheKey(directory, key));
+  } catch {
+    // The cache is optional when the webview storage is unavailable.
+  }
+}
+
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
   const chunkSize = 0x8000;
@@ -62,14 +76,16 @@ function iconDataUri(value: string, type: "svg" | "png") {
   return type === "svg" ? svgDataUri(value) : `data:image/png;base64,${value}`;
 }
 
-async function fetchIconCatalog(directory: IconDirectory, candidates: string[]) {
+async function fetchIconCatalog(directory: IconDirectory, candidates: string[], refreshKey = 0) {
   for (const candidate of candidates) {
     const key = `${directory}/${candidate}`;
+    prepareIconRefresh(directory, candidate, refreshKey);
     const cached = readCachedIcon(directory, candidate);
     if (cached) return cached;
     if (iconMemoryCache.has(key)) continue;
-    if (iconRequests.has(key)) {
-      const result = await iconRequests.get(key);
+    const requestKey = `${key}@${refreshKey}`;
+    if (iconRequests.has(requestKey)) {
+      const result = await iconRequests.get(requestKey);
       if (result) return result;
       continue;
     }
@@ -79,7 +95,8 @@ async function fetchIconCatalog(directory: IconDirectory, candidates: string[]) 
         const controller = new AbortController();
         const timeout = window.setTimeout(() => controller.abort(), 2800);
         try {
-          const response = await fetch(`${ICON_CATALOG_RAW_BASE}/${remote.file.split("/").map(encodeURIComponent).join("/")}`, { signal: controller.signal });
+          const refreshSuffix = refreshKey > 0 ? `?opsnest-icon-refresh=${refreshKey}` : "";
+          const response = await fetch(`${ICON_CATALOG_RAW_BASE}/${remote.file.split("/").map(encodeURIComponent).join("/")}${refreshSuffix}`, { signal: controller.signal });
           if (!response.ok) return null;
           const icon = remote.type === "svg"
             ? await response.text()
@@ -106,9 +123,9 @@ async function fetchIconCatalog(directory: IconDirectory, candidates: string[]) 
 
       return null;
     })();
-    iconRequests.set(key, request);
+    iconRequests.set(requestKey, request);
     const result = await request;
-    iconRequests.delete(key);
+    iconRequests.delete(requestKey);
     if (result) return result;
     iconMemoryCache.set(key, null);
   }
@@ -129,20 +146,29 @@ function svgDataUri(svg: string) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-export function RemoteIcon({ directory, candidates, fallback, preferFallback = false, empty = "?", className = "" }: { directory: IconDirectory; candidates: string[]; fallback?: string; preferFallback?: boolean; empty?: string; className?: string }) {
+export function RemoteIcon({ directory, candidates, fallback, fallbackNode, preferFallback = false, empty = "?", className = "", refreshKey = 0 }: { directory: IconDirectory; candidates: string[]; fallback?: string; fallbackNode?: ReactNode; preferFallback?: boolean; empty?: string; className?: string; refreshKey?: number }) {
   const useBundled = preferFallback && Boolean(fallback);
   const cacheCandidate = useBundled ? null : candidates.map((candidate) => readCachedIcon(directory, candidate)).find((value): value is string => Boolean(value));
-  const [remoteSvg, setRemoteSvg] = useState<string | null>(cacheCandidate ?? null);
+  const resolutionKey = `${directory}:${candidates.join("|")}:${useBundled ? "bundled" : "remote"}`;
+  const [remoteState, setRemoteState] = useState<{ key: string; value: string | null }>({ key: resolutionKey, value: cacheCandidate ?? null });
+  const remoteSvg = cacheCandidate ?? (remoteState.key === resolutionKey ? remoteState.value : null);
 
   useEffect(() => {
     let cancelled = false;
-    if (useBundled || cacheCandidate) return () => { cancelled = true; };
-    void fetchIconCatalog(directory, candidates).then((svg) => { if (!cancelled && svg) setRemoteSvg(svg); });
+    if (useBundled) return () => { cancelled = true; };
+    if (cacheCandidate && refreshKey <= 0) {
+      setRemoteState({ key: resolutionKey, value: cacheCandidate });
+      return () => { cancelled = true; };
+    }
+    void fetchIconCatalog(directory, candidates, refreshKey).then((svg) => {
+      if (!cancelled) setRemoteState({ key: resolutionKey, value: svg });
+    });
     return () => { cancelled = true; };
-  }, [directory, candidates.join("|"), useBundled, cacheCandidate]);
+  }, [directory, candidates.join("|"), useBundled, cacheCandidate, refreshKey, resolutionKey]);
 
   if (useBundled && fallback) return <span className={className} dangerouslySetInnerHTML={{ __html: fallback }} />;
   if (remoteSvg) return <img className={className} src={remoteSvg.startsWith("data:image/") ? remoteSvg : svgDataUri(remoteSvg)} alt="" aria-hidden="true" />;
   if (fallback) return <span className={className} dangerouslySetInnerHTML={{ __html: fallback }} />;
+  if (fallbackNode) return <>{fallbackNode}</>;
   return <span className={className} aria-hidden="true">{empty}</span>;
 }

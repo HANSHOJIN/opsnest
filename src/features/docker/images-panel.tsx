@@ -29,10 +29,18 @@ export function ImagesPanel({
       ? `${image.repository}:${image.tag || "latest"}`
       : image.id;
 
+  const imageDisplayName = (image: DockerImageSummary) => {
+    if (!image.repository || image.repository === "<none>")
+      return zhMode ? "未命名镜像" : "Unnamed image";
+    return image.tag && image.tag !== "<none>"
+      ? `${image.repository}:${image.tag}`
+      : image.repository;
+  };
+
   const filteredImages = useMemo(() => {
     const value = query.trim().toLowerCase();
     if (!value) return images;
-    return images.filter((image) => `${image.repository} ${image.tag} ${image.id} ${image.digest || ""}`.toLowerCase().includes(value));
+    return images.filter((image) => `${image.repository} ${image.tag} ${image.id} ${image.digest || ""} ${(image.usedBy || []).join(" ")}`.toLowerCase().includes(value));
   }, [images, query]);
 
   const run = async (action: DockerPanelAction) => {
@@ -156,12 +164,23 @@ export function ImagesPanel({
       <div className="docker-images-list">
         {filteredImages.length ? filteredImages.map((image) => {
           const reference = imageReference(image);
+          const usedBy = image.usedBy || [];
           return (
             <article className={`docker-image-row${image.updateStatus === "available" ? " has-update" : ""}`} key={`${image.id}-${image.repository}-${image.tag}`}>
               <span className="docker-image-icon"><Box size={18} /></span>
               <div className="docker-image-main">
-                <strong>{reference}</strong>
-                <span>{image.id}</span>
+                <strong title={reference}>{imageDisplayName(image)}</strong>
+                <div className="docker-image-subline">
+                  <span>{image.id}</span>
+                  <b
+                    className={`docker-image-usage ${usedBy.length ? "is-used" : "is-unused"}`}
+                    title={usedBy.length
+                      ? (zhMode ? `使用此镜像的容器：${usedBy.join("、")}` : `Used by: ${usedBy.join(", ")}`)
+                      : (zhMode ? "没有容器引用此镜像" : "No containers reference this image")}
+                  >
+                    {usedBy.length ? (zhMode ? "已使用" : "In use") : (zhMode ? "未使用" : "Unused")}
+                  </b>
+                </div>
               </div>
               <div className="docker-image-meta"><span>{image.size || "—"}</span><small>{image.createdAt || ""}</small>{image.updateStatus && <b className={`docker-image-update-state is-${image.updateStatus}`}>{image.updateStatus === "available" ? (zhMode ? "有新版本" : "Update available") : image.updateStatus === "current" ? (zhMode ? "已是最新" : "Up to date") : (zhMode ? "无法检查" : "Unavailable")}</b>}</div>
               <div className="docker-image-actions">
@@ -186,7 +205,7 @@ export function ImagesPanel({
 
       {upgradeTarget && <div className="docker-images-modal-backdrop"><section className="docker-images-modal docker-image-upgrade-modal" role="dialog" aria-modal="true" aria-labelledby="docker-upgrade-title"><header><strong id="docker-upgrade-title">{zhMode ? "升级镜像" : "Upgrade image"}</strong><button type="button" onClick={() => setUpgradeTarget(null)}><X size={16} /></button></header><strong className="docker-image-upgrade-reference">{imageReference(upgradeTarget)}</strong><div className="docker-image-upgrade-summary"><p><Check size={14} />{zhMode ? `受影响容器：${upgradeTarget.usedBy?.length || 0} 个` : `Affected containers: ${upgradeTarget.usedBy?.length || 0}`}</p><p><Check size={14} />{zhMode ? `自动重建 Compose 服务：${upgradeTarget.composeTargets?.length || 0} 个` : `Compose services to recreate: ${upgradeTarget.composeTargets?.length || 0}`}</p>{(upgradeTarget.usedBy?.length || 0) > (upgradeTarget.composeTargets?.length || 0) && <p className="is-warning"><Info size={14} />{zhMode ? "独立容器只拉取新镜像，不会自动重建，以免丢失运行参数。" : "Standalone containers will not be recreated automatically to protect their runtime settings."}</p>}</div><footer><button type="button" onClick={() => setUpgradeTarget(null)}>{zhMode ? "取消" : "Cancel"}</button><button className="docker-images-primary" type="button" onClick={() => void upgradeImage()} disabled={Boolean(busy)}><Download size={14} />{busy === "upgrade" ? (zhMode ? "升级中…" : "Upgrading…") : (zhMode ? "确认升级" : "Upgrade")}</button></footer></section></div>}
 
-      {detailTarget && <div className="docker-images-modal-backdrop"><section className="docker-images-detail-modal" role="dialog" aria-modal="true" aria-labelledby="docker-image-detail-title"><header><div><strong id="docker-image-detail-title">{imageReference(detailTarget)}</strong><span>{detailTarget.id}</span></div><button type="button" onClick={() => setDetailTarget(null)}><X size={16} /></button></header><pre>{detailContent || (busy === "inspect" ? (zhMode ? "正在读取详情…" : "Loading details…") : (zhMode ? "未读取到镜像详情" : "Image details unavailable"))}</pre></section></div>}
+      {detailTarget && <div className="docker-images-modal-backdrop"><section className="docker-images-detail-modal" role="dialog" aria-modal="true" aria-labelledby="docker-image-detail-title"><header><div><strong id="docker-image-detail-title">{imageDisplayName(detailTarget)}</strong><span>{detailTarget.id}</span></div><button type="button" onClick={() => setDetailTarget(null)}><X size={16} /></button></header><pre>{detailContent || (busy === "inspect" ? (zhMode ? "正在读取详情…" : "Loading details…") : (zhMode ? "未读取到镜像详情" : "Image details unavailable"))}</pre></section></div>}
     </section>
   );
 }

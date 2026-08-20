@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowRight, Box, Check, ChevronDown, ChevronRight, ExternalLink, Files as FilesGlyph, Info, Link2, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, ScrollText, Search, Settings2, X } from "lucide-react";
+import { ArrowDown, ArrowRight, Check, ChevronDown, ChevronRight, ExternalLink, Files as FilesGlyph, Info, Link2, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, ScrollText, Search, Settings2, X } from "lucide-react";
 import dockerIcon from "../../../icons/packed/services/docker.svg";
+import dockerIconMarkup from "../../../icons/packed/services/docker.svg?raw";
 import type { DockerEventSummary, ServerSummary } from "../../components/ShellLayout";
-import { containerIconAliases, iconCandidates, normalizeIconKey, remoteIconUrl } from "../../services/iconCatalog";
+import { containerIconAliases, iconCandidates, normalizeIconKey } from "../../services/iconCatalog";
+import { RemoteIcon } from "../icons/catalog";
 import { openServiceUrl } from "../services/url";
 import { ComposePanel } from "./compose-panel";
 import { ImagesPanel } from "./images-panel";
@@ -74,7 +76,7 @@ export type DockerPanelAction =
   | { kind: "image"; operation: "list" | "inspect" | "pull" | "remove" | "check" | "upgrade"; reference?: string; usedBy?: string[]; composeTargets?: Array<{ path: string; service: string }> }
   | { kind: "registry"; operation: "list" }
   | { kind: "network"; operation: "list" | "inspect"; name?: string }
-  | { kind: "compose"; operation: "list" | "browse" | "inspect" | "read" | "config" | "logs" | "build" | "up" | "down" | "restart" | "create"; path?: string; name?: string; content?: string; startAfterCreate?: boolean; overwriteExisting?: boolean };
+  | { kind: "compose"; operation: "list" | "browse" | "mkdir" | "inspect" | "read" | "config" | "logs" | "build" | "up" | "down" | "restart" | "remove" | "create"; path?: string; name?: string; content?: string; startAfterCreate?: boolean; overwriteExisting?: boolean };
 export type DockerPanelActionResult = {
   running?: boolean;
   containerRunning?: boolean;
@@ -103,6 +105,15 @@ function isRunning(status: string) {
   return /^(?:up|running|healthy)\b/i.test(status.trim());
 }
 
+function isComposeProjectRunning(status: string) {
+  const normalized = status.trim();
+  return /^(?:up|running|healthy)\b/i.test(normalized) && !/(?:exited|stopped|unbuilt|未构建)/i.test(normalized);
+}
+
+function isComposeProjectProblem(status: string) {
+  return /(?:error|failed|failure|unhealthy|exited|dead|stopped|异常|失败)/i.test(status.trim());
+}
+
 function serviceUrl(server: ServerSummary, service: DockerPanelService) {
   if (!service.port) return "";
   const path = service.webPath?.trim() || "";
@@ -114,26 +125,20 @@ function serviceUrl(server: ServerSummary, service: DockerPanelService) {
   return `${service.webScheme === "https" ? "https" : "http"}://${endpointHost(server.host)}:${service.port}${normalizedPath}`;
 }
 
-function ContainerServiceIcon({ name, image }: { name: string; image?: string }) {
+function ContainerServiceIcon({ name, image, refreshKey = 0 }: { name: string; image?: string; refreshKey?: number }) {
   const key = normalizeIconKey(name);
-  const [sourceIndex, setSourceIndex] = useState(0);
-  const sources = useMemo(
-    () => iconCandidates(key, undefined, containerIconAliases(name, image)).flatMap((candidate) => [
-      remoteIconUrl("services", candidate, "svg"),
-      remoteIconUrl("services", candidate, "png"),
-    ]),
+  const candidates = useMemo(
+    () => iconCandidates(key, undefined, containerIconAliases(name, image)),
     [image, key, name],
   );
-  useEffect(() => setSourceIndex(0), [key]);
-  if (sourceIndex >= sources.length) return <Box size={18} />;
   return (
-    <img
-      src={sources[sourceIndex]}
-      alt=""
-      aria-hidden="true"
-      width={18}
-      height={18}
-      onError={() => setSourceIndex((value) => value + 1)}
+    <RemoteIcon
+      directory="services"
+      candidates={candidates}
+      fallback={dockerIconMarkup}
+      empty=""
+      className="docker-container-resolved-icon"
+      refreshKey={refreshKey}
     />
   );
 }
@@ -165,11 +170,13 @@ export function DockerPanel({
   services,
   language,
   onManage,
+  iconRefreshKey = 0,
 }: {
   server: ServerSummary;
   services: DockerPanelService[];
   language: "zh-CN" | "en";
   onManage?: () => void;
+  iconRefreshKey?: number;
 }) {
   const zhMode = language === "zh-CN";
   const [expanded, setExpanded] = useState(false);
@@ -271,7 +278,7 @@ export function DockerPanel({
                 const url = serviceUrl(server, container);
                 return (
                   <article className="docker-panel-container" key={container.id}>
-                    <div className="docker-panel-container-icon"><ContainerServiceIcon name={container.name} image={container.version || container.detail} /></div>
+                    <div className="docker-panel-container-icon"><ContainerServiceIcon name={container.name} image={container.version || container.detail} refreshKey={iconRefreshKey} /></div>
                     <div className="docker-panel-container-main">
                       <strong>{container.name}</strong>
                       <span>{container.version || container.detail || (zhMode ? "镜像信息未知" : "Image unavailable")}</span>
@@ -311,6 +318,7 @@ export function DockerManagementPanel({
   refreshing = false,
   onAction,
   onOpenComposeEditor,
+  iconRefreshKey = 0,
 }: {
   server: ServerSummary;
   services: DockerPanelService[];
@@ -324,6 +332,7 @@ export function DockerManagementPanel({
   refreshing?: boolean;
   onAction?: (action: DockerPanelAction) => Promise<DockerPanelActionResult | void>;
   onOpenComposeEditor?: (path: string, name: string) => void;
+  iconRefreshKey?: number;
 }) {
   const zhMode = language === "zh-CN";
   const [query, setQuery] = useState("");
@@ -342,6 +351,15 @@ export function DockerManagementPanel({
   const [localAutostart, setLocalAutostart] = useState("");
   const [openContainerMenu, setOpenContainerMenu] = useState<string | null>(null);
   const [openPortMenu, setOpenPortMenu] = useState<string | null>(null);
+  const [overviewImages, setOverviewImages] = useState<DockerImageSummary[] | null>(null);
+  const [overviewComposeProjects, setOverviewComposeProjects] = useState<DockerComposeProject[] | null>(null);
+  const [overviewStatsError, setOverviewStatsError] = useState("");
+  const [overviewStatsLoading, setOverviewStatsLoading] = useState(false);
+  const onActionRef = useRef(onAction);
+  const overviewLoadGeneration = useRef(0);
+  useEffect(() => {
+    onActionRef.current = onAction;
+  }, [onAction]);
   const panelRef = useRef<HTMLElement | null>(null);
   const [panelWidth, setPanelWidth] = useState(0);
   useEffect(() => {
@@ -429,7 +447,7 @@ export function DockerManagementPanel({
     setActionError("");
   }, [dockerService?.id, dockerService?.status, dockerService?.dockerRootDir, dockerService?.dockerAutostart, dockerService?.dockerCapabilities]);
   const runAction = async (action: DockerPanelAction) => {
-    if (!onAction || actionBusy) return;
+    if (!onAction || actionBusy || overviewStatsLoading) return;
     setActionBusy(action.kind);
     setActionError("");
     setActionMessage("");
@@ -509,6 +527,52 @@ export function DockerManagementPanel({
     setSection(fullPanel ? "overview" : "containers");
   }, [fullPanel]);
 
+  useEffect(() => {
+    if (!fullPanel || section !== "overview" || !dockerService || !onActionRef.current) return;
+    const generation = ++overviewLoadGeneration.current;
+    let cancelled = false;
+    setOverviewImages(null);
+    setOverviewComposeProjects(null);
+    setOverviewStatsError("");
+    setOverviewStatsLoading(true);
+
+    const loadOverviewStats = async () => {
+      let imageError = "";
+      try {
+        const result = await onActionRef.current?.({ kind: "image", operation: "list" });
+        if (cancelled || generation !== overviewLoadGeneration.current) return;
+        setOverviewImages(result?.images || []);
+      } catch (error) {
+        imageError = String(error);
+        if (!cancelled && generation === overviewLoadGeneration.current) setOverviewImages([]);
+      }
+      if (cancelled || generation !== overviewLoadGeneration.current) return;
+      try {
+        const result = await onActionRef.current?.({ kind: "compose", operation: "list" });
+        if (cancelled || generation !== overviewLoadGeneration.current) return;
+        setOverviewComposeProjects(result?.composeProjects || []);
+      } catch (error) {
+        if (!cancelled && generation === overviewLoadGeneration.current) {
+          setOverviewComposeProjects([]);
+          setOverviewStatsError(imageError ? `${imageError}; ${String(error)}` : String(error));
+        }
+      }
+      if (imageError && !cancelled && generation === overviewLoadGeneration.current) setOverviewStatsError(imageError);
+      if (!cancelled && generation === overviewLoadGeneration.current) setOverviewStatsLoading(false);
+    };
+    void loadOverviewStats();
+    return () => {
+      cancelled = true;
+      if (generation === overviewLoadGeneration.current) setOverviewStatsLoading(false);
+    };
+  }, [dockerService?.id, fullPanel, iconRefreshKey, section, server.id]);
+
+  const overviewImageCount = overviewImages?.length;
+  const overviewUsedImageCount = overviewImages?.filter((image) => Boolean(image.usedBy?.length)).length;
+  const overviewComposeCount = overviewComposeProjects?.length;
+  const overviewComposeRunningCount = overviewComposeProjects?.filter((project) => isComposeProjectRunning(project.status)).length;
+  const overviewComposeProblemCount = overviewComposeProjects?.filter((project) => isComposeProjectProblem(project.status)).length;
+
   return (
     <section ref={panelRef} className={`docker-management-panel ${fullPanel ? "is-full-layout" : "is-compact-layout"}`} aria-label={zhMode ? "Docker 管理" : "Docker management"}>
       {showTabs && (
@@ -566,10 +630,23 @@ export function DockerManagementPanel({
                 <strong>{zhMode ? "健康" : "Health"}</strong>
                 <span>{effectiveRunning ? (zhMode ? "所有服务运行状态正常" : "All services are running normally") : (zhMode ? "状态来自当前服务器扫描" : "Status from the current server scan")}</span>
                 <div className="docker-full-health-metrics">
-                  <span>◈ {zhMode ? `${containers.length} 个容器` : `${containers.length} containers`}</span>
-                  <span>● {zhMode ? `${runningCount} 个运行中` : `${runningCount} running`}</span>
-                  <span>◌ {zhMode ? `${webEntryCount} 个 Web 入口` : `${webEntryCount} Web entries`}</span>
+                  <span><i aria-hidden="true">◈</i>{zhMode
+                    ? overviewComposeCount === undefined
+                      ? "Compose 项目读取中…"
+                      : `共 ${overviewComposeCount} 个项目；${overviewComposeRunningCount} 个运行中；${overviewComposeProblemCount} 个异常`
+                    : overviewComposeCount === undefined
+                      ? "Loading Compose projects…"
+                      : `${overviewComposeCount} projects; ${overviewComposeRunningCount} running; ${overviewComposeProblemCount} issues`}</span>
+                  <span><i aria-hidden="true">◉</i>{zhMode
+                    ? overviewImageCount === undefined
+                      ? "镜像读取中…"
+                      : `共 ${overviewImageCount} 个镜像；${overviewUsedImageCount} 个已使用；${overviewImageCount - (overviewUsedImageCount || 0)} 个未使用`
+                    : overviewImageCount === undefined
+                      ? "Loading images…"
+                      : `${overviewImageCount} images; ${overviewUsedImageCount} used; ${overviewImageCount - (overviewUsedImageCount || 0)} unused`}</span>
+                  <span><i aria-hidden="true">⬡</i>{zhMode ? `共 ${containers.length} 个容器；${runningCount} 个运行中` : `${containers.length} containers; ${runningCount} running`}</span>
                 </div>
+                {overviewStatsError && <small className="docker-overview-stats-error">{zhMode ? "镜像或 Compose 统计读取失败，容器扫描仍可用" : "Image or Compose statistics could not be read; container scan is still available"}</small>}
               </div>
               <b className={effectiveRunning ? "is-healthy" : "is-unknown"} aria-label={effectiveRunning ? (zhMode ? "健康" : "Healthy") : (zhMode ? "状态未知" : "Status unknown")}>{effectiveRunning ? <Check size={13} strokeWidth={2.5} /> : "!"}</b>
             </div>
@@ -668,7 +745,7 @@ export function DockerManagementPanel({
             return (
               <div className="docker-management-row-group" key={container.id}>
               <article className="docker-management-row">
-                <div className="docker-management-row-icon"><ContainerServiceIcon name={container.name} image={container.version || container.detail} /></div>
+                <div className="docker-management-row-icon"><ContainerServiceIcon name={container.name} image={container.version || container.detail} refreshKey={iconRefreshKey} /></div>
                 <div className="docker-management-row-main">
                   <strong>{container.name}</strong>
                   <span>{container.version || container.detail || (zhMode ? "镜像信息未知" : "Image unavailable")}</span>
