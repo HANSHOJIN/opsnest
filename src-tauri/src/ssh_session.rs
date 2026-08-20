@@ -1,4 +1,4 @@
-use russh::{client, keys, ChannelMsg, Pty};
+use russh::{client, keys, ChannelMsg, Disconnect, Pty};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -8,9 +8,12 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::Emitter;
+use tauri::{AppHandle, Emitter};
 use tokio::io::{duplex, AsyncWriteExt};
-use tokio::sync::{oneshot, Notify};
+use tokio::{
+    sync::{oneshot, Notify},
+    time::timeout,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +50,12 @@ impl client::Handler for Handler {
 
 type Session = client::Handle<Handler>;
 static SESSIONS: OnceLock<Mutex<HashMap<String, Arc<Session>>>> = OnceLock::new();
+const MAX_COMMAND_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+const COMMAND_IDLE_TIMEOUT_SECS: u64 = 5 * 60;
+// Registry metadata checks may legitimately stay quiet while a remote
+// registry resolves a digest.  They opt into this longer limit; ordinary
+// one-shot SSH commands keep the shorter safety timeout above.
+const LONG_COMMAND_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -588,6 +597,13 @@ pub struct InteractiveCommandResult {
     pub terminal_marker: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SshCommandOutputEvent {
+    stream_id: String,
+    data: String,
+}
+
 /// Returns the credentials for an existing interactive terminal to backend
 /// code only. The value is never serialized into model messages or emitted to
 /// the frontend.
@@ -710,6 +726,22 @@ async fn run_interactive_command_with_marker_inner(
     };
     append_blackboard(&shell, "ai_command", command.trim().to_string());
     let (command_to_run, sudo_password) = prepare_sudo_command(command, sudo_password);
+    // Do not write the credential to the PTY optimistically.  On systems
+    // without sudo (fnOS is one example), the command exits immediately and
+    // an eagerly-written password becomes the next shell command.  Use a
+    // private prompt marker and send the password only after sudo actually
+    // asks for it.  Passwordless/cached sudo therefore consumes no secret.
+    let sudo_prompt_marker = sudo_password
+        .map(|_| format!("__OPSNEST_INTERACTIVE_SUDO_PROMPT_{marker_id}__"));
+    let command_to_run = sudo_prompt_marker
+        .as_deref()
+        .map(|prompt| {
+            command_to_run.replace(
+                "sudo -S -p ''",
+                &format!("sudo -S -p '{prompt}'"),
+            )
+        })
+        .unwrap_or(command_to_run);
     let start = shell
         .output
         .lock()
@@ -742,22 +774,10 @@ async fn run_interactive_command_with_marker_inner(
                 terminal_marker: String::new(),
             });
         }
-        // `sudo -S` reads this directly from the PTY after the command has
-        // started. The password is not part of the shell command, terminal
-        // output, blackboard, model request, or portable JSON files.
-        if let Some(password) = sudo_password {
-            if let Err(error) = writer
-                .data_bytes(format!("{password}\n").into_bytes())
-                .await
-            {
-                return Ok(InteractiveCommandResult {
-                    output: command_result_error(error),
-                    terminal_marker: String::new(),
-                });
-            }
-        }
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let mut timeout_interrupt_sent = false;
+    let mut sudo_password_sent = false;
     loop {
         let data = shell
             .output
@@ -767,6 +787,30 @@ async fn run_interactive_command_with_marker_inner(
             .unwrap_or_default()
             .to_vec();
         let text = String::from_utf8_lossy(&data).into_owned();
+        // `sudo -S` emits the private prompt only when it really needs a
+        // password.  This check must happen before the completion marker is
+        // handled so a prompt and command output split across PTY chunks is
+        // still safe.  The marker is removed from the AI result below and is
+        // suppressed by the frontend terminal protocol parser.
+        if !sudo_password_sent {
+            if let (Some(prompt), Some(password)) =
+                (sudo_prompt_marker.as_deref(), sudo_password)
+            {
+                if text.contains(prompt) {
+                    let writer = shell.writer.lock().await;
+                    if let Err(error) = writer
+                        .data_bytes(format!("{password}\n").into_bytes())
+                        .await
+                    {
+                        return Ok(InteractiveCommandResult {
+                            output: command_result_error(error),
+                            terminal_marker: String::new(),
+                        });
+                    }
+                    sudo_password_sent = true;
+                }
+            }
+        }
         if let Some(index) = text.find(&marker) {
             // Return only command output. The marker line is the protocol
             // boundary; the following shell prompt remains in the PTY stream
@@ -775,17 +819,48 @@ async fn run_interactive_command_with_marker_inner(
                 .find(&start_marker)
                 .map(|start_index| start_index + start_marker.len())
                 .unwrap_or_default();
+            let mut output = text[output_start..index]
+                .trim_matches(['\r', '\n'])
+                .to_string();
+            if let Some(prompt) = sudo_prompt_marker.as_deref() {
+                output = output.replace(prompt, "");
+            }
+            if timeout_interrupt_sent {
+                output.push_str(
+                    "\n",
+                );
+                output.push_str(&command_result_error(
+                    "Interactive command timed out; sent Ctrl+C to the remote process",
+                ));
+            }
             return Ok(InteractiveCommandResult {
-                output: text[output_start..index]
-                    .trim_matches(['\r', '\n'])
-                    .to_string(),
+                output,
                 terminal_marker: marker,
             });
         }
         if tokio::time::Instant::now() >= deadline {
+            if !timeout_interrupt_sent {
+                // Do not return while the wrapped shell command is still
+                // running.  Returning here used to leave the remote grep/
+                // find/etc. alive and, more importantly, left the frontend
+                // waiting forever for the END marker that could no longer be
+                // associated with this tool turn.  Interrupt first, then give
+                // the wrapper a short grace period to print its END record.
+                timeout_interrupt_sent = true;
+                let _ = shell
+                    .writer
+                    .lock()
+                    .await
+                    .data_bytes(vec![3])
+                    .await;
+                deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                continue;
+            }
             return Ok(InteractiveCommandResult {
-                output: command_result_error("Interactive command timed out"),
-                terminal_marker: marker,
+                output: command_result_error(
+                    "Interactive command timed out and did not return its completion marker",
+                ),
+                terminal_marker: String::new(),
             });
         }
         if let Some(cancel_receiver) = cancel.as_deref_mut() {
@@ -874,6 +949,25 @@ pub async fn run_session_command(
     approved: bool,
     sudo_password: Option<&str>,
 ) -> Result<String, String> {
+    run_session_command_with_stream(
+        session_id,
+        command,
+        approved,
+        sudo_password,
+        None,
+        COMMAND_IDLE_TIMEOUT_SECS,
+    )
+    .await
+}
+
+async fn run_session_command_with_stream(
+    session_id: &str,
+    command: &str,
+    approved: bool,
+    sudo_password: Option<&str>,
+    stream: Option<(&AppHandle, &str)>,
+    idle_timeout_secs: u64,
+) -> Result<String, String> {
     let lowered = command.to_ascii_lowercase();
     let risky = [
         "sudo ",
@@ -931,8 +1025,34 @@ pub async fn run_session_command(
             .map_err(|error| error.to_string())?;
     }
     let mut output = Vec::new();
-    while let Some(message) = channel.wait().await {
+    loop {
+        let message = timeout(
+            Duration::from_secs(idle_timeout_secs),
+            channel.wait(),
+        )
+        .await
+        .map_err(|_| "SSH command timed out while waiting for remote output".to_string())?;
+        let Some(message) = message else {
+            break;
+        };
         if let ChannelMsg::Data { data } = message {
+            if let Some((app, stream_id)) = stream {
+                let _ = app.emit(
+                    "opsnest-ssh-command-output",
+                    SshCommandOutputEvent {
+                        stream_id: stream_id.to_string(),
+                        data: String::from_utf8_lossy(&data).into_owned(),
+                    },
+                );
+            }
+            let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(output.len());
+            if data.len() > remaining {
+                output.extend_from_slice(&data[..remaining]);
+                return Err(format!(
+                    "SSH command output exceeded the {} MiB safety limit",
+                    MAX_COMMAND_OUTPUT_BYTES / (1024 * 1024)
+                ));
+            }
             output.extend_from_slice(&data);
         }
     }
@@ -950,10 +1070,38 @@ pub async fn execute_ssh_command(
 }
 
 #[tauri::command]
-pub fn close_ssh_session(session_id: String) -> Result<(), String> {
-    sessions()
+pub async fn execute_ssh_command_stream(
+    app: AppHandle,
+    session_id: String,
+    command: String,
+    approved: bool,
+    sudo_password: Option<String>,
+    stream_id: String,
+    idle_timeout_secs: Option<u64>,
+) -> Result<String, String> {
+    run_session_command_with_stream(
+        &session_id,
+        &command,
+        approved,
+        sudo_password.as_deref(),
+        Some((&app, &stream_id)),
+        idle_timeout_secs
+            .unwrap_or(COMMAND_IDLE_TIMEOUT_SECS)
+            .clamp(COMMAND_IDLE_TIMEOUT_SECS, LONG_COMMAND_IDLE_TIMEOUT_SECS),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn close_ssh_session(session_id: String) -> Result<(), String> {
+    let session = sessions()
         .lock()
         .map_err(|_| "SSH session lock failed".to_string())?
         .remove(&session_id);
+    if let Some(session) = session {
+        let _ = session
+            .disconnect(Disconnect::ByApplication, "", "English")
+            .await;
+    }
     Ok(())
 }

@@ -73,7 +73,7 @@ export type DockerPanelAction =
   | { kind: "autostart"; enabled: boolean }
   | { kind: "root"; value: string }
   | { kind: "container"; name: string; operation: "start" | "stop" | "restart" | "details" | "logs" }
-  | { kind: "image"; operation: "list" | "inspect" | "pull" | "remove" | "check" | "upgrade"; reference?: string; usedBy?: string[]; composeTargets?: Array<{ path: string; service: string }> }
+  | { kind: "image"; operation: "list" | "inspect" | "pull" | "remove" | "check" | "checkOne" | "upgrade"; reference?: string; usedBy?: string[]; composeTargets?: Array<{ path: string; service: string }> }
   | { kind: "registry"; operation: "list" }
   | { kind: "network"; operation: "list" | "inspect"; name?: string }
   | { kind: "compose"; operation: "list" | "browse" | "mkdir" | "inspect" | "read" | "config" | "logs" | "build" | "up" | "down" | "restart" | "remove" | "create"; path?: string; name?: string; content?: string; startAfterCreate?: boolean; overwriteExisting?: boolean };
@@ -337,6 +337,11 @@ export function DockerManagementPanel({
   const zhMode = language === "zh-CN";
   const [query, setQuery] = useState("");
   const [section, setSection] = useState<DockerManagementSection>("overview");
+  // Keep a visited section mounted after the first visit.  A right panel can
+  // cross the compact/full breakpoint while a registry check is running; the
+  // view may be hidden, but unmounting it would discard its progress surface
+  // and make a still-running SSH task look cancelled.
+  const [imagesPanelVisited, setImagesPanelVisited] = useState(false);
   const [rootEditing, setRootEditing] = useState(false);
   const [rootDraft, setRootDraft] = useState("");
   const [actionBusy, setActionBusy] = useState<DockerPanelAction["kind"] | null>(null);
@@ -446,6 +451,9 @@ export function DockerManagementPanel({
     setRootEditing(false);
     setActionError("");
   }, [dockerService?.id, dockerService?.status, dockerService?.dockerRootDir, dockerService?.dockerAutostart, dockerService?.dockerCapabilities]);
+  useEffect(() => {
+    if (section === "images") setImagesPanelVisited(true);
+  }, [section]);
   const runAction = async (action: DockerPanelAction) => {
     if (!onAction || actionBusy || overviewStatsLoading) return;
     setActionBusy(action.kind);
@@ -465,21 +473,12 @@ export function DockerManagementPanel({
         window.dispatchEvent(new CustomEvent("opsnest-refresh-docker-state", { detail: { serverId: server.id } }));
       }, 2800);
     };
-    const ACTION_TIMEOUT = Symbol("docker-action-timeout");
+    const actionPromise = onAction(action);
+    const timeoutId = window.setTimeout(() => {
+      setActionMessage(zhMode ? "操作仍在服务器上执行，已暂缓其他 Docker 操作…" : "The operation is still running on the server; other Docker actions are paused…");
+    }, 7000);
     try {
-      const result = await Promise.race([
-        onAction(action),
-        new Promise<typeof ACTION_TIMEOUT>((resolve) => window.setTimeout(() => resolve(ACTION_TIMEOUT), 7000)),
-      ]);
-      if (result === ACTION_TIMEOUT) {
-        setActionMessage(zhMode ? "操作已发出，正在重新读取状态…" : "The action was sent; refreshing status…");
-        delayedRefresh();
-        window.setTimeout(() => {
-          setServiceTransition(null);
-          setAutostartTransition(null);
-        }, 6000);
-        return;
-      }
+      const result = await actionPromise;
       if (result?.running !== undefined) setLocalRunning(result.running);
       if (action.kind === "container" && result?.containerRunning !== undefined) {
         setLocalContainerRunning((current) => ({
@@ -494,9 +493,16 @@ export function DockerManagementPanel({
       if (action.kind === "service" || action.kind === "autostart" || action.kind === "container") delayedRefresh();
     } catch (error) {
       setActionError(String(error));
-      if (action.kind === "service") setServiceTransition(null);
-      if (action.kind === "autostart") setAutostartTransition(null);
+      if (action.kind === "service") {
+        setLocalRunning(undefined);
+        setServiceTransition(null);
+      }
+      if (action.kind === "autostart") {
+        setLocalAutostart("");
+        setAutostartTransition(null);
+      }
     } finally {
+      window.clearTimeout(timeoutId);
       setActionBusy(null);
     }
   };
@@ -523,10 +529,6 @@ export function DockerManagementPanel({
     ["registry", "镜像仓库", "Registry"],
     ["network", "网络", "Network"],
   ];
-  useEffect(() => {
-    setSection(fullPanel ? "overview" : "containers");
-  }, [fullPanel]);
-
   useEffect(() => {
     if (!fullPanel || section !== "overview" || !dockerService || !onActionRef.current) return;
     const generation = ++overviewLoadGeneration.current;
@@ -706,8 +708,14 @@ export function DockerManagementPanel({
           onOpenEditor={onOpenComposeEditor}
         />
       )}
-      {fullPanel && section === "images" && (
-        <ImagesPanel language={language} onAction={onAction} />
+      {imagesPanelVisited && (
+        <div
+          className="docker-management-section-surface"
+          style={fullPanel && section === "images" ? undefined : { display: "none" }}
+          aria-hidden={fullPanel && section === "images" ? undefined : true}
+        >
+          <ImagesPanel language={language} serverId={server.id} onAction={onAction} />
+        </div>
       )}
       {fullPanel && section === "registry" && (
         <RegistryPanel language={language} onAction={onAction} />

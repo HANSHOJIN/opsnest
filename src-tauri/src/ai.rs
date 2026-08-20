@@ -608,7 +608,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
     let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n当前会话同时绑定了一个 OpsNest 本地 workspace（工作区）。它位于用户电脑上，与远程服务器文件系统分离；需要保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file、workspace_delete_file 或 download_to_workspace。用户说“保存到 workspace/工作区/本地”时，必须使用这些本地工具，不要通过 run_command 在远程创建同名工作目录；但用户明确指定远程路径，或任务确实需要在远程服务器准备工作目录时，仍可使用远程工具。\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。用户明确要求打开 OpsNest 文件管理器或查看刚才修改的远程文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor；这些工具只改变 OpsNest 界面，不读取或修改远程文件。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。回答长度规则：默认先给结论，控制在 3-6 行或不超过 5 个要点；成功执行后只报告结果、异常和必要的下一步，不复述原始终端输出，不写背景教程、长篇风险清单或多个备选方案。只有用户明确要求详细解释、教程或完整排障步骤时才展开。");
-    let system = format!("{system}\n共享终端黑板（最近事件）：\n{board_context}\n");
+    let system = format!("{system}\n若工具返回超时，不要原样重复同一条命令；应缩小扫描范围、使用 -l/--include 或 Docker CLI 查询，避免递归读取大型日志目录。\n共享终端黑板（最近事件）：\n{board_context}\n");
     // The PTY output is already visible in the xterm surface. Keep replies
     // focused on interpretation and next steps instead of copying a full
     // directory listing or command transcript into the green AI channel.
@@ -641,6 +641,14 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     let mut executed = Vec::new();
     let mut ui_actions = Vec::new();
     if let Some(command) = approved_followup.as_deref() {
+        if is_interactive_agent_command(command) {
+            return Ok(serde_json::json!({
+                "status": "error",
+                "content": "该命令会接管交互式终端，不能作为 AI 工具执行。请直接在 SSH 终端中输入并操作。",
+                "executed": executed
+            })
+            .to_string());
+        }
         workflow.tool_requested(true);
         workflow.approval_granted();
         record_agent_phase(&request.session_id, &workflow);
@@ -886,6 +894,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 record_agent_phase(&request.session_id, &workflow);
                 return Err("AI requested an invalid command".into());
             }
+            if is_interactive_agent_command(&command) {
+                workflow.fail();
+                record_agent_phase(&request.session_id, &workflow);
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "content": "该命令会接管交互式终端，不能作为 AI 工具执行。请直接在 SSH 终端中输入并操作。",
+                    "executed": executed,
+                    "uiActions": ui_actions
+                })
+                .to_string());
+            }
             let requires_approval =
                 !approved_for_this_turn && command_requires_approval(&command, &risk);
             workflow.tool_requested(requires_approval);
@@ -1029,6 +1048,61 @@ fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
         "agent_phase",
         turn.event_payload().to_string(),
     );
+}
+
+fn is_interactive_agent_command(command: &str) -> bool {
+    let words = command
+        .split_whitespace()
+        .map(|word| word.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let Some(first) = words.first().map(String::as_str) else {
+        return false;
+    };
+    let interactive_programs = [
+        "bash", "sh", "zsh", "fish", "vim", "nvim", "nano", "top", "htop", "tmux",
+        "screen", "mysql", "psql", "sftp", "ftp",
+    ];
+    if interactive_programs.contains(&first)
+        && !words.iter().any(|word| word == "-c" || word == "--command")
+    {
+        return true;
+    }
+    if first != "sudo" && first != "doas" {
+        return false;
+    }
+    let mut index = 1;
+    let mut interactive_option = false;
+    let mut command_name: Option<&str> = None;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "--" {
+            command_name = words.get(index + 1).map(String::as_str);
+            break;
+        }
+        if matches!(word, "-i" | "--login" | "-s" | "--shell") {
+            interactive_option = true;
+            index += 1;
+            continue;
+        }
+        if word == "-n" || word == "--non-interactive" {
+            return false;
+        }
+        if word.starts_with('-') {
+            if matches!(word, "-u" | "-g" | "-r" | "-R" | "-C") {
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        command_name = Some(word);
+        break;
+    }
+    if !interactive_option {
+        return matches!(command_name, Some("su" | "bash" | "sh" | "zsh" | "fish"));
+    }
+    command_name.is_none()
+        || matches!(command_name, Some("su" | "bash" | "sh" | "zsh" | "fish"))
 }
 
 #[tauri::command]

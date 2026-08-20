@@ -578,6 +578,7 @@ pub fn run() {
             ssh_session::resize_interactive_ssh_terminal,
             ssh_session::close_interactive_ssh_terminal,
             ssh_session::execute_ssh_command,
+            ssh_session::execute_ssh_command_stream,
             ssh_session::execute_interactive_ssh_command,
             ssh_session::close_ssh_session,
             ai::chat_completion,

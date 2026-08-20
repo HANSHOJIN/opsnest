@@ -117,18 +117,13 @@ export function ComposePanel({
                 : (zhMode ? "正在扫描 Compose 项目…" : "Scanning Compose projects…")
       : (zhMode ? "正在处理…" : "Working…");
     if (action.kind === "compose" && action.operation !== "list") setMessage(operationLabel);
-    const ACTION_TIMEOUT = Symbol("compose-action-timeout");
+    const actionPromise = onAction(action);
+    const timeoutId = window.setTimeout(() => {
+      const delayedMessage = zhMode ? `${operationLabel}仍在服务器上执行，已暂缓其他 Compose 操作。` : `${operationLabel} is still running on the server; other Compose actions are paused.`;
+      setMessage(delayedMessage);
+    }, 10000);
     try {
-      const result = await Promise.race([
-        onAction(action),
-        new Promise<typeof ACTION_TIMEOUT>((resolve) => window.setTimeout(() => resolve(ACTION_TIMEOUT), 10000)),
-      ]);
-      if (result === ACTION_TIMEOUT) {
-        const delayedMessage = zhMode ? `${operationLabel}已发出，稍后刷新状态。` : `${operationLabel} The request was sent; status will refresh shortly.`;
-        setMessage(delayedMessage);
-        if (action.kind === "compose" && action.operation !== "list") window.setTimeout(() => void refresh(), 2800);
-        return { message: delayedMessage };
-      }
+      const result = await actionPromise;
       if (result?.composeProjects) {
         if (!(action.kind === "compose" && action.operation === "list")) setProjects(result.composeProjects);
         if (!selectedPath && result.composeProjects[0]) setSelectedPath(result.composeProjects[0].configPath);
@@ -140,6 +135,7 @@ export function ComposePanel({
       setError(String(reason));
       return undefined;
     } finally {
+      window.clearTimeout(timeoutId);
       setBusy(null);
     }
   };

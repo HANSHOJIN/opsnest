@@ -54,6 +54,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { listen } from "@tauri-apps/api/event";
 import { ImeGate } from "./features/terminal/ime-gate";
 import { RemoteIcon as CachedRemoteIcon } from "./features/icons/catalog";
+import { isInteractiveShellCommand as classifyInteractiveShellCommand } from "./features/terminal/command-classification";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
 import { formatAiConclusion } from "./features/terminal/ai-format";
@@ -158,6 +159,22 @@ function shellQuote(value: string) {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
+const dockerActionQueues = new Map<string, Promise<void>>();
+async function withDockerActionLock<T>(serverId: string, task: () => Promise<T>): Promise<T> {
+  const previous = dockerActionQueues.get(serverId) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.catch(() => undefined).then(() => current);
+  dockerActionQueues.set(serverId, queued);
+  await previous.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (dockerActionQueues.get(serverId) === queued) dockerActionQueues.delete(serverId);
+  }
+}
+
 function stripTerminalAnsi(value: string) {
   return value
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
@@ -168,8 +185,12 @@ function stripTerminalAnsi(value: string) {
 }
 
 function dockerActionCommand(action: DockerPanelAction) {
-  const privilege =
-    "run_privileged() { if [ \"$(id -u)\" = 0 ]; then \"$@\"; elif command -v sudo >/dev/null 2>&1; then sudo -n \"$@\"; else echo '需要 root 或 sudo 权限' >&2; return 126; fi; }";
+  const privilege = [
+    "run_privileged_cmd() { if [ \"$(id -u)\" = 0 ]; then \"$@\"; elif command -v sudo >/dev/null 2>&1; then sudo -n \"$@\"; else echo '需要 root 或 sudo 权限' >&2; return 126; fi; }",
+    "docker_cmd() { if command -v docker >/dev/null 2>&1; then if [ \"$(id -u)\" = 0 ] || [ -w \"${DOCKER_SOCKET:-/var/run/docker.sock}\" ] || [ -n \"${DOCKER_HOST:-}\" ]; then docker \"$@\"; else run_privileged_cmd docker \"$@\"; fi; elif command -v podman >/dev/null 2>&1; then podman \"$@\"; else echo '未找到 Docker 或 Podman' >&2; return 127; fi; }",
+    "compose_cmd() { if command -v docker >/dev/null 2>&1 && docker_cmd compose version >/dev/null 2>&1; then docker_cmd compose \"$@\"; elif command -v docker-compose >/dev/null 2>&1; then run_privileged_cmd docker-compose \"$@\"; else echo '未找到 Docker Compose' >&2; return 127; fi; }",
+  ].join(";");
+  const wrap = (command: string) => privilege + "; " + command;
   if (action.kind === "service" || action.kind === "autostart") {
     const operation =
       action.kind === "service"
@@ -182,17 +203,16 @@ function dockerActionCommand(action: DockerPanelAction) {
     const initOperation = operation;
     const rcBlock =
       action.kind === "autostart"
-        ? "if command -v rc-update >/dev/null 2>&1; then if run_privileged rc-update " +
+         ? "if command -v rc-update >/dev/null 2>&1; then if run_privileged_cmd rc-update " +
           (action.enabled ? "add docker default" : "del docker default") +
           "; then exit 0; fi; fi; "
         : "";
-    return (
-      privilege +
-      "; if command -v systemctl >/dev/null 2>&1; then if run_privileged systemctl " +
+    return wrap(
+      "if command -v systemctl >/dev/null 2>&1; then if run_privileged_cmd systemctl " +
       operation +
-      " docker; then exit 0; fi; fi; if [ -x /etc/init.d/docker ]; then if run_privileged /etc/init.d/docker " +
+      " docker; then exit 0; fi; fi; if [ -x /etc/init.d/docker ]; then if run_privileged_cmd /etc/init.d/docker " +
       initOperation +
-      "; then exit 0; fi; fi; if command -v service >/dev/null 2>&1; then if run_privileged service docker " +
+      "; then exit 0; fi; fi; if command -v service >/dev/null 2>&1; then if run_privileged_cmd service docker " +
       operation +
       "; then exit 0; fi; fi; " +
       rcBlock +
@@ -211,47 +231,51 @@ function dockerActionCommand(action: DockerPanelAction) {
               "state=$(container_cmd inspect --format '{{.State.Running}}' " + name + " 2>/dev/null || true)",
               "printf '%s\\n' \"$state\"",
             ].join(" && ");
-    return (
-      privilege +
-      "; container_cmd() { if command -v docker >/dev/null 2>&1; then docker \"$@\"; elif command -v podman >/dev/null 2>&1; then podman \"$@\"; else echo '未找到 Docker 或 Podman' >&2; return 127; fi; }; run_privileged container_cmd " +
-      command
-    );
+    return wrap("container_cmd() { docker_cmd \"$@\"; }; docker_cmd " + command);
   }
   if (action.kind === "image") {
     const reference = action.reference?.trim() || "";
-    if (action.operation !== "list" && action.operation !== "check" && !reference)
+    if (action.operation !== "list" && action.operation !== "check" && action.operation !== "checkOne" && !reference)
       throw new Error("请填写镜像名称或 ID");
     if (action.operation === "list") {
-      return [
-        "if command -v docker >/dev/null 2>&1; then image_engine=docker; elif command -v podman >/dev/null 2>&1; then image_engine=podman; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi",
-        '"$image_engine" image ls --no-trunc --format \'{{json .}}\'',
-        'for container_id in $("$image_engine" ps -aq 2>/dev/null); do',
-        '  usage_image_id=$("$image_engine" inspect --format \'{{.Image}}\' "$container_id" 2>/dev/null || true)',
-        '  usage_image_ref=$("$image_engine" inspect --format \'{{.Config.Image}}\' "$container_id" 2>/dev/null || true)',
-        '  usage_container_name=$("$image_engine" inspect --format \'{{.Name}}\' "$container_id" 2>/dev/null | sed \'s#^/##\' || true)',
+      return wrap([
+        'docker_cmd image ls --no-trunc --format \'{{json .}}\'',
+        'for container_id in $(docker_cmd ps -aq 2>/dev/null); do',
+        '  usage_image_id=$(docker_cmd inspect --format \'{{.Image}}\' "$container_id" 2>/dev/null || true)',
+        '  usage_image_ref=$(docker_cmd inspect --format \'{{.Config.Image}}\' "$container_id" 2>/dev/null || true)',
+        '  usage_container_name=$(docker_cmd inspect --format \'{{.Name}}\' "$container_id" 2>/dev/null | sed \'s#^/##\' || true)',
         '  [ -n "$usage_container_name" ] && printf \'__OPSNEST_IMAGE_USAGE__\\t%s\\t%s\\t%s\\n\' "$usage_image_id" "$usage_image_ref" "$usage_container_name"',
         "done",
-      ].join("\n");
+      ].join("\n"));
     }
-    if (action.operation === "check") {
-      return [
-        "if ! command -v docker >/dev/null 2>&1; then echo '镜像更新检查仅支持 Docker' >&2; exit 127; fi",
-        "for ref in $(docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | sed '/<none>/d'); do",
-        "local_digest=$(docker image inspect \"$ref\" --format '{{join .RepoDigests \",\"}}' 2>/dev/null | sed -n 's/^[^@]*@//; s/,.*//; p' | head -n 1)",
-        "remote_digest=$(docker buildx imagetools inspect \"$ref\" 2>/dev/null | awk '/^Digest:/ {print $2; exit}')",
+    if (action.operation === "check" || action.operation === "checkOne") {
+      const checkStart = action.operation === "checkOne"
+        ? "ref=" + shellQuote(reference)
+        : "for ref in $(docker_cmd image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | sed '/<none>/d'); do";
+      const checkEnd = action.operation === "checkOne" ? "" : "done";
+      return wrap([
+        checkStart,
+        // A registry digest lookup can take a while and produces no output by
+        // itself. Emit a small line before and after each lookup so the SSH
+        // command remains active and the UI can tell that the task is still
+        // progressing instead of treating a quiet registry as a dead session.
+        "printf '__OPSNEST_IMAGE_CHECK_PROGRESS__\\t%s\\tstart\\n' \"$ref\"",
+        "local_digest=$(docker_cmd image inspect \"$ref\" --format '{{join .RepoDigests \",\"}}' 2>/dev/null | sed -n 's/^[^@]*@//; s/,.*//; p' | head -n 1)",
+        "remote_digest=$(docker_cmd buildx imagetools inspect \"$ref\" 2>/dev/null | awk '/^Digest:/ {print $2; exit}')",
         "update_state=unknown; if [ -n \"$local_digest\" ] && [ -n \"$remote_digest\" ]; then if [ \"$local_digest\" = \"$remote_digest\" ]; then update_state=current; else update_state=available; fi; fi",
         "used_by=''; compose_targets=''",
-        "for container_name in $(docker ps -a --filter \"ancestor=$ref\" --format '{{.Names}}' 2>/dev/null); do",
+        "for container_name in $(docker_cmd ps -a --filter \"ancestor=$ref\" --format '{{.Names}}' 2>/dev/null); do",
         "used_by=${used_by:+$used_by,}$container_name",
-        "config_file=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}' 2>/dev/null | cut -d, -f1)",
-        "working_dir=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' 2>/dev/null)",
-        "compose_service=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.service\"}}' 2>/dev/null)",
+        "config_file=$(docker_cmd inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}' 2>/dev/null | cut -d, -f1)",
+        "working_dir=$(docker_cmd inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' 2>/dev/null)",
+        "compose_service=$(docker_cmd inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.service\"}}' 2>/dev/null)",
         "case \"$config_file\" in /*) ;; '') ;; *) config_file=${working_dir%/}/$config_file;; esac",
         "if [ -n \"$config_file\" ] && [ -n \"$compose_service\" ]; then target=$config_file::$compose_service; case \";$compose_targets;\" in *\";$target;\"*) ;; *) compose_targets=${compose_targets:+$compose_targets;}$target;; esac; fi",
         "done",
         "printf '__OPSNEST_IMAGE_UPDATE__\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$ref\" \"$update_state\" \"$local_digest\" \"$remote_digest\" \"$used_by\" \"$compose_targets\"",
-        "done",
-      ].join("\n");
+        "printf '__OPSNEST_IMAGE_CHECK_PROGRESS__\\t%s\\tdone\\n' \"$ref\"",
+        checkEnd,
+      ].join("\n"));
     }
     if (action.operation === "upgrade") {
       const composeTargets = (action.composeTargets || []).filter(
@@ -262,25 +286,24 @@ function dockerActionCommand(action: DockerPanelAction) {
       );
       const rebuildCommands = composeTargets.map((target) => {
         const composeArgs = `-f ${shellQuote(target.path)} up -d --no-deps ${shellQuote(target.service)}`;
-        return "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose " + composeArgs + "; elif command -v docker-compose >/dev/null 2>&1; then docker-compose " + composeArgs + "; else echo '未找到 Docker Compose' >&2; exit 127; fi";
+        return "compose_cmd " + composeArgs + " || exit $?";
       });
       const standaloneCount = Math.max(0, (action.usedBy || []).length - composeTargets.length);
-      return [
-        "if ! command -v docker >/dev/null 2>&1; then echo '镜像升级仅支持 Docker' >&2; exit 127; fi",
-        "pull_output=$(docker pull " + shellQuote(reference) + " 2>&1) || { printf '%s\\n' \"$pull_output\" >&2; exit 1; }",
+      return wrap([
+        "docker_cmd pull " + shellQuote(reference) + " 2>&1; pull_rc=$?; [ \"$pull_rc\" -eq 0 ] || exit \"$pull_rc\"",
         ...rebuildCommands,
         "printf '__OPSNEST_IMAGE_UPGRADE__\\t%s\\t%s\\t%s\\n' " + shellQuote(reference) + " " + composeTargets.length + " " + standaloneCount,
-      ].join("\n");
+      ].join("\n"));
     }
     const args = action.operation === "inspect"
         ? "image inspect " + shellQuote(reference)
         : action.operation === "pull"
           ? "pull " + shellQuote(reference)
           : "image rm " + shellQuote(reference);
-    return "if command -v docker >/dev/null 2>&1; then docker " + args + "; elif command -v podman >/dev/null 2>&1; then podman " + args + "; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi";
+    return wrap("docker_cmd " + args);
   }
   if (action.kind === "registry")
-    return "if command -v docker >/dev/null 2>&1; then docker info --format '{{json .RegistryConfig}}'; else echo '当前镜像仓库读取仅支持 Docker' >&2; exit 127; fi";
+    return wrap("docker_cmd info --format '{{json .RegistryConfig}}'");
   if (action.kind === "network") {
     const name = action.name?.trim() || "";
     if (action.operation === "inspect" && !name)
@@ -288,7 +311,7 @@ function dockerActionCommand(action: DockerPanelAction) {
     const args = action.operation === "list"
       ? "network ls --no-trunc --format '{{json .}}'"
       : "network inspect " + shellQuote(name);
-    return "if command -v docker >/dev/null 2>&1; then docker " + args + "; elif command -v podman >/dev/null 2>&1; then podman " + args + "; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi";
+    return wrap("docker_cmd " + args);
   }
   if (action.kind === "compose") {
     const composePath = action.path?.trim() || "";
@@ -300,32 +323,32 @@ function dockerActionCommand(action: DockerPanelAction) {
     }
     if (action.operation === "mkdir") {
       const target = shellQuote(composePath);
-      return "target=" + target + "; if [ -e \"$target\" ]; then echo '目标目录已存在' >&2; exit 2; fi; mkdir -p -- \"$target\"; printf '已创建目录：%s\\n' \"$target\"";
+      return wrap("target=" + target + "; if [ -e \"$target\" ]; then echo '目标目录已存在' >&2; exit 2; fi; run_privileged_cmd mkdir -p -- \"$target\"; printf '已创建目录：%s\\n' \"$target\"");
     }
-    const composeRun = (args: string) => "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose " + args + "; elif command -v docker-compose >/dev/null 2>&1; then docker-compose " + args + "; else echo '未找到 Docker Compose' >&2; exit 127; fi";
+    const composeRun = (args: string) => "compose_cmd " + args;
     const resolve = "target=" + shellQuote(composePath) + "; case \"$target\" in *.yml|*.yaml) ;; *) if [ -d \"$target\" ]; then found=0; for candidate in \"$target/compose.yaml\" \"$target/compose.yml\" \"$target/docker-compose.yml\" \"$target/docker-compose.yaml\"; do if [ -f \"$candidate\" ]; then target=\"$candidate\"; found=1; break; fi; done; if [ \"$found\" -eq 0 ]; then target=\"$target/compose.yaml\"; fi; else target=\"$target/compose.yaml\"; fi ;; esac;";
     if (action.operation === "list") {
       const scanRoot = composePath ? shellQuote(composePath) : "";
       const scan = "; printf '__OPSNEST_COMPOSE_FILES__\\n'" + (scanRoot
         ? "; if [ -d " + scanRoot + " ]; then find " + scanRoot + " -type f \\( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \\) -print 2>/dev/null; fi"
-        : "") + "; if [ -d /opt/1panel/apps ]; then find /opt/1panel/apps -type f \\( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \\) -print 2>/dev/null; fi; printf '__OPSNEST_COMPOSE_LABELS__\\n'; if command -v docker >/dev/null 2>&1; then docker ps -a --filter label=com.docker.compose.project --format '{{.Label \"com.docker.compose.project\"}}\\t{{.Label \"com.docker.compose.project.config_files\"}}\\t{{.Label \"com.docker.compose.project.working_dir\"}}\\t{{.Status}}'; fi";
-      return composeRun("ls --all --format json") + scan;
+        : "") + "; if [ -d /opt/1panel/apps ]; then find /opt/1panel/apps -type f \\( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \\) -print 2>/dev/null; fi; printf '__OPSNEST_COMPOSE_LABELS__\\n'; if command -v docker >/dev/null 2>&1; then docker_cmd ps -a --filter label=com.docker.compose.project --format '{{.Label \"com.docker.compose.project\"}}\\t{{.Label \"com.docker.compose.project.config_files\"}}\\t{{.Label \"com.docker.compose.project.working_dir\"}}\\t{{.Status}}'; fi";
+      return wrap(composeRun("ls --all --format json") + scan);
     }
     if (action.operation === "inspect")
-      return resolve + " if [ -f \"$target\" ]; then printf '__OPSNEST_COMPOSE_PATH=%s\\n' \"$target\"; cat -- \"$target\"; else printf '__OPSNEST_COMPOSE_MISSING__\\n'; fi";
+      return wrap(resolve + " if [ -f \"$target\" ]; then printf '__OPSNEST_COMPOSE_PATH=%s\\n' \"$target\"; run_privileged_cmd cat -- \"$target\"; else printf '__OPSNEST_COMPOSE_MISSING__\\n'; fi");
     if (action.operation === "read")
-      return resolve + " cat -- \"$target\"";
+      return wrap(resolve + " run_privileged_cmd cat -- \"$target\"");
     if (action.operation === "logs")
-      return resolve + " " + composeRun('-f "$target" logs --tail 200');
+      return wrap(resolve + " " + composeRun('-f "$target" logs --tail 200'));
     if (action.operation === "create") {
       const content = action.content?.trim() || "";
       const writeExisting = action.overwriteExisting ? "1" : "0";
-      const create = resolve + " if [ ! -f \"$target\" ] || [ \"" + writeExisting + "\" = \"1\" ]; then " + (content ? "mkdir -p \"$(dirname \"$target\")\"; printf '%s\\n' " + shellQuote(content) + " > \"$target\";" : "echo '未找到 Compose 配置文件；请选择直接编辑或上传本地文件' >&2; exit 2;") + " else printf '使用现有 Compose 文件：%s\\n' \"$target\"; fi;";
-      const start = action.startAfterCreate ? " " + composeRun('-f "$target" up -d') + ";" : "";
-      return create + start + " printf 'Compose 项目已准备：%s\\n' \"$target\"";
+      const create = resolve + " if [ ! -f \"$target\" ] || [ \"" + writeExisting + "\" = \"1\" ]; then " + (content ? "run_privileged_cmd mkdir -p \"$(dirname \"$target\")\"; printf '%s\\n' " + shellQuote(content) + " | run_privileged_cmd tee \"$target\" >/dev/null;" : "echo '未找到 Compose 配置文件；请选择直接编辑或上传本地文件' >&2; exit 2;") + " else printf '使用现有 Compose 文件：%s\\n' \"$target\"; fi;";
+      const start = action.startAfterCreate ? " " + composeRun('-f "$target" up -d') + "; rc=$?; [ \"$rc\" -eq 0 ] || exit \"$rc\";" : "";
+      return wrap(create + start + " printf 'Compose 项目已准备：%s\\n' \"$target\"");
     }
     if (action.operation === "remove") {
-      return resolve + " project_dir=$(dirname \"$target\"); " + composeRun('-f "$target" down --remove-orphans') + "; rc=$?; [ \"$rc\" -eq 0 ] || exit \"$rc\"; rm -f -- \"$target\"; printf 'Compose 项目已删除：%s\\n' \"$project_dir\"";
+      return wrap(resolve + " project_dir=$(dirname \"$target\"); " + composeRun('-f "$target" down --remove-orphans') + "; rc=$?; [ \"$rc\" -eq 0 ] || exit \"$rc\"; run_privileged_cmd rm -f -- \"$target\"; printf 'Compose 项目已删除：%s\\n' \"$project_dir\"");
     }
     // The UI action named `down` is the user-facing power/stop control. Keep
     // the Compose project and its container metadata intact so it remains
@@ -340,7 +363,7 @@ function dockerActionCommand(action: DockerPanelAction) {
         : action.operation === "down"
           ? "stop"
           : action.operation;
-    return resolve + " " + composeRun('-f "$target" ' + operation);
+    return wrap(resolve + " " + composeRun('-f "$target" ' + operation));
   }
   if (action.kind !== "root")
     throw new Error("不支持的 Docker 操作");
@@ -380,7 +403,7 @@ function dockerActionCommand(action: DockerPanelAction) {
     "fi",
     "printf \"Docker 存储位置已写入配置；重启 Docker 后生效\\n\"",
   ].join("\n");
-  return privilege + "; run_privileged env OPSNEST_DOCKER_ROOT=" + quotedRoot + " sh -c " + shellQuote(script);
+  return privilege + "; run_privileged_cmd env OPSNEST_DOCKER_ROOT=" + quotedRoot + " sh -c " + shellQuote(script);
 }
 
 function isAmazonLabel(value: string) {
@@ -6585,14 +6608,6 @@ function looksLikeShellCommand(input: string) {
 // These programs own the PTY after they start.  Their cursor movement,
 // carriage returns and alternate-screen sequences must be interpreted by
 // xterm itself, rather than by the AI-SSH line dispatcher/transcript cleaner.
-function isInteractiveShellCommand(input: string) {
-  const first = input.trim().replace(/^sudo\s+/, "").split(/\s+/, 1)[0]?.toLowerCase();
-  return Boolean(first && new Set([
-    "hermes", "python", "python3", "node", "bash", "sh", "zsh", "fish",
-    "top", "htop", "vim", "nvim", "nano", "less", "more", "mysql",
-    "psql", "tmux", "screen", "ssh",
-  ]).has(first));
-}
 function isRiskyShellCommand(input: string) {
   const value = input.trim().toLowerCase();
   return RISKY_SHELL_PARTS.some((part) => value.includes(part));
@@ -6833,6 +6848,7 @@ function InteractiveTerminalPanel({
     let promptTailSettleTimer: number | undefined;
     let finalPromptWaitTimer: number | undefined;
     let toolRaceGraceTimer: number | undefined;
+    let toolBarrierWaitTimer: number | undefined;
     let suppressLatePromptOnce = false;
     let orchestrationGeneration = 0;
     let pendingAiConclusion = "";
@@ -6978,6 +6994,10 @@ function InteractiveTerminalPanel({
         window.clearTimeout(toolRaceGraceTimer);
         toolRaceGraceTimer = undefined;
       }
+      if (toolBarrierWaitTimer !== undefined) {
+        window.clearTimeout(toolBarrierWaitTimer);
+        toolBarrierWaitTimer = undefined;
+      }
     };
     const resetAiOrchestration = () => {
       clearFinalizationTimers();
@@ -7071,9 +7091,40 @@ function InteractiveTerminalPanel({
         }
       }, 2200);
     };
+    const armToolBarrierWait = () => {
+      if (toolBarrierWaitTimer !== undefined) return;
+      const generation = orchestrationGeneration;
+      toolBarrierWaitTimer = window.setTimeout(() => {
+        toolBarrierWaitTimer = undefined;
+        if (
+          generation !== orchestrationGeneration ||
+          !aiOrchestrationActive ||
+          !aiSummaryFinished ||
+          !aiOperationHadTools ||
+          toolBarrierSatisfied()
+        ) return;
+        void writeDebugLog("warn", "AI-SSH tool barrier timed out", {
+          serverId: server.id,
+          expected: expectedToolMarkers.size,
+          started: startedToolMarkers.size,
+          completed: completedToolMarkers.size,
+        });
+        const lateTail = deferredPromptTail;
+        if (!aiConclusionRendered && pendingAiConclusion) {
+          render(pendingAiConclusion);
+          aiConclusionRendered = true;
+        }
+        updateWorkStatus("error", "AI 命令已完成，但终端回执超时", false);
+        resetAiOrchestration();
+        if (lateTail) render(lateTail, true, false);
+      }, 8000);
+    };
     tryFinalizeAiConclusion = () => {
       if (!aiOrchestrationActive || !aiSummaryFinished) return;
-      if (aiOperationHadTools && !toolBarrierSatisfied()) return;
+      if (aiOperationHadTools && !toolBarrierSatisfied()) {
+        armToolBarrierWait();
+        return;
+      }
       if (!aiOperationHadTools && !noToolDecisionReady) return;
       if (!aiConclusionRendered) {
         if (pendingAiConclusion) render(pendingAiConclusion);
@@ -7693,10 +7744,11 @@ function InteractiveTerminalPanel({
     let markerCarryTimer: number | undefined;
     const startMarkerPrefix = "__OPSNEST_INTERACTIVE_START_";
     const endMarkerPrefix = "__OPSNEST_INTERACTIVE_END_";
+    const sudoPromptPrefix = "__OPSNEST_INTERACTIVE_SUDO_PROMPT_";
     type TerminalProtocolRecord = {
       index: number;
       length: number;
-      kind: "start" | "end";
+      kind: "start" | "end" | "sudo";
       marker: string;
     };
     const findNextProtocolRecord = (text: string): TerminalProtocolRecord | null => {
@@ -7706,13 +7758,20 @@ function InteractiveTerminalPanel({
       // into the user-visible terminal.
       const start = /__OPSNEST_INTERACTIVE_START_(\d+)__\r*\n/.exec(text);
       const end = /__OPSNEST_INTERACTIVE_END_(\d+)__ rc=-?\d+\r*\n/.exec(text);
-      const match = !start
-        ? end
-        : !end || start.index <= end.index
-          ? start
-          : end;
-      if (!match) return null;
-      const kind = match === start ? "start" : "end";
+      // sudo writes its prompt without a trailing newline; unlike the start
+      // and end records, the handshake marker must therefore be recognized as
+      // a standalone token.
+      const sudo = /__OPSNEST_INTERACTIVE_SUDO_PROMPT_(\d+)__/.exec(text);
+      const candidates = [
+        start ? { match: start, kind: "start" as const } : null,
+        end ? { match: end, kind: "end" as const } : null,
+        sudo ? { match: sudo, kind: "sudo" as const } : null,
+      ]
+        .filter((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+        .sort((left, right) => left.match.index - right.match.index);
+      const candidate = candidates[0];
+      if (!candidate) return null;
+      const { match, kind } = candidate;
       return {
         index: match.index,
         length: match[0].length,
@@ -7720,12 +7779,14 @@ function InteractiveTerminalPanel({
         marker:
           kind === "start"
             ? `${startMarkerPrefix}${match[1]}__`
-            : `${endMarkerPrefix}${match[1]}__`,
+            : kind === "end"
+              ? `${endMarkerPrefix}${match[1]}__`
+              : `${sudoPromptPrefix}${match[1]}__`,
       };
     };
     const potentialMarkerSuffixLength = (text: string) => {
       let best = 0;
-      for (const prefix of [startMarkerPrefix, endMarkerPrefix]) {
+      for (const prefix of [startMarkerPrefix, endMarkerPrefix, sudoPromptPrefix]) {
         for (
           let length = Math.min(prefix.length - 1, text.length);
           length > best;
@@ -7824,7 +7885,7 @@ function InteractiveTerminalPanel({
               aiOperationHadTools = true;
               updateWorkStatus("executing", "正在执行命令");
             }
-          } else {
+          } else if (record.kind === "end") {
             if (awaitingPromptAfterMarker) visible += releaseIntermediatePromptTail();
             const visibleEndsWithLineBreak = visible
               ? /(?:\r\n|\n)$/.test(visible)
@@ -7841,6 +7902,9 @@ function InteractiveTerminalPanel({
               awaitingPromptAfterMarker = false;
               deferredPromptTail = "";
             }
+          } else {
+            // Sudo prompt records are an internal handshake.  They are
+            // intentionally removed from both the terminal and AI output.
           }
           continue;
         }
@@ -7969,7 +8033,7 @@ function InteractiveTerminalPanel({
       });
     const dispatcher = new TerminalDispatcher({
       writeCommand: (command) => {
-        if (isInteractiveShellCommand(command)) {
+        if (classifyInteractiveShellCommand(command)) {
           rawPtyModeRef.current = true;
           inputRef.current = "";
         }
@@ -8023,8 +8087,6 @@ function InteractiveTerminalPanel({
             void invoke("close_ssh_session", { sessionId: probeSession });
         }
       },
-      isRiskyCommand: isRiskyShellCommand,
-      confirmRisky: (command) => requestInlineApproval(command, "command"),
       onCommand: (command) => {
         sessionContextRef.current.push({
           role: "user_command",
@@ -9470,7 +9532,7 @@ function App() {
     async (
       server: ServerSummary,
       action: DockerPanelAction,
-    ): Promise<DockerPanelActionResult> => {
+    ): Promise<DockerPanelActionResult> => withDockerActionLock(server.id, async () => {
       const at = server.host.indexOf("@");
       const username = at > 0 ? server.host.slice(0, at) : "root";
       const host = at > 0 ? server.host.slice(at + 1) : server.host;
@@ -9516,12 +9578,53 @@ function App() {
         const command =
           privilegedCommand + " 2>&1" +
           '; rc=$?; printf "\\n__OPSNEST_DOCKER_ACTION_RC=%s\\n" "$rc"; exit "$rc"';
-        const output = await invoke<string>("execute_ssh_command", {
-          sessionId: opened.sessionId,
-          command,
-          approved: true,
-          sudoPassword,
-        });
+        let output: string;
+        if (
+          action.kind === "image" &&
+          (action.operation === "upgrade" || action.operation === "check" || action.operation === "checkOne")
+        ) {
+          const streamId = `docker-image-${server.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          let stopProgress: (() => void) | undefined;
+          try {
+            stopProgress = await listen<{ streamId: string; data: string }>(
+              "opsnest-ssh-command-output",
+              (event) => {
+                if (event.payload.streamId !== streamId) return;
+                window.dispatchEvent(
+                  new CustomEvent("opsnest-docker-image-progress", {
+                    detail: {
+                      serverId: server.id,
+                      reference: action.reference || "",
+                      operation: action.operation,
+                      data: event.payload.data,
+                    },
+                  }),
+                );
+              },
+            );
+            output = await invoke<string>("execute_ssh_command_stream", {
+              sessionId: opened.sessionId,
+              command,
+              approved: true,
+              sudoPassword,
+              streamId,
+              // Image pulls and registry digest checks are deliberately
+              // long-running operations. Their progress/heartbeat stream
+              // keeps the SSH channel alive while the panel can be moved or
+              // hidden without cancelling the remote task.
+              idleTimeoutSecs: 30 * 60,
+            });
+          } finally {
+            stopProgress?.();
+          }
+        } else {
+          output = await invoke<string>("execute_ssh_command", {
+            sessionId: opened.sessionId,
+            command,
+            approved: true,
+            sudoPassword,
+          });
+        }
         const cleanOutput = stripTerminalAnsi(output);
         const marker = cleanOutput.match(/__OPSNEST_DOCKER_ACTION_RC=(\d+)/);
         if (!marker) {
@@ -9589,7 +9692,7 @@ function App() {
               .filter((image): image is NonNullable<typeof image> => Boolean(image?.id));
             return { images, message: images.length ? "" : "未发现本地镜像" };
           }
-          if (action.operation === "check") {
+          if (action.operation === "check" || action.operation === "checkOne") {
             const imageUpdates = message
               .split(/\r?\n/)
               .filter((line) => line.startsWith("__OPSNEST_IMAGE_UPDATE__\t"))
@@ -9805,7 +9908,7 @@ function App() {
           sessionId: opened.sessionId,
         }).catch(() => undefined);
       }
-    },
+    }),
     [],
   );
   const moveDockerPanel = React.useCallback((placement: DockerPanelPlacement) => {
@@ -10224,7 +10327,7 @@ function App() {
                 showTabs
                 onBackToFiles={() => setRightPanelMode("files")}
                 onMove={moveDockerPanel}
-                onRefresh={() => void scanServer(selectedServer)}
+                onRefresh={() => void scanServer(selectedServer, undefined, true)}
                 onAction={(action) => runDockerAction(selectedServer, action)}
                 onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "right")}
                 iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
@@ -10394,7 +10497,7 @@ function App() {
               onSelectDocker={() => { setDockerBottomActive(true); setEditorView("files"); }}
               onCloseDocker={closeDockerPanel}
               onMoveDocker={moveDockerPanel}
-              onRefreshDocker={() => void scanServer(selectedServer)}
+              onRefreshDocker={() => void scanServer(selectedServer, undefined, true)}
               onDockerAction={(action) => runDockerAction(selectedServer, action)}
               onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "bottom")}
               iconRefreshKey={iconRefreshKeys[selectedServer.id] ?? 0}
