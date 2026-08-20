@@ -1,0 +1,47 @@
+.docker-resource-panel { margin-top: 14px; }
+.docker-resource-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.docker-resource-heading > div:first-child { min-width: 0; }
+.docker-resource-heading strong, .docker-resource-heading span { display: block; }
+.docker-resource-heading strong { color: var(--text-strong); font-size: 15px; }
+.docker-resource-heading span { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.docker-resource-heading button, .docker-resource-action { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; padding: 0; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); cursor: pointer; }
+.docker-resource-heading button:hover, .docker-resource-action:hover { border-color: var(--accent); background: var(--control-hover); }
+.docker-resource-heading button:disabled, .docker-resource-action:disabled { cursor: wait; opacity: .5; }
+.docker-resource-toolbar { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.docker-resource-toolbar label { display: flex; align-items: center; gap: 7px; width: 230px; height: 32px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--paper); }
+.docker-resource-toolbar label:focus-within { border-color: var(--accent); }
+.docker-resource-toolbar input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; }
+.docker-resource-list { display: grid; gap: 8px; margin-top: 12px; }
+.docker-resource-row { display: grid; grid-template-columns: 38px minmax(0, 1fr) auto auto; align-items: center; gap: 11px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--card); }
+.docker-resource-row:hover { border-color: color-mix(in srgb, var(--accent) 42%, var(--line-soft)); background: var(--control-hover); }
+.docker-resource-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--card)); }
+.docker-resource-main { min-width: 0; }
+.docker-resource-main strong, .docker-resource-main span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docker-resource-main strong { color: var(--text-strong); font-size: 12px; }
+.docker-resource-main span { margin-top: 4px; color: var(--muted); font: 10px/1.35 Consolas, monospace; }
+.docker-resource-badge { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border-radius: 999px; font-size: 10px; white-space: nowrap; }
+.docker-resource-badge.is-secure { color: #58d99b; background: color-mix(in srgb, #58d99b 12%, transparent); }
+.docker-resource-badge.is-insecure { color: #e7bd65; background: color-mix(in srgb, #e7bd65 12%, transparent); }
+.docker-network-meta { display: grid; justify-items: end; gap: 4px; color: var(--text-strong); font-size: 10px; }
+.docker-network-meta small { color: var(--muted); }
+.docker-resource-feedback { position: relative; margin-top: 10px; padding: 8px 34px 8px 10px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); background: var(--card); font-size: 11px; }
+.docker-resource-feedback.is-error { border-color: color-mix(in srgb, #ef6a78 55%, var(--line-soft)); color: #f08a94; }
+.docker-resource-feedback button { position: absolute; top: 5px; right: 6px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--paper); cursor: pointer; }
+.docker-resource-empty { padding: 28px 12px; border: 1px dashed var(--line-soft); border-radius: 9px; color: var(--muted); font-size: 11px; text-align: center; }
+.docker-resource-modal-backdrop { position: fixed; z-index: 110; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.58); }
+.docker-resource-detail-modal { width: min(720px, 100%); max-height: min(720px, 90vh); overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--elevated); box-shadow: 0 18px 50px rgba(0,0,0,.42); }
+.docker-resource-detail-modal > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.docker-resource-detail-modal > header strong, .docker-resource-detail-modal > header span { display: block; }
+.docker-resource-detail-modal > header strong { color: var(--text-strong); font-size: 16px; }
+.docker-resource-detail-modal > header span { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.docker-resource-detail-modal > header button { display: grid; place-items: center; width: 27px; height: 27px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.docker-resource-detail-modal > header button:hover { color: var(--text-strong); background: var(--control-hover); }
+.docker-resource-detail-modal pre { min-height: 300px; max-height: 65vh; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--text); background: var(--paper); font: 10px/1.5 Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+@container docker-management (max-width: 620px) {
+  .docker-resource-heading { align-items: stretch; flex-direction: column; }
+  .docker-resource-toolbar { width: 100%; }
+  .docker-resource-toolbar label { flex: 1 1 auto; width: auto; }
+  .docker-resource-row { grid-template-columns: 38px minmax(0, 1fr) auto; }
+  .docker-network-meta, .docker-resource-badge { grid-column: 2; justify-self: start; justify-items: start; }
+  .docker-resource-action { grid-column: 3; grid-row: 1 / span 2; }
+}

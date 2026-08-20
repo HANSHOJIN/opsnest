@@ -20,6 +20,7 @@ pub struct SessionRequest {
     pub username: String,
     pub auth_method: String,
     pub password: Option<String>,
+    pub sudo_password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
 }

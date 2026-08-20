@@ -1,16 +1,14 @@
 export type IconDirectory = "services" | "systems";
 
-// Keep the full packed catalog available to the Vite build as well as the
-// small public fallback set. This lets a newly added icon in
-// icons/packed/services (for example a Docker container's own icon) be picked
-// up by dev hot reload and by the packaged application without another manual
-// copy into public/.
-const packedServiceIcons = import.meta.glob("../../icons/packed/services/*.{svg,png}", {
+// The packed catalog is deliberately SVG-only. Raster artwork is kept in the
+// online/runtime icon directories and is resolved through the remote loader;
+// this prevents PNGs from silently entering the EXE bundle again.
+const packedServiceIcons = import.meta.glob("../../icons/packed/services/*.svg", {
   eager: true,
   import: "default",
   query: "?url",
 }) as Record<string, string>;
-const packedSystemIcons = import.meta.glob("../../icons/packed/systems/*.{svg,png}", {
+const packedSystemIcons = import.meta.glob("../../icons/packed/systems/*.svg", {
   eager: true,
   import: "default",
   query: "?url",
@@ -21,14 +19,14 @@ export function iconDirectory(kind: string, name: string): IconDirectory {
   // A router's discovery kind may contain "OpenWrt", but the discovered
   // entry can still be an application/service. Resolve those names before
   // the system-directory fallback so their bundled service icons are used.
-  if (/docker|container|nginx|apache|caddy|openlist|open-list|alist|lucky|grafana|portainer|1panel|mysql|mariadb|postgres|redis|mongo|php|node|python|java/.test(name.toLowerCase()))
+  if (/docker|container|nginx|apache|caddy|openlist|open-list|alist|lucky|luci|uhttpd|dropbear|grafana|portainer|1panel|mysql|mariadb|postgres|redis|mongo|php|node|python|java/.test(name.toLowerCase()))
     return "services";
   return key.includes("system") || key.includes("linux") || key.includes("debian") || key.includes("ubuntu") || key.includes("windows") || /openwrt|istoreos|immortalwrt|router|路由器|fnos|feiniu|macos|darwin|proxmox/.test(key) ? "systems" : "services";
 }
 
 /** V2 keeps the V1 two-directory contract; individual keys live inside a directory. */
 export const ICON_CATALOG: Record<IconDirectory, readonly string[]> = {
-  services: ["docker", "nginx", "apache", "mysql", "postgres", "redis", "mongodb", "openlist", "alist", "web", "port", "generic"],
+  services: ["docker", "nginx", "apache", "mysql", "postgres", "redis", "mongodb", "openlist", "alist", "luci", "uhttpd", "web", "port", "generic"],
   systems: ["linux", "debian", "ubuntu", "alibaba", "amazon", "alpine", "istoreos", "openwrt", "fnos", "mac", "proxmox-pve", "nas", "windows", "generic"],
 };
 
@@ -62,6 +60,27 @@ export function iconCandidates(key: string, version?: string, aliases: string[] 
     ...aliases.map(normalizeIconKey),
     "generic",
   ].filter(Boolean))];
+}
+
+/**
+ * Build data-driven icon candidates for arbitrary containers. Runtime names
+ * and image repository basenames are expanded with common UI/app suffixes so
+ * an online icon can survive harmless container renames without adding a
+ * product-specific alias to the application code.
+ */
+export function containerIconAliases(name: string, imageReference?: string): string[] {
+  const imageLeaf = (() => {
+    const reference = (imageReference || "").trim().split("@")[0] || "";
+    const leaf = reference.slice(reference.lastIndexOf("/") + 1);
+    const tagIndex = leaf.lastIndexOf(":");
+    return tagIndex > 0 ? leaf.slice(0, tagIndex) : leaf;
+  })();
+  const candidates: string[] = [];
+  for (const seed of [name, imageLeaf].map(normalizeIconKey).filter(Boolean)) {
+    const base = seed.replace(/-(?:app|web|ui|server|service)$/, "") || seed;
+    candidates.push(seed, base, `${base}-app`, `${base}-web`, `${base}-ui`);
+  }
+  return [...new Set(candidates)];
 }
 
 export function remoteIconUrl(directory: IconDirectory, candidate: string, type: "svg" | "png" = "svg"): string {

@@ -3,6 +3,13 @@ import { useEffect, useState } from "react";
 export type IconDirectory = "services" | "systems";
 
 const ICON_CATALOG_RAW_BASE = "https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons";
+
+/** Build the online icon URL used for raster assets that are not packed into
+ * the desktop executable. Keep this in one place so services and systems use
+ * the same repository layout and cache-busting behavior. */
+export function remoteIconUrl(directory: IconDirectory, candidate: string, type: "svg" | "png" = "svg") {
+  return `${ICON_CATALOG_RAW_BASE}/${directory}/${encodeURIComponent(candidate)}.${type}`;
+}
 const iconMemoryCache = new Map<string, string | null>();
 const iconRequests = new Map<string, Promise<string | null>>();
 

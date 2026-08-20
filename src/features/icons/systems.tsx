@@ -1,5 +1,5 @@
 import type { ServerProfile } from "../../domain/types";
-import { iconCandidates, RemoteIcon } from "./catalog";
+import { iconCandidates, RemoteIcon, remoteIconUrl } from "./catalog";
 import debianIcon from "../../../icons/packed/systems/debian.svg?raw";
 import ubuntuIcon from "../../../icons/packed/systems/ubuntu.svg?raw";
 import openwrtIcon from "../../../icons/packed/systems/openwrt.svg?raw";
@@ -14,17 +14,18 @@ import kaliIcon from "../../../icons/packed/systems/kali.svg?raw";
 import gentooIcon from "../../../icons/packed/systems/gentoo.svg?raw";
 import linuxIcon from "../../../icons/packed/systems/linux.svg?raw";
 import freenasIcon from "../../../icons/packed/systems/freenas.svg?raw";
-import fnosImage from "../../../icons/systems/fnos.png";
-import macImage from "../../../icons/systems/mac.png";
-import proxmoxImage from "../../../icons/systems/proxmox-pve.png";
+
+function onlineRasterIcon(key: string) {
+  return remoteIconUrl("systems", key, "png");
+}
 
 const systemIconMarkup: Record<string, string> = {
   debian: debianIcon,
   ubuntu: ubuntuIcon,
   openwrt: openwrtIcon,
-  fnos: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${fnosImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
-  mac: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${macImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
-  "proxmox-pve": `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${proxmoxImage}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
+  fnos: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${onlineRasterIcon("fnos")}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
+  mac: `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${onlineRasterIcon("mac")}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
+  "proxmox-pve": `<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><image href="${onlineRasterIcon("proxmox-pve")}" width="1024" height="1024" preserveAspectRatio="xMidYMid meet"/></svg>`,
   nas: freenasIcon,
   alpine: alpineIcon,
   arch: archIcon,

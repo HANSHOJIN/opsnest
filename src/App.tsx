@@ -62,9 +62,15 @@ import {
   type EditorPlacement,
   type RemoteEditorTab,
 } from "./features/files/remote-editor";
+import {
+  DockerManagementPanel,
+  DockerPanel,
+  type DockerImageUpdateSummary,
+  type DockerPanelAction,
+  type DockerPanelActionResult,
+  type DockerPanelPlacement,
+} from "./features/docker/docker-panel";
 import dockerIcon from "../icons/packed/services/docker.svg";
-import openListIcon from "../icons/services/openlist.png";
-import luckyIcon from "../icons/services/lucky.png";
 import "@xterm/xterm/css/xterm.css";
 
 type Theme = "system" | "light" | "dark";
@@ -146,6 +152,218 @@ function isAlibabaLabel(value: string) {
   );
 }
 
+function shellQuote(value: string) {
+  return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+function stripTerminalAnsi(value: string) {
+  return value
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
+function dockerActionCommand(action: DockerPanelAction) {
+  const privilege =
+    "run_privileged() { if [ \"$(id -u)\" = 0 ]; then \"$@\"; elif command -v sudo >/dev/null 2>&1; then sudo -n \"$@\"; else echo '需要 root 或 sudo 权限' >&2; return 126; fi; }";
+  if (action.kind === "service" || action.kind === "autostart") {
+    const operation =
+      action.kind === "service"
+        ? action.enabled
+          ? "start"
+          : "stop"
+        : action.enabled
+          ? "enable"
+          : "disable";
+    const initOperation = operation;
+    const rcBlock =
+      action.kind === "autostart"
+        ? "if command -v rc-update >/dev/null 2>&1; then if run_privileged rc-update " +
+          (action.enabled ? "add docker default" : "del docker default") +
+          "; then exit 0; fi; fi; "
+        : "";
+    return (
+      privilege +
+      "; if command -v systemctl >/dev/null 2>&1; then if run_privileged systemctl " +
+      operation +
+      " docker; then exit 0; fi; fi; if [ -x /etc/init.d/docker ]; then if run_privileged /etc/init.d/docker " +
+      initOperation +
+      "; then exit 0; fi; fi; if command -v service >/dev/null 2>&1; then if run_privileged service docker " +
+      operation +
+      "; then exit 0; fi; fi; " +
+      rcBlock +
+      "echo 'Docker 服务管理器操作失败' >&2; exit 1"
+    );
+  }
+  if (action.kind === "container") {
+    const name = shellQuote(action.name);
+    const command =
+      action.operation === "details"
+        ? "inspect " + name
+        : action.operation === "logs"
+          ? "logs --tail 200 " + name
+          : [
+              action.operation + " " + name,
+              "state=$(container_cmd inspect --format '{{.State.Running}}' " + name + " 2>/dev/null || true)",
+              "printf '%s\\n' \"$state\"",
+            ].join(" && ");
+    return (
+      privilege +
+      "; container_cmd() { if command -v docker >/dev/null 2>&1; then docker \"$@\"; elif command -v podman >/dev/null 2>&1; then podman \"$@\"; else echo '未找到 Docker 或 Podman' >&2; return 127; fi; }; run_privileged container_cmd " +
+      command
+    );
+  }
+  if (action.kind === "image") {
+    const reference = action.reference?.trim() || "";
+    if (action.operation !== "list" && action.operation !== "check" && !reference)
+      throw new Error("请填写镜像名称或 ID");
+    if (action.operation === "check") {
+      return [
+        "if ! command -v docker >/dev/null 2>&1; then echo '镜像更新检查仅支持 Docker' >&2; exit 127; fi",
+        "for ref in $(docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | sed '/<none>/d'); do",
+        "local_digest=$(docker image inspect \"$ref\" --format '{{join .RepoDigests \",\"}}' 2>/dev/null | sed -n 's/^[^@]*@//; s/,.*//; p' | head -n 1)",
+        "remote_digest=$(docker buildx imagetools inspect \"$ref\" 2>/dev/null | awk '/^Digest:/ {print $2; exit}')",
+        "update_state=unknown; if [ -n \"$local_digest\" ] && [ -n \"$remote_digest\" ]; then if [ \"$local_digest\" = \"$remote_digest\" ]; then update_state=current; else update_state=available; fi; fi",
+        "used_by=''; compose_targets=''",
+        "for container_name in $(docker ps -a --filter \"ancestor=$ref\" --format '{{.Names}}' 2>/dev/null); do",
+        "used_by=${used_by:+$used_by,}$container_name",
+        "config_file=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}' 2>/dev/null | cut -d, -f1)",
+        "working_dir=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' 2>/dev/null)",
+        "compose_service=$(docker inspect \"$container_name\" --format '{{index .Config.Labels \"com.docker.compose.service\"}}' 2>/dev/null)",
+        "case \"$config_file\" in /*) ;; '') ;; *) config_file=${working_dir%/}/$config_file;; esac",
+        "if [ -n \"$config_file\" ] && [ -n \"$compose_service\" ]; then target=$config_file::$compose_service; case \";$compose_targets;\" in *\";$target;\"*) ;; *) compose_targets=${compose_targets:+$compose_targets;}$target;; esac; fi",
+        "done",
+        "printf '__OPSNEST_IMAGE_UPDATE__\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$ref\" \"$update_state\" \"$local_digest\" \"$remote_digest\" \"$used_by\" \"$compose_targets\"",
+        "done",
+      ].join("\n");
+    }
+    if (action.operation === "upgrade") {
+      const composeTargets = (action.composeTargets || []).filter(
+        (target, index, targets) =>
+          target.path.startsWith("/") &&
+          Boolean(target.service.trim()) &&
+          targets.findIndex((item) => item.path === target.path && item.service === target.service) === index,
+      );
+      const rebuildCommands = composeTargets.map((target) => {
+        const composeArgs = `-f ${shellQuote(target.path)} up -d --no-deps ${shellQuote(target.service)}`;
+        return "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose " + composeArgs + "; elif command -v docker-compose >/dev/null 2>&1; then docker-compose " + composeArgs + "; else echo '未找到 Docker Compose' >&2; exit 127; fi";
+      });
+      const standaloneCount = Math.max(0, (action.usedBy || []).length - composeTargets.length);
+      return [
+        "if ! command -v docker >/dev/null 2>&1; then echo '镜像升级仅支持 Docker' >&2; exit 127; fi",
+        "pull_output=$(docker pull " + shellQuote(reference) + " 2>&1) || { printf '%s\\n' \"$pull_output\" >&2; exit 1; }",
+        ...rebuildCommands,
+        "printf '__OPSNEST_IMAGE_UPGRADE__\\t%s\\t%s\\t%s\\n' " + shellQuote(reference) + " " + composeTargets.length + " " + standaloneCount,
+      ].join("\n");
+    }
+    const args = action.operation === "list"
+      ? "image ls --no-trunc --format '{{json .}}'"
+      : action.operation === "inspect"
+        ? "image inspect " + shellQuote(reference)
+        : action.operation === "pull"
+          ? "pull " + shellQuote(reference)
+          : "image rm " + shellQuote(reference);
+    return "if command -v docker >/dev/null 2>&1; then docker " + args + "; elif command -v podman >/dev/null 2>&1; then podman " + args + "; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi";
+  }
+  if (action.kind === "registry")
+    return "if command -v docker >/dev/null 2>&1; then docker info --format '{{json .RegistryConfig}}'; else echo '当前镜像仓库读取仅支持 Docker' >&2; exit 127; fi";
+  if (action.kind === "network") {
+    const name = action.name?.trim() || "";
+    if (action.operation === "inspect" && !name)
+      throw new Error("请指定 Docker 网络");
+    const args = action.operation === "list"
+      ? "network ls --no-trunc --format '{{json .}}'"
+      : "network inspect " + shellQuote(name);
+    return "if command -v docker >/dev/null 2>&1; then docker " + args + "; elif command -v podman >/dev/null 2>&1; then podman " + args + "; else echo '未找到 Docker 或 Podman' >&2; exit 127; fi";
+  }
+  if (action.kind === "compose") {
+    const composePath = action.path?.trim() || "";
+    if (action.operation !== "list" && (!composePath || !composePath.startsWith("/")))
+      throw new Error("Compose 路径必须是远程绝对路径");
+    if (action.operation === "browse") {
+      const target = shellQuote(composePath);
+      return "target=" + target + "; if [ ! -d \"$target\" ]; then echo '__OPSNEST_COMPOSE_DIR_MISSING__' >&2; exit 2; fi; for entry in \"$target\"/* \"$target\"/.[!.]* \"$target\"/..?*; do [ -d \"$entry\" ] || continue; name=${entry##*/}; printf '%s\\t%s\\n' \"$name\" \"$entry\"; done | sort -f";
+    }
+    const composeRun = (args: string) => "if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose " + args + "; elif command -v docker-compose >/dev/null 2>&1; then docker-compose " + args + "; else echo '未找到 Docker Compose' >&2; exit 127; fi";
+    const resolve = "target=" + shellQuote(composePath) + "; case \"$target\" in *.yml|*.yaml) ;; *) if [ -d \"$target\" ]; then found=0; for candidate in \"$target/compose.yaml\" \"$target/compose.yml\" \"$target/docker-compose.yml\" \"$target/docker-compose.yaml\"; do if [ -f \"$candidate\" ]; then target=\"$candidate\"; found=1; break; fi; done; if [ \"$found\" -eq 0 ]; then target=\"$target/compose.yaml\"; fi; else target=\"$target/compose.yaml\"; fi ;; esac;";
+    if (action.operation === "list") {
+      const scanRoot = composePath ? shellQuote(composePath) : "";
+      const scan = "; printf '__OPSNEST_COMPOSE_FILES__\\n'" + (scanRoot
+        ? "; if [ -d " + scanRoot + " ]; then find " + scanRoot + " -type f \\( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \\) -print 2>/dev/null; fi"
+        : "") + "; if [ -d /opt/1panel/apps ]; then find /opt/1panel/apps -type f \\( -name 'compose.yml' -o -name 'compose.yaml' -o -name 'docker-compose.yml' -o -name 'docker-compose.yaml' \\) -print 2>/dev/null; fi; printf '__OPSNEST_COMPOSE_LABELS__\\n'; if command -v docker >/dev/null 2>&1; then docker ps -a --filter label=com.docker.compose.project --format '{{.Label \"com.docker.compose.project\"}}\\t{{.Label \"com.docker.compose.project.config_files\"}}\\t{{.Label \"com.docker.compose.project.working_dir\"}}\\t{{.Status}}'; fi";
+      return composeRun("ls --all --format json") + scan;
+    }
+    if (action.operation === "inspect")
+      return resolve + " if [ -f \"$target\" ]; then printf '__OPSNEST_COMPOSE_PATH=%s\\n' \"$target\"; cat -- \"$target\"; else printf '__OPSNEST_COMPOSE_MISSING__\\n'; fi";
+    if (action.operation === "read")
+      return resolve + " cat -- \"$target\"";
+    if (action.operation === "logs")
+      return resolve + " " + composeRun('-f "$target" logs --tail 200');
+    if (action.operation === "create") {
+      const content = action.content?.trim() || "";
+      const writeExisting = action.overwriteExisting ? "1" : "0";
+      const create = resolve + " if [ ! -f \"$target\" ] || [ \"" + writeExisting + "\" = \"1\" ]; then " + (content ? "mkdir -p \"$(dirname \"$target\")\"; printf '%s\\n' " + shellQuote(content) + " > \"$target\";" : "echo '未找到 Compose 配置文件；请选择直接编辑或上传本地文件' >&2; exit 2;") + " else printf '使用现有 Compose 文件：%s\\n' \"$target\"; fi;";
+      const start = action.startAfterCreate ? " " + composeRun('-f "$target" up -d') + ";" : "";
+      return create + start + " printf 'Compose 项目已准备：%s\\n' \"$target\"";
+    }
+    // The UI action named `down` is the user-facing power/stop control. Keep
+    // the Compose project and its container metadata intact so it remains
+    // discoverable and can be started again. Destructive `docker compose down`
+    // belongs behind a separate remove action with an explicit confirmation.
+    const operation = action.operation === "config"
+      ? "config"
+      : action.operation === "build"
+        ? "create --build"
+      : action.operation === "up"
+        ? "up -d"
+        : action.operation === "down"
+          ? "stop"
+          : action.operation;
+    return resolve + " " + composeRun('-f "$target" ' + operation);
+  }
+  if (action.kind !== "root")
+    throw new Error("不支持的 Docker 操作");
+  const root = action.value.trim();
+  if (!root || !root.startsWith("/"))
+    throw new Error("Docker 存储位置必须是绝对路径");
+  const quotedRoot = shellQuote(root);
+  const script = [
+    "set -eu",
+    "config=/etc/docker/daemon.json",
+    "backup=\"$config.opsnest.bak\"",
+    "[ -f \"$config\" ] && cp -p \"$config\" \"$backup\"",
+    "if command -v python3 >/dev/null 2>&1; then",
+    "  python3 - \"$config\" \"$OPSNEST_DOCKER_ROOT\" <<PY",
+    "import json, os, sys, tempfile",
+    "config, root = sys.argv[1], sys.argv[2]",
+    "data = {}",
+    "if os.path.exists(config):",
+    "    with open(config, encoding=\"utf-8\") as handle:",
+    "        data = json.load(handle)",
+    "data[\"data-root\"] = root",
+    "directory = os.path.dirname(config)",
+    "fd, temporary = tempfile.mkstemp(prefix=\".daemon.\", dir=directory)",
+    "with os.fdopen(fd, \"w\", encoding=\"utf-8\") as handle:",
+    "    json.dump(data, handle, indent=2)",
+    "    handle.write(\"\\n\")",
+    "os.chmod(temporary, 0o644)",
+    "os.replace(temporary, config)",
+    "PY",
+    "elif command -v jq >/dev/null 2>&1; then",
+    "  if [ -f \"$config\" ]; then jq --arg root \"$OPSNEST_DOCKER_ROOT\" '. + {\"data-root\":$root}' \"$config\" > \"$config.tmp\"; else printf '{\"data-root\":\"%s\"}\\n' \"$OPSNEST_DOCKER_ROOT\" > \"$config.tmp\"; fi",
+    "  chmod 644 \"$config.tmp\"",
+    "  mv \"$config.tmp\" \"$config\"",
+    "else",
+    "  echo \"需要 python3 或 jq 才能安全编辑 Docker 配置\" >&2",
+    "  exit 127",
+    "fi",
+    "printf \"Docker 存储位置已写入配置；重启 Docker 后生效\\n\"",
+  ].join("\n");
+  return privilege + "; run_privileged env OPSNEST_DOCKER_ROOT=" + quotedRoot + " sh -c " + shellQuote(script);
+}
+
 function isAmazonLabel(value: string) {
   const normalized = value.toLowerCase();
   return (
@@ -170,13 +388,13 @@ function NamedDockerServiceIcon({
     const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
     return [
       bundledIconUrl("services", iconKey, "svg"),
-      bundledIconUrl("services", iconKey, "png"),
       `/icons/packed/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
-      `/icons/packed/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
       `${remoteIconUrl("services", iconKey, "svg")}${refreshSuffix}`,
       `${remoteIconUrl("services", iconKey, "png")}${refreshSuffix}`,
       `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
+      `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
       `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/services/${encodeURIComponent(iconKey)}.svg${refreshSuffix}`,
+      `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/services/${encodeURIComponent(iconKey)}.png${refreshSuffix}`,
     ].filter((source): source is string => Boolean(source));
   }, [iconKey, refreshKey]);
   const [sourceIndex, setSourceIndex] = React.useState(0);
@@ -184,14 +402,7 @@ function NamedDockerServiceIcon({
 
   if (sourceIndex >= sources.length)
     return (
-      <img
-        className="service-icon-image service-docker"
-        src={dockerIcon}
-        alt="Docker"
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      <img className="service-icon-image service-docker" src={dockerIcon} alt="Docker" aria-hidden="true" width={18} height={18} />
     );
 
   return (
@@ -260,12 +471,14 @@ function ServiceIcon({
                 ? "redis"
                 : key.includes("mongo")
                   ? "mongodb"
-                  : /openlist|open-list/.test(key)
-                    ? "openlist"
-                  : key.includes("alist")
-                    ? "alist"
-                  : key.includes("web") || key.includes("http")
-                    ? "web"
+                   : /openlist|open-list/.test(key)
+                     ? "openlist"
+                   : key.includes("alist")
+                     ? "alist"
+                   : /luci|uhttpd/.test(key)
+                     ? "luci"
+                   : key.includes("web") || key.includes("http")
+                     ? "web"
                     : directory === "systems"
                       ? isAlibabaLabel(name)
                         ? "alibaba"
@@ -289,6 +502,7 @@ function ServiceIcon({
   const isOpenListService =
     directory === "services" && /openlist|open-list/i.test(name);
   const isLuckyService = directory === "services" && /lucky/i.test(name);
+  const isLuciService = directory === "services" && /luci|uhttpd/i.test(name);
   const isDockerService =
     directory === "services" &&
     /^(docker|container)$/i.test(nameOnly) &&
@@ -303,6 +517,10 @@ function ServiceIcon({
     ? `${remoteIconUrl("systems", "amazon", "png")}?opsnest-icon-refresh=${refreshKey}`
     : null;
   const [remote, setRemote] = React.useState<string | null>(amazonRemoteIcon);
+  const [onlineIconFailed, setOnlineIconFailed] = React.useState(false);
+  React.useEffect(() => {
+    setOnlineIconFailed(false);
+  }, [baseKey, refreshKey]);
   React.useEffect(() => {
     let active = true;
     if (isAmazonSystem) {
@@ -323,27 +541,29 @@ function ServiceIcon({
         : candidates;
       for (const candidate of candidatesToTry) {
         for (const type of ["svg", "png"] as const) {
-          const packed = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}`;
           try {
-            if (!isAlibabaSystem) {
+            // Only SVG is served from the packed directory. PNG artwork is
+            // resolved from the online runtime icon directory below.
+            if (type === "svg" && !isAlibabaSystem) {
+              const packed = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.svg`;
               const localResponse = await fetch(packed);
               if (localResponse.ok) {
                 if (active) setRemote(packed);
                 return;
               }
             }
-            const bundled = bundledIconUrl(directory, candidate, type);
+            const bundled = type === "svg" ? bundledIconUrl(directory, candidate, type) : undefined;
             if (bundled) {
               if (active) setRemote(bundled);
               return;
             }
             const refreshSuffix = `?opsnest-icon-refresh=${refreshKey}`;
-            for (const remoteUrl of [
+            const remoteUrls = [
               `${remoteIconUrl(directory, candidate, type)}${refreshSuffix}`,
-              `https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
               `https://github.com/HANSHOJIN/opsnest/raw/refs/heads/main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
               `https://cdn.jsdelivr.net/gh/HANSHOJIN/opsnest@main/icons/${directory}/${encodeURIComponent(candidate)}.${type}${refreshSuffix}`,
-            ]) {
+            ];
+            for (const remoteUrl of remoteUrls) {
               const response = await fetch(remoteUrl);
               if (response.ok) {
                 if (active) setRemote(remoteUrl);
@@ -356,7 +576,7 @@ function ServiceIcon({
         }
       }
       if (active && isAlibabaSystem)
-        setRemote("/icons/systems/alibaba.png");
+        setRemote(`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${refreshKey}`);
     })();
     return () => {
       active = false;
@@ -366,68 +586,78 @@ function ServiceIcon({
     return <NamedDockerServiceIcon name={nameOnly} refreshKey={refreshKey} />;
   if (isOpenListService)
     return (
-      <img
-        className="service-icon-image service-openlist"
-        src={openListIcon}
-        alt="OpenList"
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="service-icon-image service-openlist"
+          src={`${remoteIconUrl("services", "openlist", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt="OpenList"
+          aria-hidden="true"
+          width={18}
+          height={18}
+          onError={() => setOnlineIconFailed(true)}
+        />
     );
   if (isDockerService)
     return (
-      <img
-        className="service-icon-image service-docker"
-        src={dockerIcon}
-        alt="Docker"
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      <img className="service-icon-image service-docker" src={dockerIcon} alt="Docker" aria-hidden="true" width={18} height={18} />
     );
   if (isLuckyService)
     return (
-      <img
-        className="service-icon-image service-lucky"
-        src={luckyIcon}
-        alt="Lucky"
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="service-icon-image service-lucky"
+          src={`${remoteIconUrl("services", "lucky", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt="Lucky"
+          aria-hidden="true"
+          width={18}
+          height={18}
+          onError={() => setOnlineIconFailed(true)}
+        />
+    );
+  if (isLuciService)
+    return (
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="service-icon-image service-luci"
+          src={`${remoteIconUrl("services", "luci", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt="LuCI"
+          aria-hidden="true"
+          width={18}
+          height={18}
+          onError={() => setOnlineIconFailed(true)}
+        />
     );
   if (isAlibabaSystem || baseKey === "alibaba")
     return (
-      <img
-        className="service-icon-image system-alibaba"
-        src="/icons/systems/alibaba.png?v=3"
-        alt=""
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="service-icon-image system-alibaba"
+          src={`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt=""
+          aria-hidden="true"
+          width={18}
+          height={18}
+          onError={() => setOnlineIconFailed(true)}
+        />
     );
   if (isIStoreSystem)
     return (
-      <img
-        className="system-istoreos-mark"
-        src="/icons/systems/istoreos.png?v=1"
-        alt="iStoreOS"
-        width={400}
-        height={400}
-      />
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="system-istoreos-mark"
+          src={`${remoteIconUrl("systems", "istoreos", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt="iStoreOS"
+          width={400}
+          height={400}
+          onError={() => setOnlineIconFailed(true)}
+        />
     );
   if (isFnosSystem)
     return (
-      <img
-        className="service-icon-image system-fnos"
-        src="/icons/systems/fnos.png?v=1"
-        alt="fnOS"
-        aria-hidden="true"
-        width={18}
-        height={18}
-      />
+      onlineIconFailed ? <Icon size={18} strokeWidth={1.8} /> : <img
+          className="service-icon-image system-fnos"
+          src={`${remoteIconUrl("systems", "fnos", "png")}?opsnest-icon-refresh=${refreshKey}`}
+          alt="fnOS"
+          aria-hidden="true"
+          width={18}
+          height={18}
+          onError={() => setOnlineIconFailed(true)}
+        />
     );
   if (remote)
     return (
@@ -805,7 +1035,7 @@ type RenameTarget = {
   entry: RemoteFileEntry | LocalFileEntry;
 };
 
-function shellQuote(value: string) {
+function shellQuoteLegacy(value: string) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -848,6 +1078,7 @@ function FileManagerPanel({
   editorTab,
   editorActive = false,
   onSelectEditor,
+  dockerTab,
 }: {
   server: ServerSummary;
   servers: ServerSummary[];
@@ -862,6 +1093,7 @@ function FileManagerPanel({
   editorTab?: RemoteEditorTab | null;
   editorActive?: boolean;
   onSelectEditor?: () => void;
+  dockerTab?: { active: boolean; onSelect: () => void; onClose?: () => void };
 }) {
   const [remotePath, setRemotePath] = React.useState("/root");
   const [localPath, setLocalPath] = React.useState("");
@@ -880,6 +1112,14 @@ function FileManagerPanel({
     label: string;
     progress: number;
     rate: string;
+  } | null>(null);
+  const [uploadConflict, setUploadConflict] = React.useState<{
+    local: LocalFileEntry;
+    remote: RemoteFileEntry;
+  } | null>(null);
+  const [fileDeleteTarget, setFileDeleteTarget] = React.useState<{
+    scope: "remote" | "local";
+    entry: RemoteFileEntry | LocalFileEntry;
   } | null>(null);
   const [contextMenu, setContextMenu] =
     React.useState<FileContextMenu | null>(null);
@@ -996,6 +1236,15 @@ function FileManagerPanel({
             <FilePenLine className="file-manager-tab-icon" size={14} strokeWidth={1.8} />
             <span className="file-manager-tab-label">{editorTab.name}</span>
           </button>
+        </div>
+      )}
+      {dockerTab && activeServer.id === server.id && (
+        <div className={`file-manager-tab ${dockerTab.active ? "is-active" : ""}`}>
+          <button className="file-manager-tab-select" type="button" onClick={dockerTab.onSelect} title="Docker">
+            <img className="file-manager-tab-icon docker-tab-icon" src={dockerIcon} alt="" aria-hidden="true" />
+            <span className="file-manager-tab-label">Docker</span>
+          </button>
+          {dockerTab.onClose && <button className="file-manager-tab-close" type="button" onClick={dockerTab.onClose} aria-label="关闭 Docker 标签"><X size={12} /></button>}
         </div>
       )}
       <div className="file-manager-add-slot">
@@ -1184,8 +1433,16 @@ function FileManagerPanel({
     }
   };
 
-  const transferLocalToRemote = async (entry = selectedLocal) => {
+  const transferLocalToRemote = async (entry = selectedLocal, overwriteConfirmed = false) => {
     if (!entry || entry.isDir || busy) return;
+    const existingRemote = remoteFiles.find(
+      (item) => !item.isDir && item.name === entry.name,
+    );
+    if (existingRemote && !overwriteConfirmed) {
+      setTransfer(null);
+      setUploadConflict({ local: entry, remote: existingRemote });
+      return;
+    }
     setBusy(true);
     setTransfer({
       label: `上传 ${entry.name}`,
@@ -1262,15 +1519,13 @@ function FileManagerPanel({
     }
   };
 
-  const deleteRemote = async (entry = selectedRemote) => {
+  const deleteRemote = async (entry = selectedRemote, confirmed = false) => {
     const target = entry;
     if (!target || busy) return;
-    if (
-      !(await appConfirm(
-        "确定删除" + (target.isDir ? "目录" : "文件") + "“" + target.name + "”？",
-      ))
-    )
+    if (!confirmed) {
+      setFileDeleteTarget({ scope: "remote", entry: target });
       return;
+    }
     setBusy(true);
     try {
       await invoke("delete_remote_file", {
@@ -1288,15 +1543,13 @@ function FileManagerPanel({
     }
   };
 
-  const deleteLocal = async (entry = selectedLocal) => {
+  const deleteLocal = async (entry = selectedLocal, confirmed = false) => {
     const target = entry;
     if (!target || busy) return;
-    if (
-      !(await appConfirm(
-        "确定删除" + (target.isDir ? "目录" : "文件") + "“" + target.name + "”？",
-      ))
-    )
+    if (!confirmed) {
+      setFileDeleteTarget({ scope: "local", entry: target });
       return;
+    }
     setBusy(true);
     try {
       await invoke("delete_local_file", {
@@ -1504,20 +1757,23 @@ function FileManagerPanel({
         className="secondary"
         type="button"
         onClick={() => {
-          if (!selectedRemote) return;
-          beginRename("remote", selectedRemote);
+          if (selectedRemote) beginRename("remote", selectedRemote);
+          else if (selectedLocal) beginRename("local", selectedLocal);
         }}
-        disabled={!selectedRemote || busy}
-        aria-label="重命名服务器文件"
+        disabled={(!selectedRemote && !selectedLocal) || busy}
+        aria-label={selectedRemote ? "重命名服务器文件" : "重命名本地文件"}
       >
         重命名
       </button>
       <button
         className="secondary danger-text"
         type="button"
-        onClick={() => void deleteRemote()}
-        disabled={!selectedRemote || busy}
-        aria-label="删除服务器文件"
+        onClick={() => {
+          if (selectedRemote) void deleteRemote(selectedRemote);
+          else if (selectedLocal) void deleteLocal(selectedLocal);
+        }}
+        disabled={(!selectedRemote && !selectedLocal) || busy}
+        aria-label={selectedRemote ? "删除服务器文件" : "删除本地文件"}
       >
         删除
       </button>
@@ -1679,6 +1935,35 @@ function FileManagerPanel({
           <div className="file-manager-progress">
             <i style={{ width: `${transfer.progress}%` }} />
           </div>
+        </div>
+      )}
+      {uploadConflict && (
+        <div className="rename-modal-backdrop" role="presentation">
+          <section className="rename-modal" role="dialog" aria-modal="true" aria-labelledby="upload-overwrite-title">
+            <h2 id="upload-overwrite-title">确认覆盖文件</h2>
+            <p>服务器当前目录已存在“{uploadConflict.remote.name}”。是否使用本地文件覆盖？</p>
+            <div className="rename-modal-actions">
+              <button className="secondary" type="button" onClick={() => setUploadConflict(null)}>取消</button>
+              <button className="primary" type="button" onClick={() => { const conflict = uploadConflict; setUploadConflict(null); void transferLocalToRemote(conflict.local, true); }}>确认覆盖</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {fileDeleteTarget && (
+        <div className="rename-modal-backdrop" role="presentation">
+          <section className="rename-modal" role="dialog" aria-modal="true" aria-labelledby="file-delete-title">
+            <h2 id="file-delete-title">确认删除</h2>
+            <p>确定删除{fileDeleteTarget.entry.isDir ? "目录" : "文件"}“{fileDeleteTarget.entry.name}”？</p>
+            <div className="rename-modal-actions">
+              <button className="secondary" type="button" onClick={() => setFileDeleteTarget(null)}>取消</button>
+              <button className="primary" type="button" onClick={() => {
+                const target = fileDeleteTarget;
+                setFileDeleteTarget(null);
+                if (target.scope === "remote") void deleteRemote(target.entry as RemoteFileEntry, true);
+                else void deleteLocal(target.entry as LocalFileEntry, true);
+              }}>确定删除</button>
+            </div>
+          </section>
         </div>
       )}
       {renameTarget && (
@@ -2613,6 +2898,7 @@ function ServerManagerPage({
         ? "你可以检查和管理已保存的服务器。执行服务器命令前必须调用 request_server_command，并等待用户确认。用户明确要求打开文件管理器或查看刚才修改的文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor。"
         : "当前还没有保存的服务器。请主动收集新增服务器的名称、地址、端口、用户名和认证方式。",
       serverAdditionGuidance,
+      "总管不硬编码 frp、Tailscale、autossh 等穿透方案。用户明确要求内网穿透时，由你根据服务器环境询问、检查并指导用户完成方案；远程检查和执行使用 request_server_command，并等待用户确认。确认最终的 host、port、username 和认证方式可以通过 SSH 连接后，调用 create_server_connection 创建连接卡片。该工具只负责测试并保存连接信息，不负责选择或安装穿透软件。",
       "当前总管会话也绑定了一个 OpsNest 本地 workspace。用户要求保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file 或 workspace_delete_file；这里的 workspace 是本机工作区，不是远程服务器目录。",
       "密码和私钥口令永远由前端安全输入，不要索取、复述或写入聊天、日志、模型上下文或 JSON。若用户在对话中直接写出疑似明文密码，必须提醒：下次您不需要在对话中直接写上密码，OpsNest 会提供专用的密码输入界面；明文密码泄露给模型，特别是第三方中转类模型接口，会有严重安全风险。同时继续使用脱敏后的内容，不要引用或重复密码。",
       "只有连接测试成功且用户确认后，才能说服务器已添加。普通聊天、感谢和确认直接自然回答，不要用固定关键词分类。",
@@ -2670,6 +2956,37 @@ function ServerManagerPage({
               risk: { type: "string", enum: ["low", "medium", "high"] },
             },
             required: ["server_id", "command", "explain", "risk"],
+          },
+        },
+      });
+    if (servers.length)
+      tools.push({
+        type: "function",
+        function: {
+          name: "create_server_connection",
+          description:
+            "隐藏的服务器总管能力：当模型已经指导用户完成 frp、Tailscale、autossh、ZeroTier 或其他网络连通方案，并确认最终 SSH endpoint 可用时，测试该 endpoint 并创建一个 OpsNest 服务器连接卡片。不安装穿透软件，不修改远程配置；密码永远不放在工具参数中。若要复用已保存服务器的凭据，传入 credential_source_server_id。",
+          parameters: {
+            type: "object",
+            properties: {
+              name: { type: "string", description: "新连接在 OpsNest 中显示的名称。" },
+              host: { type: "string", description: "最终可 SSH 连接的主机名或 IP，不要带用户名。" },
+              port: { type: "integer", minimum: 1, maximum: 65535 },
+              username: { type: "string" },
+              auth_method: { type: "string", enum: ["password", "key"] },
+              private_key_path: {
+                type: "string",
+                description: "key 认证时的本机私钥路径，不是私钥内容。",
+              },
+              credential_source_server_id: {
+                type: "string",
+                enum: servers.map((item) => item.id),
+                description: "可选：复用某个已保存服务器的凭据，不会把密码发送给模型。",
+              },
+              note: { type: "string", description: "可选备注，例如使用的穿透方案。" },
+            },
+            required: ["name", "host", "port", "username", "auth_method"],
+            additionalProperties: false,
           },
         },
       });
@@ -2921,6 +3238,160 @@ function ServerManagerPage({
               content:
                 "已准备服务器信息。请让用户在前端安全输入 SSH 密码或 PEM 私钥路径并测试连接；不要声称服务器已经保存。",
             });
+            continue;
+          }
+          if (name === "create_server_connection") {
+            const connectionName = String(args.name || "").trim();
+            const host = String(args.host || "").trim();
+            const username = String(args.username || "").trim();
+            const port = Number(args.port);
+            const authMethod = (args.auth_method === "key" ? "key" : "password") as
+              "password" | "key";
+            const privateKeyPath = String(args.private_key_path || "").trim();
+            const credentialSource = servers.find(
+              (item) => item.id === String(args.credential_source_server_id || ""),
+            );
+            if (
+              !connectionName ||
+              !host ||
+              !username ||
+              !Number.isInteger(port) ||
+              port < 1 ||
+              port > 65535 ||
+              (authMethod === "key" && !privateKeyPath && !credentialSource?.privateKeyPath)
+            ) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content:
+                  "连接信息不完整或端口无效。key 认证需要提供私钥路径，或指定一个已有 key 认证服务器作为凭据来源。",
+              });
+              continue;
+            }
+            const duplicate = servers.find(
+              (item) =>
+                item.host === `${username}@${host}` && item.port === port,
+            );
+            if (duplicate) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `连接项已存在：${duplicate.name}（${duplicate.host}:${duplicate.port}）。`,
+              });
+              continue;
+            }
+            const sourceAuth = credentialSource?.authMethod ?? authMethod;
+            const sourcePassword =
+              credentialSource?.password ??
+              (credentialSource
+                ? await invoke<string | null>("load_server_credential", {
+                    serverId: credentialSource.id,
+                  }).catch(() => null)
+                : null);
+            const resolvedPrivateKey =
+              privateKeyPath || credentialSource?.privateKeyPath || null;
+            if (credentialSource && sourceAuth === "password" && !sourcePassword) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content:
+                  "指定的凭据来源没有可用密码。请让用户在安全输入区补充密码，或选择另一个已保存凭据来源。",
+              });
+              continue;
+            }
+            if (credentialSource && sourceAuth === "key" && !resolvedPrivateKey) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "指定的 key 凭据来源没有私钥路径。",
+              });
+              continue;
+            }
+            if (!credentialSource) {
+              const draft = {
+                name: connectionName,
+                host,
+                port,
+                username,
+                authMethod,
+                privateKeyPath: privateKeyPath || undefined,
+              };
+              setServerDraft(draft);
+              setDraftPassword("");
+              setDraftPrivateKeyPath(privateKeyPath);
+              setDraftSudoPassword("");
+              setDraftTested(false);
+              setDraftStatus(
+                authMethod === "key"
+                  ? "已准备连接卡片，请在下方确认本机私钥路径并测试连接。"
+                  : "已准备连接卡片，请在下方安全输入 SSH 密码并测试连接。",
+              );
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content:
+                  "已准备安全连接卡片。请用户在总管页面的凭据区域输入密码或确认私钥并测试连接；测试成功后才能保存，不能提前声称已添加。",
+              });
+              continue;
+            }
+            const request = {
+              host,
+              port,
+              username,
+              authMethod: sourceAuth,
+              password: sourceAuth === "password" ? sourcePassword : null,
+              privateKeyPath: sourceAuth === "key" ? resolvedPrivateKey : null,
+              passphrase: null,
+            };
+            try {
+              await invoke<string>("test_ssh_connection", { request });
+            } catch (error) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `最终 SSH 连接测试失败，未创建连接卡片：${String(error)}`,
+              });
+              continue;
+            }
+            const approved = await requestApproval({
+              kind: "config",
+              title: "AI 请求保存服务器连接",
+              detail: `名称：${connectionName}\n地址：${username}@${host}:${port}\n备注：${String(args.note || "无")}\n\n连接测试已成功，确认后写入 OpsNest 服务器列表。`,
+            });
+            if (!approved) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: "用户取消保存服务器连接。",
+              });
+              continue;
+            }
+            const newServer: ServerSummary = {
+              id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              name: connectionName,
+              host: `${username}@${host}`,
+              port,
+              authMethod: sourceAuth,
+              password: sourceAuth === "password" ? sourcePassword || undefined : undefined,
+              privateKeyPath: sourceAuth === "key" ? resolvedPrivateKey || undefined : undefined,
+              note: String(args.note || "").trim() || undefined,
+              connected: true,
+              connectionError: false,
+            };
+            try {
+              await onServerAdded(newServer);
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `连接测试成功，已保存服务器连接卡片“${connectionName}”：${newServer.host}:${newServer.port}。`,
+              });
+            } catch (error) {
+              apiMessages.push({
+                role: "tool",
+                tool_call_id: call.id || "opsnest-tool",
+                content: `连接测试成功，但保存连接卡片失败：${String(error)}`,
+              });
+            }
             continue;
           }
           if (name === "read_opsnest_config") {
@@ -4101,7 +4572,7 @@ function LinuxServerHomeContent({
     isAlibabaLabel(`${server.name} ${server.system || ""}`) ? (
       <img
         className="service-icon-image system-alibaba"
-        src="/icons/systems/alibaba.png?v=3"
+        src={`${remoteIconUrl("systems", "alibaba", "png")}?opsnest-icon-refresh=${iconRefreshKey}`}
         alt=""
         aria-hidden="true"
         width={22}
@@ -4436,6 +4907,7 @@ function RouterServerHome({
   onScan,
   onOpenTerminal,
   onOpenFiles,
+  onOpenDocker,
   onOpenManager,
   onServicesUpdated,
   iconRefreshKey,
@@ -4445,6 +4917,7 @@ function RouterServerHome({
   onScan: () => void;
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
+  onOpenDocker: () => void;
   onOpenManager: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
   iconRefreshKey: number;
@@ -4619,6 +5092,7 @@ function RouterServerHome({
       <WebServiceDiscoveryPanel
         server={server}
         onServicesUpdated={onServicesUpdated}
+        onOpenDocker={onOpenDocker}
         hideDocker
       />
     </div>
@@ -4631,6 +5105,7 @@ function NasServerHome({
   onScan,
   onOpenTerminal,
   onOpenFiles,
+  onOpenDocker,
   onServicesUpdated,
   iconRefreshKey,
 }: {
@@ -4639,6 +5114,7 @@ function NasServerHome({
   onScan: () => void;
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
+  onOpenDocker: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
   iconRefreshKey: number;
 }) {
@@ -4874,6 +5350,7 @@ function NasServerHome({
       <WebServiceDiscoveryPanel
         server={server}
         onServicesUpdated={onServicesUpdated}
+        onOpenDocker={onOpenDocker}
         nasMode
         language={language}
       />
@@ -5348,83 +5825,6 @@ function SettingRow({
   );
 }
 
-function DockerServiceCard({ server }: { server: ServerSummary }) {
-  const containers = (server.services ?? []).filter(
-    (service) => service.kind.toLowerCase() === "docker",
-  );
-  const dockerState = server.docker || "尚未扫描";
-  const displayDockerState =
-    containers.length > 0 && /\b0\b/.test(dockerState)
-      ? dockerState.replace(/\b0\b/, String(containers.length))
-      : dockerState;
-  const [expanded, setExpanded] = React.useState(false);
-  const dockerUnavailable = /(?:not\s+installed|未安装)/i.test(dockerState);
-  if (dockerUnavailable) return null;
-  return (
-    <section className="docker-service-card" aria-label="Docker">
-      <div className="docker-service-heading">
-        <div className="docker-service-title">
-          <span className="docker-service-icon">
-            <img
-              className="docker-service-brand-icon"
-              src={dockerIcon}
-              alt="Docker"
-              aria-hidden="true"
-            />
-          </span>
-          <div>
-            <span className="home-section-label">容器</span>
-            <h2>Docker</h2>
-          </div>
-        </div>
-        <span
-          className={`docker-service-status ${displayDockerState.includes("未安装") ? "is-off" : ""}`}
-        >
-          {displayDockerState
-            .replace(/\bnot\s+installed\b/gi, "未安装")
-            .replace(/\binstalled\b/gi, "已安装")}
-        </span>
-      </div>
-      {containers.length > 0 && (
-        <div className="docker-panel-actions">
-          <button
-            className="docker-expand-button"
-            type="button"
-            onClick={() => setExpanded((value) => !value)}
-            aria-expanded={expanded}
-          >
-            {expanded ? "收起容器" : `展开全部容器（${containers.length}）`}
-          </button>
-        </div>
-      )}
-      {containers.length === 0 ? (
-        <div className="docker-service-empty">
-          <strong>暂无容器</strong>
-          <span>重新扫描 Docker 后，这里会显示容器。</span>
-        </div>
-      ) : (
-        expanded && (
-          <div className="docker-container-list">
-            {containers.map((container) => (
-              <div className="docker-container-row" key={container.id}>
-                <Container size={15} />
-                <div>
-                  <strong>{container.name}</strong>
-                  <span>
-                    {container.status}
-                    {container.version ? ` · ${container.version}` : ""}
-                    {container.port ? ` · 端口 ${container.port}` : ""}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )
-      )}
-    </section>
-  );
-}
-
 function LinuxServerHome({
   language,
   server,
@@ -5432,6 +5832,7 @@ function LinuxServerHome({
   onScan,
   onOpenTerminal,
   onOpenFiles,
+  onOpenDocker,
   onServicesUpdated,
   iconRefreshKey,
 }: {
@@ -5441,6 +5842,7 @@ function LinuxServerHome({
   onScan: () => void;
   onOpenTerminal: () => void;
   onOpenFiles: () => void;
+  onOpenDocker: () => void;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
   iconRefreshKey: number;
 }) {
@@ -5458,6 +5860,7 @@ function LinuxServerHome({
       <WebServiceDiscoveryPanel
         server={server}
         onServicesUpdated={onServicesUpdated}
+        onOpenDocker={onOpenDocker}
       />
     </div>
   );
@@ -5707,16 +6110,26 @@ function TerminalWorkspace({
   server,
   servers,
   model,
+  language = "zh-CN",
   onConnectionState,
   editorTab = null,
   editorActive = false,
   onSelectEditor,
   onSelectTerminal,
   onCloseEditor,
+  dockerOpen = false,
+  dockerActive = false,
+  onSelectDocker,
+  onCloseDocker,
+  onMoveDocker,
+  onDockerAction,
+  onRefreshDocker,
+  onOpenComposeEditor,
 }: {
   server: ServerSummary;
   servers: ServerSummary[];
   model: ModelPreferences;
+  language?: Language;
   onConnectionState?: (
     serverId: string,
     connected: boolean,
@@ -5727,6 +6140,14 @@ function TerminalWorkspace({
   onSelectEditor?: () => void;
   onSelectTerminal?: () => void;
   onCloseEditor?: () => void;
+  dockerOpen?: boolean;
+  dockerActive?: boolean;
+  onSelectDocker?: () => void;
+  onCloseDocker?: () => void;
+  onMoveDocker?: (placement: DockerPanelPlacement) => void;
+  onDockerAction?: (action: DockerPanelAction) => Promise<DockerPanelActionResult | void>;
+  onRefreshDocker?: () => void;
+  onOpenComposeEditor?: (path: string, name: string) => void;
 }) {
   const [tabIds, setTabIds] = React.useState<string[]>([server.id]);
   const [focusedId, setFocusedId] = React.useState(server.id);
@@ -5740,6 +6161,28 @@ function TerminalWorkspace({
     .filter((item): item is ServerSummary => Boolean(item));
   const focused =
     tabs.find((item) => item.id === focusedId) ?? tabs[0] ?? server;
+  const focusAfterLastSshClose = React.useCallback(
+    (remainingSshTabs: number) => {
+      if (remainingSshTabs > 0) return;
+      if (dockerOpen) {
+        onSelectDocker?.();
+      } else if (editorTab) {
+        onSelectEditor?.();
+      } else {
+        window.dispatchEvent(new Event("opsnest-close-ssh"));
+      }
+    },
+    [dockerOpen, editorTab, onSelectDocker, onSelectEditor],
+  );
+  const focusAfterDockerClose = React.useCallback(() => {
+    if (tabIds.length > 0) {
+      onSelectTerminal?.();
+    } else if (editorTab) {
+      onSelectEditor?.();
+    } else {
+      window.dispatchEvent(new Event("opsnest-close-ssh"));
+    }
+  }, [editorTab, onSelectEditor, onSelectTerminal, tabIds.length]);
   React.useEffect(() => {
     const reopen = (event: Event) => {
       const detail = (event as CustomEvent<{ serverId?: string; reconnect?: boolean }>).detail;
@@ -5786,15 +6229,14 @@ function TerminalWorkspace({
         if (focusedId === requested) {
           setFocusedId(next[0] ?? "");
         }
-        if (next.length === 0)
-          window.dispatchEvent(new Event("opsnest-close-ssh"));
+        focusAfterLastSshClose(next.length);
         return next;
       });
     };
     window.addEventListener("opsnest-disconnect-server", disconnect);
     return () =>
       window.removeEventListener("opsnest-disconnect-server", disconnect);
-  }, [focusedId, onConnectionState, tabIds]);
+  }, [focusAfterLastSshClose, focusedId, onConnectionState, tabIds]);
   React.useEffect(() => {
     const tabsBar = document.querySelector<HTMLElement>(".terminal-tabs");
     const addSlot = tabsBar?.querySelector<HTMLElement>(".terminal-add-slot");
@@ -5846,8 +6288,7 @@ function TerminalWorkspace({
     const nextTabs = tabIds.filter((item) => item !== id);
     setTabIds(nextTabs);
     if (focusedId === id) setFocusedId(nextTabs[0] ?? "");
-    if (nextTabs.length === 0)
-      window.dispatchEvent(new CustomEvent("opsnest-close-ssh"));
+    focusAfterLastSshClose(nextTabs.length);
     intentionallyClosedSessions.add(id);
     onConnectionState?.(id, false, false);
     void invoke("close_interactive_ssh_terminal", { sessionId: id });
@@ -5888,6 +6329,15 @@ function TerminalWorkspace({
               )}
             </div>
           )}
+          {dockerOpen && (
+            <div key="docker" className={`terminal-tab ${dockerActive ? "is-active" : ""}`}>
+              <button type="button" onClick={onSelectDocker} title="Docker">
+                <img className="docker-tab-icon" src={dockerIcon} alt="" aria-hidden="true" />
+                <span>{server.name}</span>
+              </button>
+              {onCloseDocker && <button className="terminal-tab-close" type="button" onClick={() => { onCloseDocker(); focusAfterDockerClose(); }} aria-label="关闭 Docker"><X size={12} /></button>}
+            </div>
+          )}
           <div className="terminal-add-slot">
             <button
               className="terminal-tab-add"
@@ -5913,7 +6363,7 @@ function TerminalWorkspace({
             aria-hidden={!editorActive}
           />
         )}
-        <div className={`terminal-content-panel ${editorActive ? "is-hidden" : "is-active"}`}>
+        <div className={`terminal-content-panel ${editorActive || dockerActive ? "is-hidden" : "is-active"}`}>
           {tabs.length > 0 && (
             <InteractiveTerminalPanel
               key={`${focused.id}:${terminalGeneration}`}
@@ -5923,6 +6373,21 @@ function TerminalWorkspace({
             />
           )}
         </div>
+        {dockerOpen && (
+          <div className={`terminal-content-panel ${dockerActive ? "is-active" : "is-hidden"}`}>
+            <DockerManagementPanel
+              server={server}
+              services={server.services ?? []}
+              language={language}
+              placement="bottom"
+              onMove={onMoveDocker}
+              onRefresh={onRefreshDocker}
+              onAction={onDockerAction}
+              onOpenComposeEditor={onOpenComposeEditor}
+              onClose={() => { onCloseDocker?.(); focusAfterDockerClose(); }}
+            />
+          </div>
+        )}
       </div>
       {closeTarget && (
         <div className="rename-modal-backdrop" role="presentation">
@@ -7256,8 +7721,12 @@ function InteractiveTerminalPanel({
       marker: string;
     };
     const findNextProtocolRecord = (text: string): TerminalProtocolRecord | null => {
-      const start = /__OPSNEST_INTERACTIVE_START_(\d+)__(?:\r?\n)/.exec(text);
-      const end = /__OPSNEST_INTERACTIVE_END_(\d+)__ rc=-?\d+(?:\r?\n)/.exec(text);
+      // A PTY with ONLCR enabled can turn the explicit `\r\n` emitted by the
+      // remote command into `\r\r\n`. Treat every CR run before LF as the
+      // same protocol line ending so internal transaction markers never leak
+      // into the user-visible terminal.
+      const start = /__OPSNEST_INTERACTIVE_START_(\d+)__\r*\n/.exec(text);
+      const end = /__OPSNEST_INTERACTIVE_END_(\d+)__ rc=-?\d+\r*\n/.exec(text);
       const match = !start
         ? end
         : !end || start.index <= end.index
@@ -7930,6 +8399,16 @@ function ServiceDiscoveryPanel({ server }: { server: ServerSummary }) {
     const rows = Array.from(
       document.querySelectorAll<HTMLElement>(".discovered-service"),
     );
+    // Rows are reused across rescans. Remove the previous probe result first,
+    // otherwise a stale generic icon would prevent the new online asset from
+    // ever being tried.
+    rows.forEach((row) => row.querySelector(".discovered-service-icon")?.remove());
+    const loadsImage = (source: string) => new Promise<boolean>((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve(true);
+      image.onerror = () => resolve(false);
+      image.src = source;
+    });
     void (async () => {
       for (let index = 0; index < rows.length; index += 1) {
         const row = rows[index];
@@ -7944,25 +8423,24 @@ function ServiceDiscoveryPanel({ server }: { server: ServerSummary }) {
         let source = "";
         for (const candidate of candidates) {
           for (const type of ["svg", "png"] as const) {
-            const local = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}`;
             try {
-              if ((await fetch(local, { method: "HEAD" })).ok) {
-                source = local;
-                break;
+              if (type === "svg") {
+                const local = `/icons/packed/${directory}/${encodeURIComponent(candidate)}.svg`;
+                if ((await fetch(local, { method: "HEAD" })).ok) {
+                  source = local;
+                  break;
+                }
               }
-              const bundled = bundledIconUrl(directory, candidate, type);
+              const bundled = type === "svg" ? bundledIconUrl(directory, candidate, type) : undefined;
               if (bundled) {
                 source = bundled;
                 break;
               }
               const remote = remoteIconUrl(directory, candidate, type);
-              if ((await fetch(remote, { method: "HEAD" })).ok) {
+              // Do not use HEAD here. GitHub raw assets can reject HEAD in a
+              // WebView even though an ordinary image load succeeds.
+              if (await loadsImage(remote)) {
                 source = remote;
-                break;
-              }
-              const packedRemote = `https://raw.githubusercontent.com/HANSHOJIN/opsnest/main/icons/packed/${directory}/${encodeURIComponent(candidate)}.${type}`;
-              if ((await fetch(packedRemote, { method: "HEAD" })).ok) {
-                source = packedRemote;
                 break;
               }
             } catch {
@@ -8035,8 +8513,11 @@ function isVisibleWebService(
 ) {
   if (service.id === "1panel" && service.port === serverPort) return false;
   const kind = service.kind.toLowerCase();
-  if (!hideDocker) return kind !== "docker" || Boolean(service.port);
-  if (kind === "docker") return Boolean(service.port);
+  if (kind === "docker") {
+    const running = /^(?:up|running|healthy)\b/i.test(service.status.trim());
+    return running && Boolean(service.port);
+  }
+  if (!hideDocker) return true;
   if (!service.port || [22, 53, 547].includes(service.port)) return false;
   const scheme = service.webScheme?.toLowerCase();
   return (
@@ -8050,12 +8531,14 @@ function isVisibleWebService(
 function WebServiceDiscoveryPanel({
   server,
   onServicesUpdated,
+  onOpenDocker,
   hideDocker = false,
   nasMode = false,
   language,
 }: {
   server: ServerSummary;
   onServicesUpdated: (services: DiscoveredServiceSummary[]) => void;
+  onOpenDocker?: () => void;
   hideDocker?: boolean;
   nasMode?: boolean;
   language?: Language;
@@ -8114,6 +8597,10 @@ function WebServiceDiscoveryPanel({
         (await invoke<string | null>("load_server_credential", {
           serverId: server.id,
         }).catch(() => null));
+      const sudoCredential = await invoke<string | null>(
+        "load_server_sudo_credential",
+        { serverId: server.id },
+      ).catch(() => null);
       const result = await invoke<DiscoveredServiceSummary[]>(
         "discover_linux_services",
         {
@@ -8123,6 +8610,7 @@ function WebServiceDiscoveryPanel({
             username,
             authMethod: server.authMethod ?? "password",
             password: credential ?? null,
+            sudoPassword: sudoCredential ?? null,
             privateKeyPath: server.privateKeyPath ?? null,
             passphrase: null,
           },
@@ -8148,7 +8636,11 @@ function WebServiceDiscoveryPanel({
         if (!saved) return service;
         return {
           ...service,
-          port: saved.port ?? service.port,
+          // Runtime discovery always wins unless the user explicitly edited
+          // the port. This prevents stale automatic detections from becoming
+          // permanent while preserving deliberate overrides generically.
+          port: saved.portOverride ?? service.port,
+          portOverride: saved.portOverride,
           webPath: saved.webPath ?? service.webPath,
           webScheme: saved.webScheme ?? service.webScheme,
           customLabel: saved.customLabel ?? service.customLabel,
@@ -8196,6 +8688,15 @@ function WebServiceDiscoveryPanel({
   React.useEffect(() => {
     void scan();
   }, [scan]);
+  React.useEffect(() => {
+    const refreshDockerState = (event: Event) => {
+      const serverId = (event as CustomEvent<{ serverId?: string }>).detail?.serverId;
+      if (serverId && serverId !== server.id) return;
+      void scan();
+    };
+    window.addEventListener("opsnest-refresh-docker-state", refreshDockerState);
+    return () => window.removeEventListener("opsnest-refresh-docker-state", refreshDockerState);
+  }, [scan, server.id]);
   const updateService = (
     id: string,
     field: "port" | "webPath" | "customLabel",
@@ -8209,6 +8710,9 @@ function WebServiceDiscoveryPanel({
               field === "port"
                 ? Number(value) || undefined
                 : value.trim() || undefined,
+            ...(field === "port"
+              ? { portOverride: Number(value) || undefined }
+              : {}),
           }
         : service,
     );
@@ -8357,7 +8861,12 @@ function WebServiceDiscoveryPanel({
         </div>
       )}
       <p className="service-discovery-state">{state}</p>
-      <DockerServiceCard server={server} />
+      <DockerPanel
+        server={server}
+        services={server.services ?? []}
+        language={language ?? "zh-CN"}
+        onManage={onOpenDocker}
+      />
       {services.length > 0 ? (
         <div className="discovered-service-list">
           {services.map((service) => (
@@ -8515,6 +9024,10 @@ function App() {
     null,
   );
   const [editorView, setEditorView] = React.useState<"files" | "editor">("files");
+  const [rightPanelMode, setRightPanelMode] = React.useState<"files" | "docker">("files");
+  const [dockerPanelOpen, setDockerPanelOpen] = React.useState(false);
+  const [dockerPlacement, setDockerPlacement] = React.useState<DockerPanelPlacement>("right");
+  const [dockerBottomActive, setDockerBottomActive] = React.useState(false);
 
   React.useEffect(() => {
     const handler = (message: string) =>
@@ -8958,9 +9471,344 @@ function App() {
   };
   const openServerFiles = React.useCallback((id: string) => {
     if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
+    setRightPanelMode("files");
     setEditorView("files");
     setOpenFileManagerSignal((value) => value + 1);
   }, [navigate, selectedMenu]);
+  const openDockerPanel = React.useCallback((id: string) => {
+    if (selectedMenu !== `server-${id}`) navigate(`server-${id}`);
+    setDockerPanelOpen(true);
+    setDockerPlacement("right");
+    setDockerBottomActive(false);
+    setRightPanelMode("docker");
+    setOpenFileManagerSignal((value) => value + 1);
+  }, [navigate, selectedMenu]);
+  const runDockerAction = React.useCallback(
+    async (
+      server: ServerSummary,
+      action: DockerPanelAction,
+    ): Promise<DockerPanelActionResult> => {
+      const at = server.host.indexOf("@");
+      const username = at > 0 ? server.host.slice(0, at) : "root";
+      const host = at > 0 ? server.host.slice(at + 1) : server.host;
+      const password =
+        server.password ??
+        (await invoke<string | null>("load_server_credential", {
+          serverId: server.id,
+        }).catch(() => null));
+      const sudoPassword = await invoke<string | null>(
+        "load_server_sudo_credential",
+        { serverId: server.id },
+      ).catch(() => null);
+      const opened = await invoke<{ sessionId: string }>("open_ssh_session", {
+        request: {
+          host,
+          port: server.port,
+          username,
+          authMethod: server.authMethod ?? "password",
+          password,
+          privateKeyPath: server.privateKeyPath ?? null,
+          passphrase: null,
+        },
+      });
+      setServers((current) =>
+        current.map((item) =>
+          item.id === server.id
+            ? { ...item, connected: true, connectionError: false }
+            : item,
+        ),
+      );
+      try {
+        const actionCommand = dockerActionCommand(action);
+        const identity = await invoke<string>("execute_ssh_command", {
+          sessionId: opened.sessionId,
+          command: "id -u",
+          approved: true,
+          sudoPassword: null,
+        });
+        const isRoot = identity.trim() === "0";
+        const privilegedCommand = sudoPassword && !isRoot
+          ? "sudo sh -c " + shellQuote(actionCommand)
+          : actionCommand;
+        const command =
+          privilegedCommand + " 2>&1" +
+          '; rc=$?; printf "\\n__OPSNEST_DOCKER_ACTION_RC=%s\\n" "$rc"; exit "$rc"';
+        const output = await invoke<string>("execute_ssh_command", {
+          sessionId: opened.sessionId,
+          command,
+          approved: true,
+          sudoPassword,
+        });
+        const cleanOutput = stripTerminalAnsi(output);
+        const marker = cleanOutput.match(/__OPSNEST_DOCKER_ACTION_RC=(\d+)/);
+        if (!marker) {
+          throw new Error(cleanOutput.trim() || "Docker 操作未返回执行结果");
+        }
+        if (marker[1] !== "0") {
+          const detail = cleanOutput.replace(/__OPSNEST_DOCKER_ACTION_RC=\d+/g, "").trim();
+          throw new Error(detail || "Docker 操作失败");
+        }
+        const message = cleanOutput.replace(/__OPSNEST_DOCKER_ACTION_RC=\d+/g, "").trim();
+        if (action.kind === "image") {
+          if (action.operation === "list") {
+            const images = message
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line) => {
+                try {
+                  const item = JSON.parse(line) as Record<string, unknown>;
+                  return {
+                    id: String(item.ID ?? item.Id ?? item.id ?? "").trim(),
+                    repository: String(item.Repository ?? item.repository ?? "<none>").trim(),
+                    tag: String(item.Tag ?? item.tag ?? "<none>").trim(),
+                    size: String(item.Size ?? item.size ?? "").trim(),
+                    createdAt: String(item.CreatedSince ?? item.CreatedAt ?? item.createdAt ?? "").trim(),
+                    digest: String(item.Digest ?? item.digest ?? "").trim() || undefined,
+                  };
+                } catch {
+                  return null;
+                }
+              })
+              .filter((image): image is { id: string; repository: string; tag: string; size: string; createdAt: string; digest: string | undefined } => Boolean(image?.id));
+            return { images, message: images.length ? "" : "未发现本地镜像" };
+          }
+          if (action.operation === "check") {
+            const imageUpdates = message
+              .split(/\r?\n/)
+              .filter((line) => line.startsWith("__OPSNEST_IMAGE_UPDATE__\t"))
+              .map((line) => {
+                const [, reference = "", rawStatus = "unknown", localDigest = "", remoteDigest = "", usedBy = "", rawTargets = ""] = line.split("\t");
+                const updateStatus: DockerImageUpdateSummary["updateStatus"] = rawStatus === "current" || rawStatus === "available"
+                  ? rawStatus
+                  : "unknown";
+                const composeTargets = rawTargets
+                  .split(";")
+                  .map((target) => {
+                    const separator = target.lastIndexOf("::");
+                    if (separator < 1) return null;
+                    const path = target.slice(0, separator).trim();
+                    const service = target.slice(separator + 2).trim();
+                    return path.startsWith("/") && service ? { path, service } : null;
+                  })
+                  .filter((target): target is { path: string; service: string } => Boolean(target));
+                return {
+                  reference,
+                  updateStatus,
+                  localDigest: localDigest || undefined,
+                  remoteDigest: remoteDigest || undefined,
+                  usedBy: usedBy.split(",").map((name) => name.trim()).filter(Boolean),
+                  composeTargets,
+                };
+              })
+              .filter((update) => Boolean(update.reference));
+            return {
+              imageUpdates,
+              message: imageUpdates.length
+                ? `更新检查完成：${imageUpdates.filter((item) => item.updateStatus === "available").length} 个镜像可升级`
+                : "没有可检查的带标签镜像",
+            };
+          }
+          if (action.operation === "upgrade") {
+            const upgradeLine = message
+              .split(/\r?\n/)
+              .find((line) => line.startsWith("__OPSNEST_IMAGE_UPGRADE__\t"));
+            const [, reference = action.reference || "", composeServices = "0", standaloneContainers = "0"] = upgradeLine?.split("\t") || [];
+            return {
+              imageUpgrade: {
+                reference,
+                composeServices: Number(composeServices) || 0,
+                standaloneContainers: Number(standaloneContainers) || 0,
+              },
+              message: "",
+            };
+          }
+          return { message };
+        }
+        if (action.kind === "registry") {
+          const config = JSON.parse(message || "{}") as Record<string, unknown>;
+          const indexConfigs = (config.IndexConfigs ?? config.indexConfigs ?? {}) as Record<string, Record<string, unknown>>;
+          const globalMirrors = Array.isArray(config.Mirrors) ? config.Mirrors.map(String) : [];
+          const registries = Object.entries(indexConfigs).map(([key, value]) => {
+            const name = String(value.Name ?? value.name ?? key).trim() || key;
+            const mirrors = Array.isArray(value.Mirrors) ? value.Mirrors.map(String) : name === "docker.io" ? globalMirrors : [];
+            return { name, secure: value.Secure !== false && value.secure !== false, mirrors };
+          });
+          if (!registries.length && globalMirrors.length)
+            registries.push({ name: "docker.io", secure: true, mirrors: globalMirrors });
+          return { registries, message: "" };
+        }
+        if (action.kind === "network") {
+          if (action.operation === "list") {
+            const networks = message
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line) => {
+                try {
+                  const item = JSON.parse(line) as Record<string, unknown>;
+                  return {
+                    id: String(item.ID ?? item.Id ?? item.id ?? "").trim(),
+                    name: String(item.Name ?? item.name ?? "").trim(),
+                    driver: String(item.Driver ?? item.driver ?? "").trim(),
+                    scope: String(item.Scope ?? item.scope ?? "").trim(),
+                    internal: String(item.Internal ?? item.internal ?? "").trim() || undefined,
+                    ipv6: String(item.IPv6 ?? item.ipv6 ?? "").trim() || undefined,
+                  };
+                } catch {
+                  return null;
+                }
+              })
+              .filter((network): network is { id: string; name: string; driver: string; scope: string; internal: string | undefined; ipv6: string | undefined } => Boolean(network?.name));
+            return { networks, message: networks.length ? "" : "未发现 Docker 网络" };
+          }
+          return { message };
+        }
+        if (action.kind === "compose") {
+          if (action.operation === "list") {
+            let composeProjects: Array<{ name: string; status: string; configPath: string; containerCount?: number; createdAt?: string }> = [];
+            const [projectPayload, discoveredPayload = ""] = message.split("__OPSNEST_COMPOSE_FILES__");
+            const [discoveredFilesPayload, composeLabelsPayload = ""] = discoveredPayload.split("__OPSNEST_COMPOSE_LABELS__");
+            try {
+              const parsed = JSON.parse(projectPayload.trim()) as Array<Record<string, unknown>>;
+              composeProjects = parsed
+                .map((item) => {
+                  const name = String(item.Name ?? item.name ?? "").trim();
+                  const status = String(item.Status ?? item.status ?? "").trim();
+                  const configFiles = String(item.ConfigFiles ?? item.configFiles ?? "").trim();
+                  if (!name || !configFiles) return null;
+                const containerCount = Number(item.Running ?? item.running ?? item.Containers ?? item.containers);
+                return { name, status, configPath: configFiles.split(",")[0]?.trim() || configFiles, containerCount: Number.isFinite(containerCount) ? containerCount : undefined, createdAt: String(item.CreatedAt ?? item.createdAt ?? "") };
+                })
+                .filter((project): project is { name: string; status: string; configPath: string; containerCount: number | undefined; createdAt: string } => Boolean(project));
+            } catch {
+              composeProjects = projectPayload
+                .split(/\n+/)
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .map((line) => {
+                  const [name, status, configFiles] = line.split(/\t+/);
+                  if (!name || !configFiles) return null;
+                  return { name, status: status || "", configPath: configFiles.split(",")[0]?.trim() || configFiles.trim() };
+                })
+                .filter((project): project is { name: string; status: string; configPath: string } => Boolean(project));
+            }
+            const discoveredProjects = discoveredFilesPayload
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter((path) => path.startsWith("/"))
+              .map((configPath) => {
+                const parts = configPath.split("/").filter(Boolean);
+                const name = parts.length > 1 ? parts[parts.length - 2] : parts[0] || "Compose";
+                return { name, status: "unbuilt(0)", configPath, containerCount: 0 };
+              })
+              .filter((project) => !composeProjects.some((item) => item.configPath === project.configPath));
+            composeProjects = [...composeProjects, ...discoveredProjects];
+            const labelProjects = composeLabelsPayload
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line) => {
+                const [name, configFiles, workingDir, status] = line.split("\t");
+                if (!name || !configFiles) return null;
+                const firstConfig = configFiles.split(",")[0]?.trim() || "";
+                const configPath = firstConfig.startsWith("/")
+                  ? firstConfig
+                  : `${(workingDir || "").replace(/\/$/, "")}/${firstConfig}`;
+                if (!configPath.startsWith("/")) return null;
+                const running = /^(?:up|running)/i.test(status || "");
+                return { name, status: running ? "running(1)" : "exited(0)", configPath, containerCount: running ? 1 : 0 };
+              })
+              .filter((project): project is { name: string; status: string; configPath: string; containerCount: number } => Boolean(project))
+              .filter((project) => !composeProjects.some((item) => item.configPath === project.configPath));
+            composeProjects = [...composeProjects, ...labelProjects].filter(
+              (project, index, items) => items.findIndex((item) => item.configPath === project.configPath) === index,
+            );
+            return { composeProjects, message: composeProjects.length ? "" : "未发现 Compose 项目" };
+          }
+          if (action.operation === "browse") {
+            const composeDirectories = message
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line) => {
+                const separator = line.indexOf("\t");
+                if (separator < 1) return null;
+                return { name: line.slice(0, separator), path: line.slice(separator + 1) };
+              })
+              .filter((entry): entry is { name: string; path: string } => Boolean(entry));
+            return { composeDirectories, composePath: action.path, message: "" };
+          }
+          if (action.operation === "inspect") {
+            const missing = message.includes("__OPSNEST_COMPOSE_MISSING__");
+            const pathMatch = message.match(/__OPSNEST_COMPOSE_PATH=([^\n]+)/);
+            const composeContent = message
+              .replace(/__OPSNEST_COMPOSE_PATH=[^\n]*\n?/, "")
+              .replace(/__OPSNEST_COMPOSE_MISSING__\n?/, "")
+              .trim();
+            return {
+              composeExists: !missing,
+              composePath: pathMatch?.[1]?.trim() || action.path,
+              composeContent,
+              message: "",
+            };
+          }
+          if (action.operation === "read" || action.operation === "config" || action.operation === "logs")
+            return { composeContent: message, composePath: action.path, message: "" };
+          return { message: message || "Compose 操作完成" };
+        }
+        if (action.kind === "service")
+          return { running: action.enabled, message: message || "Docker 服务操作完成" };
+        if (action.kind === "autostart")
+          return { dockerAutostart: action.enabled ? "enabled" : "disabled", message: message || "Docker 自启动设置完成" };
+        if (action.kind === "container") {
+          const stateLine = cleanOutput
+            .split(/\r?\n/)
+            .map((line) => line.trim().toLowerCase())
+            .reverse()
+            .find((line) => line === "true" || line === "false");
+          return {
+            containerRunning:
+              stateLine === "true"
+                ? true
+                : stateLine === "false"
+                  ? false
+                  : action.operation === "stop"
+                    ? false
+                    : action.operation === "start" || action.operation === "restart"
+                      ? true
+                      : undefined,
+            message: message || "容器操作完成",
+          };
+        }
+        if (action.kind !== "root")
+          throw new Error("不支持的 Docker 操作");
+        return { dockerRootDir: action.value.trim(), message: message || "Docker 配置已更新" };
+      } finally {
+        await invoke("close_ssh_session", {
+          sessionId: opened.sessionId,
+        }).catch(() => undefined);
+      }
+    },
+    [],
+  );
+  const moveDockerPanel = React.useCallback((placement: DockerPanelPlacement) => {
+    setDockerPlacement(placement);
+    if (placement === "bottom") {
+      setRightPanelMode("files");
+      setDockerBottomActive(true);
+      setOpenBottomPanelSignal((value) => value + 1);
+    } else {
+      setDockerBottomActive(false);
+      setRightPanelMode("docker");
+      setOpenFileManagerSignal((value) => value + 1);
+    }
+  }, []);
+  const closeDockerPanel = React.useCallback(() => {
+    setDockerPanelOpen(false);
+    setDockerBottomActive(false);
+    if (rightPanelMode === "docker") setRightPanelMode("files");
+  }, [rightPanelMode]);
   const openRemoteEditor = React.useCallback(
     (
       serverId: string,
@@ -8976,9 +9824,10 @@ function App() {
       setEditorPlacement(placement);
       setEditorView("editor");
       if (selectedMenu !== `server-${serverId}`) navigate(`server-${serverId}`);
-      if (placement === "bottom")
+      if (placement === "bottom") {
+        setDockerBottomActive(false);
         setOpenBottomPanelSignal((value) => value + 1);
-      else setOpenFileManagerSignal((value) => value + 1);
+      } else setOpenFileManagerSignal((value) => value + 1);
     },
     [navigate, selectedMenu],
   );
@@ -9231,6 +10080,16 @@ function App() {
     },
     [selectedServer?.id, updateServerServices],
   );
+  const openComposeEditor = React.useCallback(
+    (path: string, name: string, placement: DockerPanelPlacement) => {
+      if (!selectedServer) return;
+      setDockerPanelOpen(false);
+      setDockerBottomActive(false);
+      setRightPanelMode("files");
+      openRemoteEditor(selectedServer.id, path, name, placement);
+    },
+    [openRemoteEditor, selectedServer?.id],
+  );
   React.useEffect(() => {
     if (
       selectedServer &&
@@ -9337,37 +10196,54 @@ function App() {
         }
         right={
           selectedServer ? (
-            <div className="workspace-view-stack">
-              <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" && activeEditorServer?.id === selectedServer.id ? "is-hidden" : "is-active"}`}>
-                <FileManagerPanel
-                  server={selectedServer}
-                  servers={servers}
-                  openSignal={openFileManagerSignal}
-                  onEmpty={closeEmptyFileManager}
-                  onOpenEditor={openRemoteEditor}
-                  onConnectionState={updateConnectionState}
-                   editorTab={editorPlacement === "right" ? activeEditorTab : null}
-                   editorActive={editorView === "editor" && editorPlacement === "right"}
-                   onSelectEditor={() => selectEditorView("right")}
-                />
-              </div>
-              {activeEditorServer?.id === selectedServer.id && activeEditorTab && (
-                <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" ? "is-active" : "is-hidden"}`}>
-                  <RemoteEditorPanel
-                    language={appearance.language}
+            dockerPanelOpen && dockerPlacement === "right" && rightPanelMode === "docker" ? (
+              <DockerManagementPanel
+                server={selectedServer}
+                services={selectedServer.services ?? []}
+                language={appearance.language}
+                placement="right"
+                showTabs
+                onBackToFiles={() => setRightPanelMode("files")}
+                onMove={moveDockerPanel}
+                onRefresh={() => void scanServer(selectedServer)}
+                onAction={(action) => runDockerAction(selectedServer, action)}
+                onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "right")}
+                onClose={closeDockerPanel}
+              />
+            ) : (
+              <div className="workspace-view-stack">
+                <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" && activeEditorServer?.id === selectedServer.id ? "is-hidden" : "is-active"}`}>
+                  <FileManagerPanel
                     server={selectedServer}
-                    tabs={editorTabs}
-                    activeTabId={activeEditorTabId}
-                    placement={editorPlacement ?? "right"}
-                    showTabs={editorPlacement === "right"}
+                    servers={servers}
+                    openSignal={openFileManagerSignal}
+                    onEmpty={closeEmptyFileManager}
+                    onOpenEditor={openRemoteEditor}
                     onConnectionState={updateConnectionState}
-                    onCloseTab={closeRemoteEditor}
-                    onBackToFiles={backToFiles}
-                    onMove={moveEditor}
+                    editorTab={editorPlacement === "right" ? activeEditorTab : null}
+                    editorActive={editorView === "editor" && editorPlacement === "right"}
+                    onSelectEditor={() => selectEditorView("right")}
+                    dockerTab={dockerPanelOpen && dockerPlacement === "right" ? { active: rightPanelMode === "docker", onSelect: () => setRightPanelMode("docker"), onClose: closeDockerPanel } : undefined}
                   />
                 </div>
-              )}
-            </div>
+                {activeEditorServer?.id === selectedServer.id && activeEditorTab && (
+                  <div className={`workspace-view ${editorView === "editor" && editorPlacement === "right" ? "is-active" : "is-hidden"}`}>
+                    <RemoteEditorPanel
+                      language={appearance.language}
+                      server={selectedServer}
+                      tabs={editorTabs}
+                      activeTabId={activeEditorTabId}
+                      placement={editorPlacement ?? "right"}
+                      showTabs={editorPlacement === "right"}
+                      onConnectionState={updateConnectionState}
+                      onCloseTab={closeRemoteEditor}
+                      onBackToFiles={backToFiles}
+                      onMove={moveEditor}
+                    />
+                  </div>
+                )}
+              </div>
+            )
           ) : (
             <EmptySlot
               label={isEnglish ? "Side panel reserved" : "侧栏功能暂未规划"}
@@ -9401,6 +10277,7 @@ function App() {
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
+                  onOpenDocker={() => openDockerPanel(selectedServer.id)}
                   onOpenManager={() => navigate("manager")}
                   onServicesUpdated={updateSelectedServerServices}
                 />
@@ -9412,6 +10289,7 @@ function App() {
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
+                  onOpenDocker={() => openDockerPanel(selectedServer.id)}
                   onServicesUpdated={updateSelectedServerServices}
                 />
               ) : (
@@ -9423,6 +10301,7 @@ function App() {
                   onScan={() => void scanServer(selectedServer)}
                   onOpenTerminal={() => openServerTerminal(selectedServer.id)}
                   onOpenFiles={() => openServerFiles(selectedServer.id)}
+                  onOpenDocker={() => openDockerPanel(selectedServer.id)}
                   onServicesUpdated={updateSelectedServerServices}
                 />
               )
@@ -9474,6 +10353,7 @@ function App() {
               server={selectedServer}
               servers={servers}
               model={model}
+              language={appearance.language}
               onConnectionState={updateConnectionState}
               editorTab={
                 editorPlacement === "bottom" && activeEditorServer?.id === selectedServer.id
@@ -9487,8 +10367,16 @@ function App() {
                 Boolean(activeEditorTab)
               }
               onSelectEditor={() => selectEditorView("bottom")}
-              onSelectTerminal={() => setEditorView("files")}
+              onSelectTerminal={() => { setDockerBottomActive(false); setEditorView("files"); }}
               onCloseEditor={() => window.dispatchEvent(new Event("opsnest-close-active-editor"))}
+              dockerOpen={dockerPanelOpen && dockerPlacement === "bottom"}
+              dockerActive={dockerPanelOpen && dockerPlacement === "bottom" && dockerBottomActive}
+              onSelectDocker={() => { setDockerBottomActive(true); setEditorView("files"); }}
+              onCloseDocker={closeDockerPanel}
+              onMoveDocker={moveDockerPanel}
+              onRefreshDocker={() => void scanServer(selectedServer)}
+              onDockerAction={(action) => runDockerAction(selectedServer, action)}
+              onOpenComposeEditor={(path, name) => openComposeEditor(path, name, "bottom")}
             />
           ) : (
             <EmptySlot

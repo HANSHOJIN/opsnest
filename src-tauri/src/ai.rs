@@ -284,6 +284,7 @@ async fn execute_read_only_tool(
                 username: request.username,
                 auth_method: request.auth_method,
                 password: request.password,
+                sudo_password: request.sudo_password,
                 private_key_path: request.private_key_path,
                 passphrase: request.passphrase,
             };

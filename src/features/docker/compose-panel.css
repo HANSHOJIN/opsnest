@@ -1,0 +1,154 @@
+.docker-compose-panel { margin-top: 14px; }
+.docker-compose-project-management-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.docker-compose-project-management-heading > strong { color: var(--text-strong); font-size: 15px; }
+.docker-compose-project-toolbar { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.docker-compose-search { display: flex; align-items: center; gap: 7px; width: 240px; height: 32px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); background: var(--paper); }
+.docker-compose-search:focus-within { border-color: var(--accent); }
+.docker-compose-search input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font: inherit; font-size: 11px; }
+.docker-compose-search input::placeholder { color: var(--muted); }
+.docker-compose-refresh-button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); cursor: pointer; }
+.docker-compose-refresh-button:hover { border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-refresh-button:disabled { cursor: wait; opacity: .55; }
+.docker-compose-project-list { display: grid; gap: 8px; margin-top: 12px; }
+.docker-compose-project-group { min-width: 0; }
+.docker-compose-project-row { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding: 11px 12px; border: 1px solid var(--line-soft); border-radius: 10px; color: var(--text); background: var(--card); cursor: pointer; }
+.docker-compose-project-row:hover, .docker-compose-project-row.is-selected { border-color: color-mix(in srgb, var(--accent) 48%, var(--line-soft)); background: var(--control-hover); }
+.docker-compose-project-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.docker-compose-project-main { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.docker-compose-project-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 38px; border-radius: 9px; color: var(--accent); background: color-mix(in srgb, var(--accent) 13%, var(--card)); }
+.docker-compose-project-copy { display: block; min-width: 0; }
+.docker-compose-project-copy > strong { display: block; overflow: hidden; color: var(--text-strong); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.docker-compose-project-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.docker-compose-project-meta > span { white-space: nowrap; }
+.docker-compose-project-meta .is-running::before, .docker-compose-project-meta .is-unbuilt::before, .docker-compose-project-meta .is-stopped::before { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border-radius: 50%; content: ""; vertical-align: 1px; }
+.docker-compose-project-meta .is-running { color: #58d99b; }
+.docker-compose-project-meta .is-running::before { background: #58d99b; }
+.docker-compose-project-meta .is-unbuilt { color: var(--muted); }
+.docker-compose-project-meta .is-unbuilt::before { background: #9da3ad; }
+.docker-compose-project-meta .is-stopped { color: var(--muted); }
+.docker-compose-project-meta .is-stopped::before { background: #9da3ad; }
+.docker-compose-project-meta .is-operation { color: #e7bd65; }
+.docker-compose-project-meta .is-operation::before { display: inline-block; width: 7px; height: 7px; margin-right: 5px; border: 1px solid #e7bd65; border-top-color: transparent; border-radius: 50%; content: ""; vertical-align: -1px; animation: opsnest-spin 900ms linear infinite; }
+.docker-compose-project-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.docker-compose-project-power, .docker-compose-more { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); cursor: pointer; }
+.docker-compose-project-power:hover, .docker-compose-more:hover { border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-project-power:disabled { cursor: wait; opacity: .55; }
+.docker-compose-menu-wrap { position: relative; display: inline-flex; }
+.docker-compose-project-menu { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; display: grid; min-width: 142px; padding: 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--elevated); box-shadow: 0 12px 30px rgba(0,0,0,.35); }
+.docker-compose-project-menu button { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 31px; padding: 0 8px; border: 0; border-radius: 5px; color: var(--text-strong); background: transparent; font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.docker-compose-project-menu button:hover { background: var(--control-hover); }
+.docker-compose-project-menu button:disabled { cursor: wait; opacity: .45; }
+.docker-compose-project-menu button svg { color: var(--muted); }
+.docker-compose-project-detail { margin-top: -1px; padding: 12px; border: 1px solid var(--line-soft); border-top: 0; border-radius: 0 0 9px 9px; background: var(--paper); }
+.docker-compose-project-detail .docker-compose-detail-heading { align-items: center; }
+.docker-compose-detail-view-label { margin-top: 10px; color: var(--muted); font-size: 10px; }
+.docker-compose-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.docker-compose-heading strong, .docker-compose-heading span { display: block; }
+.docker-compose-heading strong { color: var(--text-strong); font-size: 15px; }
+.docker-compose-heading span { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.docker-compose-heading-actions, .docker-compose-detail-actions { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.docker-compose-primary { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 32px; padding: 0 11px; border: 1px solid var(--accent); border-radius: 7px; color: #fff; background: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
+.docker-compose-primary:hover { filter: brightness(1.08); }
+.docker-compose-primary:disabled { cursor: wait; opacity: .55; }
+.docker-compose-feedback { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 8px 34px 8px 10px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--muted); background: var(--card); font-size: 11px; }
+.docker-compose-feedback button { position: absolute; top: 5px; right: 6px; display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--paper); cursor: pointer; }
+.docker-compose-feedback button:hover { color: var(--text-strong); border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-feedback.is-error { border-color: color-mix(in srgb, #ef6a78 55%, var(--line-soft)); color: #f08a94; }
+.docker-compose-layout { display: grid; grid-template-columns: minmax(210px, .42fr) minmax(0, 1fr); gap: 12px; margin-top: 12px; min-width: 0; }
+.docker-compose-projects { display: grid; align-content: start; gap: 7px; min-width: 0; }
+.docker-compose-project { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 10px; border: 1px solid var(--line-soft); border-radius: 8px; color: var(--muted); background: var(--card); text-align: left; cursor: pointer; }
+.docker-compose-project:hover, .docker-compose-project.is-selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-soft)); background: var(--control-hover); }
+.docker-compose-project > svg { color: var(--accent); }
+.docker-compose-project span { min-width: 0; }
+.docker-compose-project strong, .docker-compose-project small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docker-compose-project strong { color: var(--text-strong); font-size: 12px; }
+.docker-compose-project small { margin-top: 4px; color: var(--muted); font: 10px/1.3 Consolas, monospace; }
+.docker-compose-project b { max-width: 100px; overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.docker-compose-empty, .docker-compose-detail-empty { padding: 24px 12px; border: 1px dashed var(--line-soft); border-radius: 8px; color: var(--muted); font-size: 11px; text-align: center; }
+.docker-compose-detail { min-width: 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--card); }
+.docker-compose-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.docker-compose-detail-heading strong, .docker-compose-detail-heading span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docker-compose-detail-heading strong { color: var(--text-strong); font-size: 13px; }
+.docker-compose-detail-heading span { margin-top: 4px; color: var(--muted); font: 10px/1.3 Consolas, monospace; }
+.docker-compose-detail-actions button { display: grid; place-items: center; width: 27px; height: 27px; padding: 0; border: 1px solid var(--line); border-radius: 6px; color: var(--accent); background: var(--paper); cursor: pointer; }
+.docker-compose-detail-actions button:hover { border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-detail-actions button:disabled { cursor: wait; opacity: .5; }
+.docker-compose-content { min-height: 240px; max-height: 430px; overflow: auto; margin: 11px 0 0; padding: 11px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--text); background: var(--paper); font: 10px/1.5 Consolas, monospace; white-space: pre; }
+.docker-compose-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.55); }
+.docker-compose-directory-backdrop { z-index: 110; }
+.docker-compose-modal { width: min(660px, 100%); max-height: min(700px, 90vh); overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--elevated); box-shadow: 0 18px 50px rgba(0,0,0,.42); }
+.docker-compose-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+.docker-compose-modal > header strong { color: var(--text-strong); font-size: 17px; }
+.docker-compose-modal > header button { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.docker-compose-modal > header button:hover { color: var(--text-strong); background: var(--control-hover); }
+.docker-compose-modal > label { display: block; margin-top: 12px; color: var(--text-strong); font-size: 11px; }
+.docker-compose-modal input[type="text"], .docker-compose-modal input:not([type]), .docker-compose-path-input input { width: 100%; height: 34px; box-sizing: border-box; margin-top: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: var(--paper); font: inherit; font-size: 11px; }
+.docker-compose-modal input:focus, .docker-compose-create-content:focus { border-color: var(--accent); }
+.docker-compose-path-input { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.docker-compose-path-input input { margin-top: 0; }
+.docker-compose-path-input button { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; color: var(--muted); background: var(--paper); cursor: pointer; }
+.docker-compose-path-input button:hover { color: var(--text-strong); border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-path-input button svg { color: inherit; }
+.docker-compose-root-fallback { margin-top: 6px; padding: 0; border: 0; color: var(--accent); background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.docker-compose-root-fallback:hover { color: var(--text-strong); text-decoration: underline; }
+.docker-compose-path-status { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+.docker-compose-source-label { margin-top: 16px; color: var(--text-strong); font-size: 11px; }
+.docker-compose-source-options { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
+.docker-compose-source-options label, .docker-compose-start-option { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; cursor: pointer; }
+.docker-compose-source-options input, .docker-compose-start-option input { accent-color: var(--accent); }
+.docker-compose-create-content { width: 100%; min-height: 180px; box-sizing: border-box; margin-top: 10px; padding: 9px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: var(--paper); font: 10px/1.45 Consolas, monospace; }
+.docker-compose-upload { display: flex !important; align-items: center; gap: 7px; min-height: 36px; padding: 0 10px; border: 1px dashed var(--line); border-radius: 7px; color: var(--muted) !important; cursor: pointer; }
+.docker-compose-upload input { display: none; }
+.docker-compose-upload svg { color: var(--accent); }
+.docker-compose-start-option { margin-top: 14px; }
+.docker-compose-modal > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.docker-compose-modal > footer button:not(.docker-compose-primary) { min-height: 32px; padding: 0 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); font: inherit; font-size: 11px; cursor: pointer; }
+.docker-compose-detail-modal { display: flex; flex-direction: column; width: min(760px, 100%); max-height: min(760px, 90vh); overflow: hidden; padding: 18px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--elevated); box-shadow: 0 18px 50px rgba(0,0,0,.42); }
+.docker-compose-detail-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.docker-compose-detail-modal > header strong { color: var(--text-strong); font-size: 17px; }
+.docker-compose-detail-modal > header button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.docker-compose-detail-modal > header button:hover { color: var(--text-strong); background: var(--control-hover); }
+.docker-compose-detail-summary { display: flex; align-items: center; gap: 11px; padding: 11px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--card); }
+.docker-compose-detail-summary > div { display: grid; min-width: 0; gap: 3px; }
+.docker-compose-detail-summary strong { color: var(--text-strong); font-size: 13px; }
+.docker-compose-detail-summary span, .docker-compose-detail-summary small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.docker-compose-detail-summary small { font: 10px/1.3 Consolas, monospace; }
+.docker-compose-detail-tabs { display: flex; align-items: center; gap: 14px; margin-top: 14px; border-bottom: 1px solid var(--line-soft); }
+.docker-compose-detail-tabs span { padding: 0 4px 8px; color: var(--muted); font-size: 11px; }
+.docker-compose-detail-tabs span.is-active { border-bottom: 2px solid var(--accent); color: var(--text-strong); }
+.docker-compose-detail-source { min-height: 260px; max-height: 55vh; overflow: auto; margin: 10px 0 0; padding: 12px; border: 1px solid var(--line-soft); border-radius: 7px; color: var(--text); background: var(--paper); font: 10px/1.55 Consolas, monospace; white-space: pre; }
+.docker-compose-detail-editor { width: 100%; min-height: 260px; max-height: 55vh; box-sizing: border-box; overflow: auto; margin: 10px 0 0; padding: 12px; resize: vertical; border: 1px solid var(--accent); border-radius: 7px; outline: none; color: var(--text); background: var(--paper); font: 10px/1.55 Consolas, monospace; white-space: pre; }
+.docker-compose-detail-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 10px; }
+.docker-compose-detail-footer > span { min-width: 0; }
+.docker-compose-directory-modal { width: min(560px, 100%); max-height: min(650px, 90vh); overflow: hidden; padding: 18px; border: 1px solid var(--line); border-radius: 12px; color: var(--text); background: var(--elevated); box-shadow: 0 18px 50px rgba(0,0,0,.42); }
+.docker-compose-directory-modal > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.docker-compose-directory-modal > header strong { color: var(--text-strong); font-size: 16px; }
+.docker-compose-directory-modal > header button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 6px; color: var(--muted); background: transparent; cursor: pointer; }
+.docker-compose-directory-modal > header button:hover { color: var(--text-strong); background: var(--control-hover); }
+.docker-compose-directory-toolbar { display: flex; align-items: center; gap: 7px; }
+.docker-compose-directory-toolbar input { min-width: 0; flex: 1 1 auto; height: 32px; box-sizing: border-box; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; outline: none; color: var(--text); background: var(--paper); font: 10px Consolas, monospace; }
+.docker-compose-directory-toolbar input:focus { border-color: var(--accent); }
+.docker-compose-directory-toolbar button { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); cursor: pointer; }
+.docker-compose-directory-toolbar button:hover { border-color: var(--accent); background: var(--control-hover); }
+.docker-compose-directory-toolbar button:disabled { cursor: wait; opacity: .45; }
+.docker-compose-directory-list { display: grid; max-height: 360px; overflow: auto; margin-top: 10px; padding: 5px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--paper); }
+.docker-compose-directory-list button { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 8px; border: 0; border-radius: 5px; color: var(--text-strong); background: transparent; font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.docker-compose-directory-list button:hover { background: var(--control-hover); }
+.docker-compose-directory-list button svg { color: var(--accent); }
+.docker-compose-directory-list button:disabled { cursor: wait; opacity: .55; }
+.docker-compose-directory-empty { padding: 24px 10px; color: var(--muted); font-size: 11px; text-align: center; }
+.docker-compose-directory-modal > footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.docker-compose-directory-modal > footer button:not(.docker-compose-primary) { min-height: 32px; padding: 0 13px; border: 1px solid var(--line); border-radius: 7px; color: var(--text-strong); background: var(--paper); font: inherit; font-size: 11px; cursor: pointer; }
+@container docker-management (max-width: 720px) {
+  .docker-compose-layout { grid-template-columns: 1fr; }
+  .docker-compose-content { min-height: 180px; }
+  .docker-compose-project-management-heading { align-items: stretch; flex-direction: column; }
+  .docker-compose-project-toolbar { width: 100%; }
+  .docker-compose-search { flex: 1 1 auto; width: auto; }
+}
+@container docker-management (max-width: 480px) {
+  .docker-compose-project-row { align-items: flex-start; }
+  .docker-compose-project-actions { margin-top: 2px; }
+  .docker-compose-project-meta { display: grid; gap: 4px; }
+  .docker-compose-primary { padding-inline: 8px; }
+}

@@ -10,6 +10,7 @@ pub struct ScanRequest {
     pub username: String,
     pub auth_method: String,
     pub password: Option<String>,
+    pub sudo_password: Option<String>,
     pub private_key_path: Option<String>,
     pub passphrase: Option<String>,
 }
@@ -86,10 +87,85 @@ pub struct DiscoveredService {
     pub status: String,
     pub detail: String,
     pub port: Option<u16>,
+    pub port_mappings: Option<Vec<String>>,
     pub web_path: Option<String>,
     pub web_scheme: Option<String>,
     pub version: Option<String>,
+    pub docker_root_dir: Option<String>,
+    pub docker_autostart: Option<String>,
+    pub docker_capabilities: Option<String>,
+    pub docker_events: Option<Vec<DockerEvent>>,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerEvent {
+    pub timestamp: String,
+    pub action: String,
+    pub name: String,
+    pub kind: String,
+}
+
+// Keep host-network probing separate from the main discovery script. Some
+// Dropbear builds reject large one-shot commands, while host-mode containers
+// require more evidence than Docker's empty `.Ports` field. This read-only
+// probe associates listening PIDs with each running container and only emits
+// ports that answer HTTP or HTTPS locally.
+const HOST_NETWORK_CONTAINER_PROBE: &str = r#"
+printf 'HOST_DOCKER\n'
+container_exec() {
+  if command -v docker >/dev/null 2>&1; then
+    docker "$@" 2>/dev/null && return 0
+    if command -v sudo >/dev/null 2>&1; then sudo -n docker "$@" 2>/dev/null && return 0; fi
+    if [ -n "$OPSNEST_SUDO_PASSWORD" ] && command -v sudo >/dev/null 2>&1; then printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' docker "$@" 2>/dev/null && return 0; fi
+  fi
+  return 1
+}
+socket_list() {
+  if [ "$(id -u)" = 0 ]; then
+    ss -lntpH 2>/dev/null || ss -lntp 2>/dev/null
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    sudo -n ss -lntpH 2>/dev/null || sudo -n ss -lntp 2>/dev/null
+  elif [ -n "$OPSNEST_SUDO_PASSWORD" ] && command -v sudo >/dev/null 2>&1; then
+    printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' ss -lntpH 2>/dev/null || printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' ss -lntp 2>/dev/null
+  else
+    ss -lntpH 2>/dev/null || ss -lntp 2>/dev/null
+  fi
+}
+if command -v docker >/dev/null 2>&1 && command -v ss >/dev/null 2>&1; then
+  for container_id in $(container_exec ps -q 2>/dev/null); do
+    network_mode=$(container_exec inspect "$container_id" --format '{{.HostConfig.NetworkMode}}' 2>/dev/null | head -n 1)
+    [ "$network_mode" = host ] || continue
+    container_name=$(container_exec inspect "$container_id" --format '{{.Name}}' 2>/dev/null | sed 's#^/##' | head -n 1)
+    [ -n "$container_name" ] || continue
+    candidate_ports=$(container_exec inspect "$container_id" --format '{{json .Config.ExposedPorts}}' 2>/dev/null | grep -Eo '"[0-9]+/tcp"' | tr -dc '0-9\n')
+    container_pids=$(container_exec top "$container_id" -eo pid 2>/dev/null | awk 'NR > 1 && $1 ~ /^[0-9]+$/ {print $1}')
+    [ -n "$container_pids" ] || container_pids=$(container_exec inspect "$container_id" --format '{{.State.Pid}}' 2>/dev/null)
+    for container_pid in $container_pids; do
+      process_ports=$(socket_list | awk -v needle="pid=$container_pid," 'index($0, needle) {port=$4; sub(/^.*:/, "", port); if (port ~ /^[0-9]+$/) print port}')
+      candidate_ports="$candidate_ports $process_ports"
+    done
+    for candidate_port in $(printf '%s\n' $candidate_ports | awk '/^[0-9]+$/ && !seen[$1]++' | sort -n | head -n 12); do
+      scheme=''
+      if command -v curl >/dev/null 2>&1; then
+        http_code=$(curl -sS -o /dev/null --max-time 1 -w '%{http_code}' "http://127.0.0.1:$candidate_port/" 2>/dev/null)
+        [ -n "$http_code" ] && [ "$http_code" != 000 ] && scheme=http
+        if [ -z "$scheme" ]; then
+          https_code=$(curl -k -sS -o /dev/null --max-time 1 -w '%{http_code}' "https://127.0.0.1:$candidate_port/" 2>/dev/null)
+          [ -n "$https_code" ] && [ "$https_code" != 000 ] && scheme=https
+        fi
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 1 -O /dev/null "http://127.0.0.1:$candidate_port/" 2>/dev/null && scheme=http
+        [ -z "$scheme" ] && wget --no-check-certificate -q -T 1 -O /dev/null "https://127.0.0.1:$candidate_port/" 2>/dev/null && scheme=https
+      fi
+      if [ -n "$scheme" ]; then
+        printf '%s\t%s\t%s\n' "$container_name" "$candidate_port" "$scheme"
+        break
+      fi
+    done
+  done
+fi
+"#;
 
 struct Handler {
     host: String,
@@ -444,6 +520,28 @@ pub async fn inspect_linux_server(request: ScanRequest) -> Result<ScanResult, St
     Ok(result)
 }
 
+fn docker_management_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
+    if parts.len() < 7 || parts[0] != "DOCKER_SERVICE" {
+        return None;
+    }
+    Some(DiscoveredService {
+        id: "docker".into(),
+        name: "Docker".into(),
+        kind: "Docker".into(),
+        status: parts[1].to_string(),
+        detail: "Docker 服务".into(),
+        port: None,
+        port_mappings: None,
+        web_path: None,
+        web_scheme: None,
+        version: (!parts[2].is_empty()).then(|| parts[2].to_string()),
+        docker_root_dir: (!parts[3].is_empty()).then(|| parts[3].to_string()),
+        docker_autostart: (!parts[4].is_empty()).then(|| parts[4].to_string()),
+        docker_capabilities: Some(parts[6].to_string()),
+        docker_events: None,
+    })
+}
+
 fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
     if parts.len() < 3 {
         return None;
@@ -474,6 +572,36 @@ fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
             })
             .map(|(host_port, _)| host_port)
     });
+    let port_mappings = parts
+        .get(3)
+        .filter(|ports| !ports.trim().is_empty())
+        .map(|ports| {
+            let mut mappings = Vec::new();
+            for value in ports
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let Some((host, container)) = value.split_once("->") else {
+                    // Container-only ports are not host ports that users can open.
+                    continue;
+                };
+                let Some(host_port) = host.rsplit(':').next().filter(|port| !port.is_empty())
+                else {
+                    continue;
+                };
+                let container_port = container.split('/').next().unwrap_or(container).trim();
+                if container_port.is_empty() {
+                    continue;
+                }
+                let mapping = format!("{host_port}:{container_port}");
+                if !mappings.contains(&mapping) {
+                    mappings.push(mapping);
+                }
+            }
+            mappings
+        })
+        .filter(|mappings| !mappings.is_empty());
     Some(DiscoveredService {
         id: format!("docker-{}", parts[0]),
         name: parts[0].to_string(),
@@ -481,6 +609,7 @@ fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
         status: parts[1].to_string(),
         detail: parts[2].to_string(),
         port,
+        port_mappings,
         web_path: None,
         web_scheme: port.map(|value| {
             if value == 443 || value == 8443 {
@@ -491,7 +620,30 @@ fn docker_service_from_parts(parts: &[&str]) -> Option<DiscoveredService> {
             .into()
         }),
         version: Some(parts[2].to_string()),
+        docker_root_dir: None,
+        docker_autostart: None,
+        docker_capabilities: None,
+        docker_events: None,
     })
+}
+
+fn apply_host_network_service_port(services: &mut [DiscoveredService], parts: &[&str]) {
+    if parts.len() < 3 {
+        return;
+    }
+    let id = format!("docker-{}", parts[0]);
+    let Ok(port) = parts[1].parse::<u16>() else {
+        return;
+    };
+    let Some(service) = services.iter_mut().find(|service| service.id == id) else {
+        return;
+    };
+    if service.port.is_some() {
+        return;
+    }
+    service.port = Some(port);
+    service.port_mappings = Some(vec![format!("{port}:{port}")]);
+    service.web_scheme = Some(parts[2].to_string());
 }
 
 fn shell_quote(value: &str) -> String {
@@ -538,6 +690,58 @@ container_exec() {
 }
 
 if command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
+  docker_status=stopped
+  container_exec info >/dev/null 2>&1 && docker_status=running
+  docker_version=$(container_exec version --format '{{.Server.Version}}' 2>/dev/null | head -n 1)
+  [ -z "$docker_version" ] && docker_version=$(container_exec --version 2>/dev/null | head -n 1)
+  docker_root=$(container_exec info --format '{{.DockerRootDir}}' 2>/dev/null | head -n 1)
+  [ -z "$docker_root" ] && docker_root=$(container_exec info --format '{{.Store.GraphRoot}}' 2>/dev/null | head -n 1)
+  docker_autostart='unknown'
+  if command -v systemctl >/dev/null 2>&1; then docker_autostart=$(systemctl is-enabled docker 2>/dev/null | head -n 1); fi
+  if [ -z "$docker_autostart" ] || [ "$docker_autostart" = unknown ]; then
+    if [ -x /etc/init.d/docker ] && /etc/init.d/docker enabled >/dev/null 2>&1; then docker_autostart=enabled; fi
+  fi
+  [ -z "$docker_autostart" ] && docker_autostart=unknown
+  docker_manager='unknown'
+  docker_can_privilege='no'
+  if [ "$(id -u)" = 0 ]; then
+    docker_can_privilege='yes'
+  elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    docker_can_privilege='yes'
+  elif [ -n "$OPSNEST_SUDO_PASSWORD" ] && command -v sudo >/dev/null 2>&1 && printf '%s\n' "$OPSNEST_SUDO_PASSWORD" | sudo -S -p '' true >/dev/null 2>&1; then
+    docker_can_privilege='yes'
+  fi
+  docker_can_control='no'
+  docker_can_autostart='no'
+  if command -v systemctl >/dev/null 2>&1 && systemctl cat docker.service >/dev/null 2>&1; then
+    docker_manager='systemd'
+    [ "$docker_can_privilege" = yes ] && docker_can_control='yes' && docker_can_autostart='yes'
+  elif [ -x /etc/init.d/docker ]; then
+    docker_manager='init.d'
+    [ "$docker_can_privilege" = yes ] && docker_can_control='yes' && docker_can_autostart='yes'
+  elif command -v rc-service >/dev/null 2>&1 && rc-service docker status >/dev/null 2>&1; then
+    docker_manager='openrc'
+    [ "$docker_can_privilege" = yes ] && docker_can_control='yes'
+    [ "$docker_can_privilege" = yes ] && command -v rc-update >/dev/null 2>&1 && docker_can_autostart='yes'
+  elif command -v service >/dev/null 2>&1 && service docker status >/dev/null 2>&1; then
+    docker_manager='service'
+    [ "$docker_can_privilege" = yes ] && docker_can_control='yes'
+  fi
+  docker_can_root='no'
+  if [ -n "$docker_root" ] && (command -v python3 >/dev/null 2>&1 || command -v jq >/dev/null 2>&1) && [ "$docker_can_privilege" = yes ] && { [ "$(id -u)" = 0 ] || [ -w /etc/docker ] || sudo -n test -w /etc/docker >/dev/null 2>&1 || [ -n "$OPSNEST_SUDO_PASSWORD" ]; }; then
+    docker_can_root='yes'
+  fi
+  docker_capabilities=''
+  [ "$docker_can_control" = yes ] && docker_capabilities='control'
+  [ "$docker_can_autostart" = yes ] && docker_capabilities="${docker_capabilities:+$docker_capabilities,}autostart"
+  [ "$docker_can_root" = yes ] && docker_capabilities="${docker_capabilities:+$docker_capabilities,}root"
+  printf 'DOCKER_SERVICE\t%s\t%s\t%s\t%s\t%s\t%s\n' "$docker_status" "$docker_version" "$docker_root" "$docker_autostart" "$docker_manager" "$docker_capabilities"
+  docker_events=$(container_exec events --since 1h --until now --format '{{.Time}}\t{{.Action}}\t{{.Actor.Attributes.name}}\t{{.Type}}' 2>/dev/null || true)
+  if [ -n "$docker_events" ]; then
+    printf '%s\n' "$docker_events" | while IFS="$(printf '\t')" read -r event_time event_action event_name event_type; do
+      [ -n "$event_action" ] && printf 'DOCKER_EVENT\t%s\t%s\t%s\t%s\n' "$event_time" "$event_action" "$event_name" "$event_type"
+    done
+  fi
   container_list=$(container_exec ps -a --format '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>/dev/null || true)
   if [ -n "$container_list" ]; then printf '%s\n' "$container_list"; fi
 fi
@@ -586,16 +790,24 @@ if grep -qiE 'fnos|fnnas|飞牛' /etc/os-release /etc/fnos_release /etc/fnos-ver
 fi"#
     }
     let sudo_password = request
-        .password
+        .sudo_password
         .as_deref()
+        .or(request.password.as_deref())
         .map(shell_quote)
         .unwrap_or_else(|| "''".to_string());
     let command = format!(
         "OPSNEST_SUDO_PASSWORD={sudo_password}\n{}",
         discover_command()
     );
-    let raw = execute(&session, &command).await?;
+    let mut raw = execute(&session, &command).await?;
+    let host_network_command =
+        format!("OPSNEST_SUDO_PASSWORD={sudo_password}\n{HOST_NETWORK_CONTAINER_PROBE}");
+    if let Ok(host_network_output) = execute(&session, &host_network_command).await {
+        raw.push('\n');
+        raw.push_str(&host_network_output);
+    }
     let mut services = Vec::new();
+    let mut docker_events = Vec::new();
     let mut section = "";
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
         if line == "PANEL" {
@@ -618,6 +830,10 @@ fi"#
             section = "fnos";
             continue;
         }
+        if line == "HOST_DOCKER" {
+            section = "host_docker";
+            continue;
+        }
         if line == "PORT" {
             section = "port";
             continue;
@@ -633,6 +849,7 @@ fi"#
                         status: parts[1].to_string(),
                         detail: "1Panel 管理面板".into(),
                         port: Some(port),
+                        port_mappings: None,
                         web_path: parts
                             .get(4)
                             .filter(|value| !value.is_empty())
@@ -643,13 +860,30 @@ fi"#
                             .map(|value| value.to_string())
                             .or_else(|| Some("http".into())),
                         version: None,
+                        docker_root_dir: None,
+                        docker_autostart: None,
+                        docker_capabilities: None,
+                        docker_events: None,
                     });
                 }
             }
+            "docker" if parts.len() >= 5 && parts[0] == "DOCKER_EVENT" => {
+                docker_events.push(DockerEvent {
+                    timestamp: parts[1].to_string(),
+                    action: parts[2].to_string(),
+                    name: parts[3].to_string(),
+                    kind: parts[4].to_string(),
+                });
+            }
             "docker" => {
-                if let Some(service) = docker_service_from_parts(&parts) {
+                if let Some(service) = docker_management_from_parts(&parts)
+                    .or_else(|| docker_service_from_parts(&parts))
+                {
                     services.push(service);
                 }
+            }
+            "host_docker" if parts.len() >= 3 => {
+                apply_host_network_service_port(&mut services, &parts);
             }
             "systemd" => {
                 let name = line.split_whitespace().next().unwrap_or(line).to_string();
@@ -664,6 +898,7 @@ fi"#
                         status: "running".into(),
                         detail: line.to_string(),
                         port: Some(port),
+                        port_mappings: None,
                         web_path: None,
                         web_scheme: Some(
                             if port == 443 || port == 8443 {
@@ -674,6 +909,10 @@ fi"#
                             .into(),
                         ),
                         version: None,
+                        docker_root_dir: None,
+                        docker_autostart: None,
+                        docker_capabilities: None,
+                        docker_events: None,
                     });
                 }
             }
@@ -686,9 +925,14 @@ fi"#
                     status: parts[2].to_string(),
                     detail: "OpenWrt 内置服务".into(),
                     port,
+                    port_mappings: None,
                     web_path: None,
                     web_scheme: port.map(|_| parts[4].to_string()),
                     version: Some(parts[5].to_string()),
+                    docker_root_dir: None,
+                    docker_autostart: None,
+                    docker_capabilities: None,
+                    docker_events: None,
                 });
             }
             "fnos" if parts.len() >= 6 => {
@@ -700,13 +944,23 @@ fi"#
                     status: parts[2].to_string(),
                     detail: "Feiniu fnOS NAS".into(),
                     port,
+                    port_mappings: None,
                     web_path: None,
                     web_scheme: Some(parts[4].to_string()),
                     version: None,
+                    docker_root_dir: None,
+                    docker_autostart: None,
+                    docker_capabilities: None,
+                    docker_events: None,
                 });
             }
             "port" => {}
             _ => {}
+        }
+    }
+    if !docker_events.is_empty() {
+        if let Some(service) = services.iter_mut().find(|service| service.id == "docker") {
+            service.docker_events = Some(docker_events);
         }
     }
     if !services
@@ -725,6 +979,7 @@ fi"#
                 status: "运行中".into(),
                 detail: "1Panel 管理面板".into(),
                 port: Some(port),
+                port_mappings: None,
                 web_path: None,
                 web_scheme: Some(
                     if port == 443 || port == 8443 {
@@ -735,6 +990,10 @@ fi"#
                     .into(),
                 ),
                 version: None,
+                docker_root_dir: None,
+                docker_autostart: None,
+                docker_capabilities: None,
+                docker_events: None,
             });
         }
     }
@@ -768,6 +1027,7 @@ fi"#,
                 status: "运行中".into(),
                 detail: "1Panel 管理面板".into(),
                 port: Some(port),
+                port_mappings: None,
                 web_path: None,
                 web_scheme: Some(
                     if port == 443 || port == 8443 {
@@ -778,6 +1038,10 @@ fi"#,
                     .into(),
                 ),
                 version: None,
+                docker_root_dir: None,
+                docker_autostart: None,
+                docker_capabilities: None,
+                docker_events: None,
             });
         }
     }
@@ -786,7 +1050,7 @@ fi"#,
 
 #[cfg(test)]
 mod tests {
-    use super::{docker_service_from_parts, OPENWRT_ROUTER_PROBE};
+    use super::{apply_host_network_service_port, docker_service_from_parts, OPENWRT_ROUTER_PROBE};
 
     #[test]
     fn openwrt_probe_uses_runtime_network_and_client_sources() {
@@ -830,5 +1094,35 @@ mod tests {
         ])
         .expect("container should be retained");
         assert_eq!(service.port, Some(3300));
+    }
+
+    #[test]
+    fn host_network_probe_applies_verified_web_port_generically() {
+        let service = docker_service_from_parts(&[
+            "media-server",
+            "Up 2 hours",
+            "example/media-server:latest",
+            "",
+        ])
+        .expect("container should be retained");
+        let mut services = vec![service];
+        apply_host_network_service_port(&mut services, &["media-server", "9090", "http"]);
+        assert_eq!(services[0].port, Some(9090));
+        assert_eq!(services[0].port_mappings, Some(vec!["9090:9090".into()]));
+        assert_eq!(services[0].web_scheme.as_deref(), Some("http"));
+    }
+
+    #[test]
+    fn host_network_probe_does_not_override_published_port() {
+        let service = docker_service_from_parts(&[
+            "dashboard",
+            "Up 2 hours",
+            "example/dashboard:latest",
+            "0.0.0.0:8080->80/tcp",
+        ])
+        .expect("container should be retained");
+        let mut services = vec![service];
+        apply_host_network_service_port(&mut services, &["dashboard", "9090", "http"]);
+        assert_eq!(services[0].port, Some(8080));
     }
 }

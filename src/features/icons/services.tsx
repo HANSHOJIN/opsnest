@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { DiscoveredService } from "../../domain/types";
-import { iconCandidates, normalizeIconKey, RemoteIcon } from "./catalog";
+import { containerIconAliases } from "../../services/iconCatalog";
+import { iconCandidates, normalizeIconKey, RemoteIcon, remoteIconUrl } from "./catalog";
 import dockerIcon from "../../../icons/packed/services/docker.svg?raw";
 import nginxIcon from "../../../icons/packed/services/nginx.svg?raw";
 import apacheIcon from "../../../icons/packed/services/apache.svg?raw";
@@ -9,9 +10,6 @@ import grafanaIcon from "../../../icons/packed/services/grafana.svg?raw";
 import portainerIcon from "../../../icons/packed/services/portainer.svg?raw";
 import onePanelIcon from "../../../icons/packed/services/1panel.svg?raw";
 import alistIcon from "../../../icons/packed/services/alist.svg?raw";
-import openListImage from "../../../icons/services/openlist.png";
-import homeBoxImage from "../../../icons/services/homebox.png";
-import luckyImage from "../../../icons/services/lucky.png";
 import mysqlIcon from "../../../icons/packed/services/mysql.svg?raw";
 import mariadbIcon from "../../../icons/packed/services/mariadb.svg?raw";
 import postgresqlIcon from "../../../icons/packed/services/postgresql.svg?raw";
@@ -45,9 +43,9 @@ const serviceIcons: Record<string, string> = {
 };
 
 const serviceImageIcons: Record<string, string> = {
-  openlist: openListImage,
-  homebox: homeBoxImage,
-  lucky: luckyImage,
+  openlist: remoteIconUrl("services", "openlist", "png"),
+  homebox: remoteIconUrl("services", "homebox", "png"),
+  lucky: remoteIconUrl("services", "lucky", "png"),
 };
 
 export function ServiceIcon({ service, serverId, large = false }: { service: ServiceIconTarget; serverId?: string; large?: boolean }) {
@@ -61,13 +59,22 @@ export function ServiceIcon({ service, serverId, large = false }: { service: Ser
   }, [service.port, service.webPath]);
 
   const id = service.id.toLowerCase();
+  const isContainer = service.category === "container" || id.startsWith("docker-");
   const iconKey = Object.keys({ ...serviceIcons, ...serviceImageIcons }).find((key) => id === key || id.includes(key));
   const imageIcon = iconKey ? serviceImageIcons[iconKey] : undefined;
-  const icon = iconKey && imageIcon
-    ? `<svg viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg"><image href="${imageIcon}" width="200" height="200" preserveAspectRatio="xMidYMid meet"/></svg>`
-    : iconKey ? serviceIcons[iconKey] : undefined;
-  const remoteKey = iconKey ?? normalizeIconKey(service.id || service.name);
-  const candidates = iconCandidates(remoteKey, service.version, remoteKey === "openlist" ? ["alist", "open-list"] : []);
+  // SVG fallbacks can be rendered immediately. Raster artwork is online-only
+  // and is fetched by RemoteIcon so a missing network asset can still fall
+  // back to the category glyph instead of leaving a broken nested image.
+  const icon = isContainer ? dockerIcon : iconKey && !imageIcon ? serviceIcons[iconKey] : undefined;
+  const remoteKey = isContainer
+    ? normalizeIconKey(service.name || id.replace(/^docker-/, ""))
+    : iconKey ?? normalizeIconKey(service.id || service.name);
+  const aliases = isContainer
+    ? containerIconAliases(service.name || remoteKey, service.version)
+    : remoteKey === "openlist"
+      ? ["alist", "open-list"]
+      : [];
+  const candidates = iconCandidates(remoteKey, service.version, aliases);
   const ownerId = serverId ?? activeServiceServerId;
   const canEdit = Boolean(ownerId && service.category !== "container" && id !== "docker");
   const save = () => {
@@ -78,7 +85,7 @@ export function ServiceIcon({ service, serverId, large = false }: { service: Ser
   };
 
   return <span className={`service-entry-icon service-icon-${service.category} ${large ? "service-entry-icon-large" : ""}`}>
-    <RemoteIcon directory="services" candidates={candidates} fallback={icon} preferFallback={Boolean(icon)} empty={service.category === "panel" ? "▣" : service.category === "database" ? "●" : "✦"} className="service-svg-icon" />
+    <RemoteIcon directory="services" candidates={candidates} fallback={icon} preferFallback={!isContainer && Boolean(icon)} empty={service.category === "panel" ? "▣" : service.category === "database" ? "●" : "✦"} className="service-svg-icon" />
     {canEdit && <>
       <button className="service-icon-edit" type="button" title="Edit entry" aria-label="Edit entry" onClick={(event) => { event.stopPropagation(); setEditing((value) => !value); }}>✎</button>
       {editing && <span className="service-edit-popover" onClick={(event) => event.stopPropagation()}>

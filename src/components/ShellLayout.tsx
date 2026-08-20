@@ -56,10 +56,11 @@ export type ShellLayoutProps = {
   bottomRouteKey?: string | null;
 };
 
-export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; webPath?: string; webScheme?: "http" | "https"; version?: string; customLabel?: string };
+export type DockerEventSummary = { timestamp: string; action: string; name: string; kind: string };
+export type DiscoveredServiceSummary = { id: string; name: string; kind: string; status: string; detail: string; port?: number; portOverride?: number; portMappings?: string[]; webPath?: string; webScheme?: "http" | "https"; version?: string; customLabel?: string; dockerRootDir?: string; dockerAutostart?: string; dockerCapabilities?: string; dockerEvents?: DockerEventSummary[] };
 export type ServerStorageVolume = { name?: string; kind?: string; profile?: string; devices?: string; mountPoint?: string; total?: string; used?: string; available?: string; percent?: string };
 export type NasInstalledApp = { id: string; name: string; version?: string; source?: string; status?: string; port?: number; iconData?: string };
-export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; privateKeyPath?: string; sudoConfigured?: boolean; pinned?: boolean; connected?: boolean; connectionError?: boolean; system?: string; kernel?: string; cpu?: string; cpuModel?: string; memory?: string; disk?: string; docker?: string; services?: DiscoveredServiceSummary[]; router?: { model?: string; firmware?: string; kernel?: string; wanIp?: string; lanIp?: string; lanClients?: string; wifiClients?: string }; nas?: { kind?: string; version?: string; managementPort?: string; storage?: ServerStorageVolume[]; apps?: NasInstalledApp[] } };
+export type ServerSummary = { id: string; name: string; host: string; port: number; authMethod?: "password" | "key"; password?: string; privateKeyPath?: string; sudoConfigured?: boolean; pinned?: boolean; connected?: boolean; connectionError?: boolean; system?: string; kernel?: string; cpu?: string; cpuModel?: string; memory?: string; disk?: string; docker?: string; note?: string; services?: DiscoveredServiceSummary[]; router?: { model?: string; firmware?: string; kernel?: string; wanIp?: string; lanIp?: string; lanClients?: string; wifiClients?: string }; nas?: { kind?: string; version?: string; managementPort?: string; storage?: ServerStorageVolume[]; apps?: NasInstalledApp[] } };
 
 export function ShellNavigation({ language = "zh-CN", selected, onSelect, servers: serverSummaries = [], onTogglePin, onRename, onToggleConnection, onDelete, onOpenSsh }: { language?: "zh-CN" | "en"; selected?: string | null; onSelect?: (id: string) => void; servers?: ServerSummary[]; onTogglePin?: (id: string) => void; onRename?: (id: string) => void; onToggleConnection?: (id: string) => void; onDelete?: (id: string) => void; onOpenSsh?: (id: string) => void }) {
   const isEnglish = language === "en";
@@ -269,6 +270,14 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   const [isMaximized, setIsMaximized] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<"appearance" | "model">("appearance");
+  const openSettings = () => {
+    setRightFullscreen(false);
+    setRightFullscreenBottomOpen(false);
+    setBottomFullscreen(false);
+    setBottomOpen(false);
+    setRightOpen(false);
+    setSettingsOpen(true);
+  };
   const rightWidthRef = useRef(RIGHT_DEFAULT);
   rightWidthRef.current = rightWidth;
   useEffect(() => {
@@ -292,7 +301,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
   useEffect(() => {
     if (!settingsRequest) return;
     setSettingsSection(settingsRequest);
-    setSettingsOpen(true);
+    openSettings();
   }, [settingsRequest]);
   useEffect(() => {
     if (bottom == null) {
@@ -331,6 +340,8 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     }
   }, [closeRightSignal]);
   useEffect(() => {
+    setRightFullscreen(false);
+    setRightFullscreenBottomOpen(false);
     setBottomFullscreen(false);
     setBottomOpen(false);
   }, [bottomRouteKey]);
@@ -341,6 +352,13 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     };
     document.addEventListener("click", openTerminal, true);
     const openSsh = () => {
+      // SSH is a workspace view of its own. Leave Docker/editor fullscreen
+      // before revealing the terminal so a context-menu SSH action can
+      // actually move focus instead of opening the terminal underneath the
+      // fullscreen panel.
+      setRightFullscreen(false);
+      setRightFullscreenBottomOpen(false);
+      setBottomFullscreen(false);
       setBottomOpen(true);
       window.setTimeout(() => window.dispatchEvent(new CustomEvent("opsnest-focus-ssh-terminal")), 0);
     };
@@ -365,9 +383,10 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
     void readPortableJson<Partial<LayoutState>>(LAYOUT_FILE, {}).then((saved) => {
       if (!active) return;
       setLeftOpen(saved.leftOpen ?? true);
-      setRightOpen(saved.rightOpen ?? false);
-      // Always start with the bottom panel collapsed. Its open state is a
-      // transient session choice and should not surprise the user on launch.
+      // Side and bottom panels are transient workspace views. Always start
+      // with the center workspace visible after a restart; explicit runtime
+      // open signals can still reveal either panel during the session.
+      setRightOpen(false);
       setBottomOpen(false);
       setLeftWidth(saved.leftWidth ?? LEFT_DEFAULT);
       setRightWidth(snapRightWidth(saved.rightWidth ?? RIGHT_DEFAULT));
@@ -600,7 +619,7 @@ function ShellLayout({ title = "OpsNest", appName = "OpsNest", language = "zh-CN
             <>
               <div className="panel-toolbar left-toolbar"><span className="app-title">{appName}</span></div>
               <div className="left-content">{left}</div>
-              <SidebarFooter onSettings={() => setSettingsOpen(true)} language={language} />
+              <SidebarFooter onSettings={openSettings} language={language} />
             </>
           )}
         </aside>
