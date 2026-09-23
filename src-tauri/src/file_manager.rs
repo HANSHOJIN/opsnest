@@ -1,12 +1,97 @@
 use crate::ssh_session::SessionRequest;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use russh_sftp::{client::SftpSession, protocol::OpenFlags};
 use serde::Serialize;
 use std::{
     fs,
+    io::SeekFrom,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tauri::{AppHandle, Emitter};
+use tokio::{
+    fs::{File as TokioFile, OpenOptions as TokioOpenOptions},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+};
+
+const TRANSFER_CHUNK_SIZE: usize = 128 * 1024;
+const RESUME_VERIFY_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FileTransferProgress {
+    direction: String,
+    transferred: u64,
+    total: u64,
+    bytes_per_second: u64,
+    resumed_from: u64,
+}
+
+fn emit_transfer_progress(
+    app: &AppHandle,
+    direction: &str,
+    transferred: u64,
+    total: u64,
+    resumed_from: u64,
+    started: Instant,
+) {
+    let elapsed = started.elapsed().as_secs_f64();
+    let bytes_this_run = transferred.saturating_sub(resumed_from);
+    let bytes_per_second = if elapsed > 0.0 {
+        (bytes_this_run as f64 / elapsed).round() as u64
+    } else {
+        0
+    };
+    let _ = app.emit(
+        "file-transfer-progress",
+        FileTransferProgress {
+            direction: direction.to_string(),
+            transferred,
+            total,
+            bytes_per_second,
+            resumed_from,
+        },
+    );
+}
+
+async fn resume_prefix_matches(
+    sftp: &SftpSession,
+    remote_path: &str,
+    local_path: &Path,
+    offset: u64,
+) -> Result<bool, String> {
+    if offset == 0 {
+        return Ok(false);
+    }
+    let verify_len = offset.min(RESUME_VERIFY_BYTES as u64) as usize;
+    let verify_start = offset - verify_len as u64;
+    let mut remote = sftp
+        .open(remote_path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut local = TokioFile::open(local_path)
+        .await
+        .map_err(|error| error.to_string())?;
+    remote
+        .seek(SeekFrom::Start(verify_start))
+        .await
+        .map_err(|error| error.to_string())?;
+    local
+        .seek(SeekFrom::Start(verify_start))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut remote_tail = vec![0_u8; verify_len];
+    let mut local_tail = vec![0_u8; verify_len];
+    remote
+        .read_exact(&mut remote_tail)
+        .await
+        .map_err(|error| error.to_string())?;
+    local
+        .read_exact(&mut local_tail)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(remote_tail == local_tail)
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,59 +436,241 @@ pub async fn delete_remote_file(
 
 #[tauri::command]
 pub async fn download_remote_file(
+    app: AppHandle,
     request: SessionRequest,
     remote_path: String,
     local_path: String,
 ) -> Result<u64, String> {
+    let remote_path = remote_path.trim().to_string();
+    let local_path = PathBuf::from(local_path);
     let sftp = crate::ssh_session::open_sftp_session(&request).await?;
-    let mut remote = match sftp.open(remote_path).await {
-        Ok(file) => file,
+    let metadata = match sftp.metadata(&remote_path).await {
+        Ok(metadata) => metadata,
         Err(error) => {
             let _ = sftp.close().await;
             return Err(error.to_string());
         }
     };
-    let mut data = Vec::new();
-    let read_result = remote
-        .read_to_end(&mut data)
-        .await
-        .map_err(|error| error.to_string());
-    drop(remote);
+    let total = metadata.len();
+    let result = async {
+        let local_len = tokio::fs::metadata(&local_path)
+            .await
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let resume_candidate = if local_len > 0 && local_len <= total {
+            local_len
+        } else {
+            0
+        };
+        let resume_from = if resume_candidate > 0
+            && resume_prefix_matches(&sftp, &remote_path, &local_path, resume_candidate).await?
+        {
+            resume_candidate
+        } else {
+            0
+        };
+        let started = Instant::now();
+        emit_transfer_progress(
+            &app,
+            "download",
+            resume_from,
+            total,
+            resume_from,
+            started,
+        );
+        if resume_from == total {
+            return Ok(0);
+        }
+
+        let mut remote = sftp
+            .open(&remote_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        if resume_from > 0 {
+            remote
+                .seek(SeekFrom::Start(resume_from))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        let mut options = TokioOpenOptions::new();
+        options.create(true).write(true);
+        if resume_from == 0 {
+            options.truncate(true);
+        }
+        let mut local = options
+            .open(&local_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        if resume_from > 0 {
+            local
+                .seek(SeekFrom::Start(resume_from))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
+        let mut transferred = resume_from;
+        let mut transferred_this_run = 0_u64;
+        let mut last_emit = Instant::now();
+        loop {
+            let read = remote
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            local
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|error| error.to_string())?;
+            transferred = transferred.saturating_add(read as u64);
+            transferred_this_run = transferred_this_run.saturating_add(read as u64);
+            if last_emit.elapsed() >= Duration::from_millis(120) || transferred >= total {
+                emit_transfer_progress(
+                    &app,
+                    "download",
+                    transferred,
+                    total,
+                    resume_from,
+                    started,
+                );
+                last_emit = Instant::now();
+            }
+        }
+        local.flush().await.map_err(|error| error.to_string())?;
+        emit_transfer_progress(
+            &app,
+            "download",
+            transferred,
+            total,
+            resume_from,
+            started,
+        );
+        Ok(transferred_this_run)
+    }
+    .await;
     let _ = sftp.close().await;
-    read_result?;
-    fs::write(Path::new(&local_path), &data).map_err(|error| error.to_string())?;
-    Ok(data.len() as u64)
+    result
 }
 
 #[tauri::command]
 pub async fn upload_remote_file(
+    app: AppHandle,
     request: SessionRequest,
     local_path: String,
     remote_path: String,
 ) -> Result<u64, String> {
-    let data = fs::read(Path::new(&local_path)).map_err(|error| error.to_string())?;
-    let sftp = crate::ssh_session::open_sftp_session(&request).await?;
-    let mut remote = match sftp.create(remote_path).await {
-        Ok(file) => file,
-        Err(error) => {
-            let _ = sftp.close().await;
-            return Err(error.to_string());
-        }
-    };
-    let write_result = remote
-        .write_all(&data)
+    let local_path = PathBuf::from(local_path);
+    let remote_path = remote_path.trim().to_string();
+    let total = tokio::fs::metadata(&local_path)
         .await
-        .map_err(|error| error.to_string());
-    let shutdown_result = if write_result.is_ok() {
-        remote.shutdown().await.map_err(|error| error.to_string())
-    } else {
-        Ok(())
-    };
-    drop(remote);
+        .map_err(|error| error.to_string())?
+        .len();
+    let sftp = crate::ssh_session::open_sftp_session(&request).await?;
+    let result = async {
+        let remote_len = sftp
+            .metadata(&remote_path)
+            .await
+            .ok()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let resume_candidate = if remote_len > 0 && remote_len <= total {
+            remote_len
+        } else {
+            0
+        };
+        let resume_from = if resume_candidate > 0
+            && resume_prefix_matches(&sftp, &remote_path, &local_path, resume_candidate).await?
+        {
+            resume_candidate
+        } else {
+            0
+        };
+        let started = Instant::now();
+        emit_transfer_progress(
+            &app,
+            "upload",
+            resume_from,
+            total,
+            resume_from,
+            started,
+        );
+        if resume_from == total {
+            return Ok(0);
+        }
+
+        let mut local = TokioFile::open(&local_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        if resume_from > 0 {
+            local
+                .seek(SeekFrom::Start(resume_from))
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        let mut remote = if resume_from > 0 {
+            let mut file = sftp
+                .open_with_flags(&remote_path, OpenFlags::WRITE)
+                .await
+                .map_err(|error| error.to_string())?;
+            file.seek(SeekFrom::Start(resume_from))
+                .await
+                .map_err(|error| error.to_string())?;
+            file
+        } else {
+            sftp.create(&remote_path)
+                .await
+                .map_err(|error| error.to_string())?
+        };
+
+        let mut buffer = vec![0_u8; TRANSFER_CHUNK_SIZE];
+        let mut transferred = resume_from;
+        let mut transferred_this_run = 0_u64;
+        let mut last_emit = Instant::now();
+        loop {
+            let read = local
+                .read(&mut buffer)
+                .await
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            remote
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|error| error.to_string())?;
+            transferred = transferred.saturating_add(read as u64);
+            transferred_this_run = transferred_this_run.saturating_add(read as u64);
+            if last_emit.elapsed() >= Duration::from_millis(120) || transferred >= total {
+                emit_transfer_progress(
+                    &app,
+                    "upload",
+                    transferred,
+                    total,
+                    resume_from,
+                    started,
+                );
+                last_emit = Instant::now();
+            }
+        }
+        remote.shutdown().await.map_err(|error| error.to_string())?;
+        emit_transfer_progress(
+            &app,
+            "upload",
+            transferred,
+            total,
+            resume_from,
+            started,
+        );
+        Ok(transferred_this_run)
+    }
+    .await;
     let _ = sftp.close().await;
-    write_result?;
-    shutdown_result?;
-    Ok(data.len() as u64)
+    result
 }
 
 /// Upload bounded bytes over a dedicated SFTP connection. This is used by the
