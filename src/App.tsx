@@ -30,6 +30,7 @@ import ShellLayout, {
   type ServerSummary,
 } from "./components/ShellLayout";
 import { ModelSettingsPanel } from "./components/ModelSettingsPanel";
+import { providerPresets } from "./features/settings/model-config";
 import {
   ensureWorkspace,
   deleteWorkspaceFile,
@@ -109,7 +110,8 @@ type AppearancePreferences = {
 };
 
 type ModelPreferences = {
-  provider: "custom" | "openai" | "deepseek" | "ollama";
+  provider: "custom" | "openai" | "deepseek" | "openrouter" | "ollama" | "opencode-go";
+  apiMode: "chat-completions" | "responses";
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -856,6 +858,7 @@ function SystemIconBadge({ system }: { system?: string }) {
 
 const APPEARANCE_FILE = "appearance.json";
 const MODEL_FILE = "model.json";
+const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
 const DEBUG_FILE = "debug.json";
 const SERVERS_FILE = "servers.json";
 const ACTIVITY_FILE = "activity.json";
@@ -1122,6 +1125,7 @@ const DEFAULT_APPEARANCE: AppearancePreferences = {
 };
 const DEFAULT_MODEL: ModelPreferences = {
   provider: "custom",
+  apiMode: "chat-completions",
   baseUrl: "",
   apiKey: "",
   model: "",
@@ -2522,6 +2526,9 @@ function LegacyServerManagerPage({
           baseUrl: activeModel.baseUrl,
           apiKey: activeModel.apiKey,
           model: activeModel.model,
+          provider: activeModel.provider,
+          apiMode: activeModel.apiMode,
+          sessionId: `server-manager:${server?.id ?? "default"}`,
           system: `你是 OpsNest 服务器总管。当前服务器：${server.name}，地址：${server.host}:${server.port}。只回答服务器管理、诊断和操作建议，不要声称已经执行命令。`,
           prompt,
         },
@@ -2764,6 +2771,9 @@ function ToolServerManagerPage({
             baseUrl: activeModel.baseUrl,
             apiKey: activeModel.apiKey,
             model: activeModel.model,
+            provider: activeModel.provider,
+            apiMode: activeModel.apiMode,
+            sessionId: `server-manager:${server?.id ?? "default"}`,
             messages: apiMessages,
             tools: allTools,
             toolChoice: "auto",
@@ -3335,6 +3345,9 @@ function ServerManagerPage({
             baseUrl: activeModel.baseUrl,
             apiKey: activeModel.apiKey,
             model: activeModel.model,
+            provider: activeModel.provider,
+            apiMode: activeModel.apiMode,
+            sessionId: `server-manager:${server?.id ?? "default"}`,
             messages: apiMessages,
             tools: allTools,
             toolChoice: "auto",
@@ -4950,6 +4963,9 @@ function LinuxServerHomeContent({
           baseUrl: model.baseUrl,
           apiKey: model.apiKey,
           model: model.model,
+          provider: model.provider,
+          apiMode: model.apiMode,
+          sessionId: `server-home:${server.id}`,
           system: `你是 OpsNest 的服务器总管。当前服务器：${server.name}，地址：${server.host}:${server.port}，系统：${value(server.system)}，CPU：${value(server.cpu)}，内存：${value(server.memory)}，磁盘：${value(server.disk)}，Docker：${value(server.docker)}。只给出诊断、解释和建议，不要声称已经执行任何命令。`,
           prompt,
         },
@@ -6000,6 +6016,8 @@ function ModelSettings({
         baseUrl: value.baseUrl,
         apiKey: value.apiKey,
         model: value.model,
+        provider: value.provider,
+        apiMode: value.provider === "openai" ? value.apiMode : undefined,
       });
       try {
         const result = JSON.parse(raw) as {
@@ -6291,6 +6309,8 @@ function ServerTerminalPanel({
           baseUrl: model.baseUrl,
           apiKey: model.apiKey,
           model: model.model,
+          provider: model.provider,
+          apiMode: model.apiMode,
           sessionId,
           serverId: server.id,
           prompt: approved
@@ -7840,6 +7860,8 @@ function InteractiveTerminalPanel({
             baseUrl: currentModel.baseUrl,
             apiKey: currentModel.apiKey,
             model: currentModel.model,
+            provider: currentModel.provider,
+            apiMode: currentModel.apiMode,
             sessionId: sessionRef.current,
             serverId: server.id,
             prompt,
@@ -8055,6 +8077,8 @@ function InteractiveTerminalPanel({
             baseUrl: currentModel.baseUrl,
             apiKey: currentModel.apiKey,
             model: currentModel.model,
+            provider: currentModel.provider,
+            apiMode: currentModel.apiMode,
             sessionId: sessionRef.current,
             serverId: server.id,
             prompt: `用户已确认执行命令：${command}。请根据真实终端输出继续回复，不要重复执行该命令。`,
@@ -9861,15 +9885,25 @@ function App() {
     void readPortableJson<Partial<ModelPreferences>>(MODEL_FILE, {}).then(
       (saved) => {
         if (!active) return;
+        const provider: ModelPreferences["provider"] =
+          saved.provider === "openai" ||
+          saved.provider === "deepseek" ||
+          saved.provider === "openrouter" ||
+          saved.provider === "ollama" ||
+          saved.provider === "opencode-go"
+            ? saved.provider
+            : "custom";
+        const preset = provider === "opencode-go" ? undefined : providerPresets[provider];
         setModel({
           ...DEFAULT_MODEL,
           ...saved,
-          provider:
-            saved.provider === "openai" ||
-            saved.provider === "deepseek" ||
-            saved.provider === "ollama"
-              ? saved.provider
-              : "custom",
+          provider,
+          apiMode: saved.apiMode === "responses" ? "responses" : "chat-completions",
+          baseUrl:
+            provider === "opencode-go"
+              ? OPENCODE_GO_BASE_URL
+              : saved.baseUrl?.trim() || preset?.baseUrl || DEFAULT_MODEL.baseUrl,
+          model: saved.model?.trim() || preset?.model || DEFAULT_MODEL.model,
         });
         setModelLoaded(true);
       },

@@ -13,5 +13,5 @@ export const providerPresets: Record<AiProvider, { label: string; baseUrl: strin
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-chat", keyRequired: true },
   openrouter: { label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini", keyRequired: true },
   ollama: { label: "Ollama", baseUrl: "http://127.0.0.1:11434/v1", model: "qwen2.5:7b", keyRequired: false },
-  custom: { label: "Custom endpoint", baseUrl: "", model: "", keyRequired: true },
+  custom: { label: "Custom endpoint", baseUrl: "", model: "", keyRequired: false },
 };

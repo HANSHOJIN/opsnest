@@ -1,5 +1,5 @@
 use crate::{agent_workflow::AgentTurn, file_manager, ssh_scan, ssh_session, tools::ToolKind};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -100,6 +100,12 @@ pub struct AiChatRequest {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api_mode: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub system: String,
     pub prompt: String,
     pub messages: Option<Vec<Value>>,
@@ -111,6 +117,12 @@ pub struct AiToolChatRequest {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api_mode: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub messages: Vec<Value>,
     pub tools: Vec<Value>,
     pub tool_choice: Option<Value>,
@@ -122,6 +134,10 @@ pub struct AiSshRequest {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub api_mode: Option<String>,
     pub session_id: String,
     /// Stable OpsNest server id used when an AI tool needs to request a UI
     /// action for the same server. It is never used as an SSH credential.
@@ -488,9 +504,307 @@ async fn execute_read_only_tool(
     }
 }
 
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum OpenCodeGoProtocol {
+    ChatCompletions,
+    Responses,
+    Messages,
+}
+
+impl OpenCodeGoProtocol {
+    fn endpoint(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat/completions",
+            Self::Responses => "responses",
+            Self::Messages => "messages",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenCodeGoModel {
+    id: String,
+    protocol: Option<OpenCodeGoProtocol>,
+}
+
+const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+
+fn opencode_go_protocol(model: &str) -> Option<OpenCodeGoProtocol> {
+    let model = model.trim();
+    // Keep this allowlist aligned with OpenCode's per-model endpoint matrix:
+    // https://opencode.ai/docs/go/
+    const CHAT_COMPLETIONS_MODELS: &[&str] = &[
+        "glm-5.3-flash",
+        "glm-5.3",
+        "glm-5.2",
+        "glm-5.1",
+        "kimi-k3",
+        "kimi-k2.7-code",
+        "kimi-k2.6",
+        "longcat-2.0",
+        "deepseek-v4.1-flash",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-v4-flash-vision-exp",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+        "mimo-v2.5",
+        "mimo-v2.5-pro",
+        "hy4-preview",
+        "hy3",
+    ];
+    const RESPONSES_MODELS: &[&str] = &[
+        "grok-4.7",
+        "grok-4.6",
+        "gpt-5.6-luna",
+        "muse-spark-1.3-contributor",
+        "muse-spark-1.2-contributor",
+    ];
+    const MESSAGES_MODELS: &[&str] = &[
+        "minimax-m3",
+        "minimax-m2.7",
+        "minimax-m2.5",
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-plus",
+    ];
+    if CHAT_COMPLETIONS_MODELS.contains(&model) {
+        Some(OpenCodeGoProtocol::ChatCompletions)
+    } else if RESPONSES_MODELS.contains(&model) {
+        Some(OpenCodeGoProtocol::Responses)
+    } else if MESSAGES_MODELS.contains(&model) {
+        Some(OpenCodeGoProtocol::Messages)
+    } else {
+        None
+    }
+}
+
+fn opencode_go_session_header(session_id: Option<&str>) -> String {
+    let value = session_id.unwrap_or("opsnest-session").trim();
+    let clean = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':')
+        })
+        .take(128)
+        .collect::<String>();
+    if clean.is_empty() {
+        "opsnest-session".to_string()
+    } else {
+        clean
+    }
+}
+
+fn responses_tool(tool: &Value) -> Option<Value> {
+    let function = tool.get("function").unwrap_or(tool);
+    Some(serde_json::json!({
+        "type": "function",
+        "name": function.get("name")?.as_str()?,
+        "description": function.get("description").cloned().unwrap_or(Value::String(String::new())),
+        "parameters": function.get("parameters").cloned().unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}})),
+        "strict": function.get("strict").cloned().unwrap_or(Value::Bool(false)),
+    }))
+}
+
+fn responses_input(messages: &[Value]) -> Vec<Value> {
+    let mut input = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        if role == "tool" {
+            input.push(serde_json::json!({
+                "type": "function_call_output",
+                "call_id": message.get("tool_call_id").cloned().unwrap_or(Value::Null),
+                "output": message.get("content").cloned().unwrap_or(Value::String(String::new())),
+            }));
+            continue;
+        }
+        let response_role = if role == "system" { "developer" } else { role };
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+        if !content.is_null() && content.as_str().map_or(true, |text| !text.is_empty()) {
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": response_role,
+                "content": content,
+            }));
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let function = call.get("function").cloned().unwrap_or(Value::Null);
+                input.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": call.get("id").cloned().unwrap_or(Value::Null),
+                    "name": function.get("name").cloned().unwrap_or(Value::Null),
+                    "arguments": function.get("arguments").cloned().unwrap_or(Value::String("{}".to_string())),
+                }));
+            }
+        }
+    }
+    input
+}
+
+pub(crate) fn responses_request_body(model: &str, body: &Value) -> Value {
+    let messages = body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut response = serde_json::json!({
+        "model": model,
+        "input": responses_input(&messages),
+        "store": false,
+    });
+    if let Some(max_tokens) = body.get("max_tokens") {
+        response["max_output_tokens"] = max_tokens.clone();
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        response["tools"] = Value::Array(tools.iter().filter_map(responses_tool).collect());
+    }
+    if let Some(choice) = body.get("tool_choice") {
+        response["tool_choice"] = choice.clone();
+    }
+    response
+}
+
+pub(crate) fn normalize_responses_response(payload: &Value) -> Value {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    if let Some(output) = payload.get("output").and_then(Value::as_array) {
+        for item in output {
+            match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "message" => {
+                    if let Some(contents) = item.get("content").and_then(Value::as_array) {
+                        for content in contents {
+                            if matches!(content.get("type").and_then(Value::as_str), Some("output_text" | "text")) {
+                                if let Some(value) = content.get("text").and_then(Value::as_str) {
+                                    if !text.is_empty() { text.push('\n'); }
+                                    text.push_str(value);
+                                }
+                            }
+                        }
+                    }
+                }
+                "function_call" => tool_calls.push(serde_json::json!({
+                    "id": item.get("call_id").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name").cloned().unwrap_or(Value::Null),
+                        "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".to_string())),
+                    }
+                })),
+                _ => {}
+            }
+        }
+    }
+    if text.is_empty() {
+        text = payload
+            .get("output_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+    }
+    serde_json::json!({"choices":[{"message":{"role":"assistant","content":text,"tool_calls":tool_calls}}]})
+}
+
+fn messages_tool(tool: &Value) -> Option<Value> {
+    let function = tool.get("function").unwrap_or(tool);
+    Some(serde_json::json!({
+        "name": function.get("name")?.as_str()?,
+        "description": function.get("description").cloned().unwrap_or(Value::String(String::new())),
+        "input_schema": function.get("parameters").cloned().unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}})),
+    }))
+}
+
+fn messages_request_body(model: &str, body: &Value) -> Value {
+    let messages = body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut system = Vec::new();
+    let mut converted = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let content = message.get("content").cloned().unwrap_or(Value::Null);
+        if role == "system" || role == "developer" {
+            if let Some(text) = content.as_str().filter(|text| !text.is_empty()) { system.push(text.to_string()); }
+            continue;
+        }
+        if role == "tool" {
+            converted.push(serde_json::json!({"role":"user","content":[{
+                "type":"tool_result",
+                "tool_use_id":message.get("tool_call_id").cloned().unwrap_or(Value::Null),
+                "content":content,
+            }]}));
+            continue;
+        }
+        let mut blocks = Vec::new();
+        if let Some(text) = content.as_str().filter(|text| !text.is_empty()) {
+            blocks.push(serde_json::json!({"type":"text","text":text}));
+        } else if content.is_array() {
+            blocks.extend(content.as_array().cloned().unwrap_or_default());
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let function = call.get("function").cloned().unwrap_or(Value::Null);
+                let arguments = function.get("arguments").and_then(Value::as_str)
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                blocks.push(serde_json::json!({
+                    "type":"tool_use",
+                    "id":call.get("id").cloned().unwrap_or(Value::Null),
+                    "name":function.get("name").cloned().unwrap_or(Value::Null),
+                    "input":arguments,
+                }));
+            }
+        }
+        converted.push(serde_json::json!({"role":if role == "assistant" {"assistant"} else {"user"},"content":blocks}));
+    }
+    let max_tokens = body.get("max_tokens").cloned().unwrap_or(Value::from(4096));
+    let mut request = serde_json::json!({"model":model,"messages":converted,"max_tokens":max_tokens});
+    if !system.is_empty() { request["system"] = Value::String(system.join("\n\n")); }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        request["tools"] = Value::Array(tools.iter().filter_map(messages_tool).collect());
+    }
+    if let Some(choice) = body.get("tool_choice") {
+        let value = choice.as_str().unwrap_or_default();
+        match value {
+            "auto" => request["tool_choice"] = serde_json::json!({"type":"auto"}),
+            "required" => request["tool_choice"] = serde_json::json!({"type":"any"}),
+            "none" => { request.as_object_mut().map(|object| object.remove("tools")); }
+            _ => {}
+        }
+    }
+    request
+}
+
+fn normalize_messages_response(payload: &Value) -> Value {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    if let Some(contents) = payload.get("content").and_then(Value::as_array) {
+        for item in contents {
+            match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+                "text" => if let Some(value) = item.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() { text.push('\n'); }
+                    text.push_str(value);
+                },
+                "tool_use" => tool_calls.push(serde_json::json!({
+                    "id":item.get("id").cloned().unwrap_or(Value::Null),
+                    "type":"function",
+                    "function":{
+                        "name":item.get("name").cloned().unwrap_or(Value::Null),
+                        "arguments":item.get("input").map(Value::to_string).unwrap_or_else(|| "{}".to_string()),
+                    }
+                })),
+                _ => {}
+            }
+        }
+    }
+    serde_json::json!({"choices":[{"message":{"role":"assistant","content":text,"tool_calls":tool_calls}}]})
+}
+
 async fn post_chat(
+    provider: &str,
+    api_mode: Option<&str>,
+    session_id: Option<&str>,
     base_url: &str,
     api_key: &str,
+    model: &str,
     body: Value,
     timeout: Duration,
     mut cancel: Option<&mut oneshot::Receiver<()>>,
@@ -499,13 +813,48 @@ async fn post_chat(
         .timeout(timeout)
         .build()
         .map_err(|error| error.to_string())?;
-    let mut call = client
-        .post(format!(
-            "{}/chat/completions",
-            base_url.trim().trim_end_matches('/')
-        ))
-        .json(&body);
-    if !api_key.trim().is_empty() {
+    let is_opencode_go = provider == "opencode-go";
+    let protocol = if is_opencode_go {
+        opencode_go_protocol(model)
+            .ok_or_else(|| format!("OpenCode Go has no verified API route for model `{model}`. Refresh the model list or select a supported model."))?
+    } else if provider == "openai" && api_mode == Some("responses") {
+        OpenCodeGoProtocol::Responses
+    } else {
+        OpenCodeGoProtocol::ChatCompletions
+    };
+    let (url, request_body) = if is_opencode_go || matches!(protocol, OpenCodeGoProtocol::Responses) {
+        let url = if is_opencode_go {
+            format!("{OPENCODE_GO_BASE_URL}/{}", protocol.endpoint())
+        } else {
+            format!("{}/{}", base_url.trim().trim_end_matches('/'), protocol.endpoint())
+        };
+        let body = match protocol {
+            OpenCodeGoProtocol::ChatCompletions => {
+                let mut body = body;
+                if let Some(object) = body.as_object_mut() {
+                    object.remove("temperature");
+                }
+                body
+            }
+            OpenCodeGoProtocol::Responses => responses_request_body(model, &body),
+            OpenCodeGoProtocol::Messages => messages_request_body(model, &body),
+        };
+        (url, body)
+    } else {
+        (format!("{}/chat/completions", base_url.trim().trim_end_matches('/')), body)
+    };
+    let mut call = client.post(url).json(&request_body);
+    if is_opencode_go {
+        call = call
+            .bearer_auth(api_key.trim())
+            .header(reqwest::header::USER_AGENT, format!("OpsNest/{}", env!("CARGO_PKG_VERSION")))
+            .header("x-opencode-session", opencode_go_session_header(session_id));
+        if matches!(protocol, OpenCodeGoProtocol::Messages) {
+            call = call
+                .header("x-api-key", api_key.trim())
+                .header("anthropic-version", "2023-06-01");
+        }
+    } else if !api_key.trim().is_empty() {
         call = call.bearer_auth(api_key.trim());
     }
     let response = if let Some(cancel) = cancel.as_deref_mut() {
@@ -532,7 +881,105 @@ async fn post_chat(
             raw.chars().take(600).collect::<String>()
         ));
     }
-    Ok(raw)
+    if is_opencode_go || matches!(protocol, OpenCodeGoProtocol::Responses) {
+        let payload: Value = serde_json::from_str(&raw)
+            .map_err(|error| format!("Invalid OpenCode Go response: {error}"))?;
+        let normalized = match protocol {
+            OpenCodeGoProtocol::ChatCompletions => payload,
+            OpenCodeGoProtocol::Responses => normalize_responses_response(&payload),
+            OpenCodeGoProtocol::Messages => normalize_messages_response(&payload),
+        };
+        serde_json::to_string(&normalized).map_err(|error| error.to_string())
+    } else {
+        Ok(raw)
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_opencode_go_models(api_key: String) -> Result<Vec<OpenCodeGoModel>, String> {
+    if api_key.trim().is_empty() {
+        return Err("OpenCode Go API Key is required".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("unable to create HTTP client: {error}"))?;
+    let response = client
+        .get(format!("{OPENCODE_GO_BASE_URL}/models"))
+        .bearer_auth(api_key.trim())
+        .header(reqwest::header::USER_AGENT, format!("OpsNest/{}", env!("CARGO_PKG_VERSION")))
+        .header("x-opencode-session", "opsnest-model-catalog")
+        .send()
+        .await
+        .map_err(|error| format!("OpenCode Go model list request failed: {error}"))?;
+    let status = response.status();
+    let raw = response.text().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("OpenCode Go returned {}: {}", status.as_u16(), raw.chars().take(400).collect::<String>()));
+    }
+    let payload: Value = serde_json::from_str(&raw).map_err(|error| format!("invalid OpenCode Go model list: {error}"))?;
+    let items = payload.get("data").and_then(Value::as_array).ok_or_else(|| "OpenCode Go response did not contain a model list".to_string())?;
+    let mut models = items.iter().filter_map(|item| {
+        let id = item.get("id")?.as_str()?.trim();
+        (!id.is_empty()).then(|| OpenCodeGoModel { id: id.to_string(), protocol: opencode_go_protocol(id) })
+    }).collect::<Vec<_>>();
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    if models.is_empty() { return Err("OpenCode Go returned no models".to_string()); }
+    Ok(models)
+}
+
+pub async fn test_opencode_go_connection(api_key: &str, model: &str) -> Result<String, String> {
+    if api_key.trim().is_empty() {
+        return Err("OpenCode Go API Key is required".to_string());
+    }
+    if opencode_go_protocol(model).is_none() {
+        return Err(format!("OpenCode Go has no verified API route for model `{model}`."));
+    }
+    // Match live agent requests. Some thinking models reject `required`.
+    let raw = post_chat(
+        "opencode-go",
+        None,
+        Some("opsnest-model-test"),
+        OPENCODE_GO_BASE_URL,
+        api_key,
+        model,
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role":"user","content":"Call the provided opsnest_connection_test tool with ok=true. Do not answer with prose."}],
+            "max_tokens": 64,
+            "tools": [{
+                "type":"function",
+                "function": {
+                    "name":"opsnest_connection_test",
+                    "description":"Return the supplied boolean unchanged. This is a no-op compatibility test; do not perform external actions.",
+                    "parameters": {
+                        "type":"object",
+                        "properties":{"ok":{"type":"boolean"}},
+                        "required":["ok"],
+                        "additionalProperties":false
+                    }
+                }
+            }],
+            "tool_choice":"auto",
+        }),
+        Duration::from_secs(30),
+        None,
+    )
+    .await?;
+    let payload: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("OpenCode Go response was invalid: {error}"))?;
+    let message = payload.get("choices").and_then(|choices| choices.get(0)).and_then(|choice| choice.get("message"));
+    if message.is_none() {
+        return Err("OpenCode Go response did not contain a completion".to_string());
+    }
+    if message.and_then(|item| item.get("tool_calls")).and_then(Value::as_array).map_or(true, Vec::is_empty) {
+        return Err("Connection succeeded, but the selected model did not return the required tool-call format.".to_string());
+    }
+    Ok(serde_json::json!({
+        "message": "Connection successful · tool-call verified · OpenCode Go",
+        "contextLength": Value::Null,
+    }).to_string())
 }
 
 #[tauri::command]
@@ -550,7 +997,17 @@ pub async fn chat_completion(request: AiChatRequest) -> Result<String, String> {
         serde_json::json!({ "role": "system", "content": request.system }),
     );
     messages.push(serde_json::json!({ "role": "user", "content": request.prompt }));
-    let raw = post_chat(&request.base_url, &request.api_key, serde_json::json!({ "model": request.model.trim(), "temperature": 0.2, "messages": messages }), Duration::from_secs(90), None).await?;
+    let raw = post_chat(
+        &request.provider,
+        request.api_mode.as_deref(),
+        request.session_id.as_deref(),
+        &request.base_url,
+        &request.api_key,
+        &request.model,
+        serde_json::json!({ "model": request.model.trim(), "temperature": 0.2, "messages": messages }),
+        Duration::from_secs(90),
+        None,
+    ).await?;
     let payload: Value =
         serde_json::from_str(&raw).map_err(|error| format!("Invalid AI response: {error}"))?;
     payload
@@ -591,8 +1048,12 @@ pub async fn chat_completion_with_tools(request: AiToolChatRequest) -> Result<St
         body["tool_choice"] = choice;
     }
     let raw = post_chat(
+        &request.provider,
+        request.api_mode.as_deref(),
+        request.session_id.as_deref(),
         &request.base_url,
         &request.api_key,
+        &request.model,
         body,
         Duration::from_secs(120),
         None,
@@ -647,6 +1108,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
     let system = format!("你是 OpsNest AI-SSH，负责当前服务器的真实终端协作。\n当前上下文：{context}\n当前会话同时绑定了一个 OpsNest 本地 workspace（工作区）。它位于用户电脑上，与远程服务器文件系统分离；需要保存、备份、编辑、读取或暂存本地文件时，使用 workspace_list_files、workspace_read_file、workspace_write_file、workspace_delete_file 或 download_to_workspace。用户说“保存到 workspace/工作区/本地”时，必须使用这些本地工具，不要通过 run_command 在远程创建同名工作目录；但用户明确指定远程路径，或任务确实需要在远程服务器准备工作目录时，仍可使用远程工具。\n解释意图时简洁自然；只有用户明确要求执行、检查或修改时才调用 run_command。普通聊天、感谢、确认和追问都交给模型自然回答，不使用固定关键词分流。用户明确要求打开 OpsNest 文件管理器或查看刚才修改的远程文件时，调用对应的 opsnest_open_file_manager 或 opsnest_open_file_editor；这些工具只改变 OpsNest 界面，不读取或修改远程文件。没有工具结果时不得声称命令已经执行。命令执行后必须根据真实工具输出继续判断。回答长度规则：默认先给结论，控制在 3-6 行或不超过 5 个要点；成功执行后只报告结果、异常和必要的下一步，不复述原始终端输出，不写背景教程、长篇风险清单或多个备选方案。只有用户明确要求详细解释、教程或完整排障步骤时才展开。");
+    let system = format!("{system}\n每轮最多请求一个工具；如果需要多个工具，等待上一个结果返回后再逐个请求。");
     let system = format!("{system}\n需要把本地 workspace 中生成的脚本交给远程服务器执行时，先使用 upload_workspace_file 上传，再使用 run_command 调用远程路径；workspace_write_file 只写本机，不会自动出现在服务器上。不要在没有对应工具结果时声称上传或执行成功。若工具返回超时，不要原样重复同一条命令；应缩小扫描范围、使用 -l/--include 或 Docker CLI 查询，避免递归读取大型日志目录。\n共享终端黑板（最近事件）：\n{board_context}\n");
     // The PTY output is already visible in the xterm surface. Keep replies
     // focused on interpretation and next steps instead of copying a full
@@ -746,7 +1208,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         } else {
             "auto"
         };
-        let raw = match post_chat(&request.base_url, &request.api_key, serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tool_schemas,"tool_choice":tool_choice}), Duration::from_secs(60), Some(&mut cancel_receiver)).await {
+        let raw = match post_chat(
+            &request.provider,
+            request.api_mode.as_deref(),
+            Some(&request.session_id),
+            &request.base_url,
+            &request.api_key,
+            &request.model,
+            serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tool_schemas,"tool_choice":tool_choice}),
+            Duration::from_secs(60),
+            Some(&mut cancel_receiver),
+        ).await {
             Ok(raw) => raw,
             Err(error) if error == "AI-SSH request cancelled" => {
                 workflow.cancel();
@@ -843,12 +1315,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 );
                 workflow.tool_completed();
                 record_agent_phase(&request.session_id, &workflow);
-                messages.push(message);
+                messages.push(message.clone());
                 messages.push(serde_json::json!({
                     "role":"tool",
                     "tool_call_id":tool_call_id,
                     "content":output
                 }));
+                messages.extend(deferred_tool_results(&message));
                 approved_for_this_turn = false;
                 continue;
             }
@@ -898,12 +1371,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 }));
                 workflow.tool_completed();
                 record_agent_phase(&request.session_id, &workflow);
-                messages.push(message);
+                messages.push(message.clone());
                 messages.push(serde_json::json!({
                     "role":"tool",
                     "tool_call_id":tool_call_id,
                     "content":executed.last().and_then(|item| item.get("output")).and_then(Value::as_str).unwrap_or_default()
                 }));
+                messages.extend(deferred_tool_results(&message));
                 approved_for_this_turn = false;
                 continue;
             }
@@ -1049,12 +1523,13 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 .and_then(Value::as_str)
                 .unwrap_or("opsnest-call")
                 .to_string();
-            messages.push(message);
+            messages.push(message.clone());
             let tool_content = verification
                 .as_ref()
                 .map(|value| format!("{output}\n\n[verification]\n{value}"))
                 .unwrap_or(output);
             messages.push(serde_json::json!({"role":"tool","tool_call_id":tool_call_id,"content":tool_content}));
+            messages.extend(deferred_tool_results(&message));
             approved_for_this_turn = false;
             continue;
         }
@@ -1088,6 +1563,27 @@ fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
         "agent_phase",
         turn.event_payload().to_string(),
     );
+}
+
+fn deferred_tool_results(message: &Value) -> Vec<Value> {
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .skip(1)
+        .filter_map(|call| {
+            let call_id = call.get("id").and_then(Value::as_str)?.trim();
+            if call_id.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": "This tool call was not executed in this pass. OpsNest processes one server operation at a time; request this action again after reviewing the previous tool result."
+            }))
+        })
+        .collect()
 }
 
 fn is_interactive_agent_command(command: &str) -> bool {

@@ -339,6 +339,8 @@ async fn test_model_connection(
     base_url: String,
     api_key: String,
     model: String,
+    provider: Option<String>,
+    api_mode: Option<String>,
 ) -> Result<String, String> {
     let _ = append_debug_log(
         "info".to_string(),
@@ -347,23 +349,54 @@ async fn test_model_connection(
     );
     let base_url = base_url.trim().trim_end_matches('/');
     let model = model.trim();
+    if provider.as_deref() == Some("opencode-go") {
+        let result = ai::test_opencode_go_connection(&api_key, model).await?;
+        let _ = append_debug_log(
+            "info".to_string(),
+            "OpenCode Go model connection test succeeded".to_string(),
+            Some(format!("model={model}")),
+        );
+        return Ok(result);
+    }
     if base_url.is_empty() || model.is_empty() {
         return Err("API address and model name are required".to_string());
     }
+    let use_responses = provider.as_deref() == Some("openai")
+        && api_mode.as_deref() == Some("responses");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| format!("unable to create HTTP client: {error}"))?;
     let context_length = discover_model_context_length(&client, base_url, &api_key, model).await;
-    let mut request =
-        client
-            .post(format!("{base_url}/chat/completions"))
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [{ "role": "user", "content": "Reply with OK." }],
-                "max_tokens": 8,
-                "temperature": 0
-            }));
+    // Mirror the live agent's `auto` choice; some reasoning models reject `required`.
+    let test_body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": "Call the provided no-op test tool with ok=true. Do not answer with prose." }],
+        "max_tokens": 64,
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "opsnest_connection_test",
+                "description": "A no-op compatibility check. Return ok=true; do not perform external actions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "ok": { "type": "boolean" } },
+                    "required": ["ok"],
+                    "additionalProperties": false
+                }
+            }
+        }],
+        "tool_choice": "auto"
+    });
+    let (test_url, test_body) = if use_responses {
+        (
+            format!("{base_url}/responses"),
+            ai::responses_request_body(&model, &test_body),
+        )
+    } else {
+        (format!("{base_url}/chat/completions"), test_body)
+    };
+    let mut request = client.post(test_url).json(&test_body);
     if !api_key.trim().is_empty() {
         request = request.bearer_auth(api_key.trim());
     }
@@ -385,12 +418,24 @@ async fn test_model_connection(
     }
     let payload: Value =
         serde_json::from_str(&body).map_err(|error| format!("invalid API response: {error}"))?;
-    if payload
+    let payload = if use_responses {
+        ai::normalize_responses_response(&payload)
+    } else {
+        payload
+    };
+    let message = payload
         .get("choices")
         .and_then(|choices| choices.get(0))
-        .is_none()
+        .and_then(|choice| choice.get("message"));
+    if message.is_none() {
+        return Err("API response did not contain a completion".to_string());
+    }
+    if message
+        .and_then(|item| item.get("tool_calls"))
+        .and_then(Value::as_array)
+        .map_or(true, Vec::is_empty)
     {
-        return Err("API response did not contain choices".to_string());
+        return Err("Connection succeeded, but the selected model did not return the required tool-call format.".to_string());
     }
     let _ = append_debug_log(
         "info".to_string(),
@@ -398,7 +443,7 @@ async fn test_model_connection(
         Some(format!("model={}", model)),
     );
     Ok(serde_json::json!({
-        "message": "Connection successful",
+        "message": "Connection successful · tool-call verified",
         "contextLength": context_length,
     })
     .to_string())
@@ -568,6 +613,7 @@ pub fn run() {
             write_opsnest_config,
             test_model_connection,
             fetch_model_names,
+            ai::fetch_opencode_go_models,
             ssh_scan::inspect_linux_server,
             ssh_scan::discover_linux_services,
             ssh_session::open_ssh_session,
