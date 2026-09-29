@@ -648,7 +648,7 @@ pub fn record_session_event(
     let Some(event) = append_blackboard(&shell, kind, text) else {
         return Ok(());
     };
-    if matches!(kind, "agent_phase" | "ai_tool_result" | "ai_recovery") {
+    if kind == "agent_phase" {
         let _ = shell.app.emit(
             "ssh-agent-activity",
             SessionActivityEvent {

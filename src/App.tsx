@@ -8579,8 +8579,6 @@ function InteractiveTerminalPanel({
         };
         const next = statusByPhase[phase];
         if (next) updateWorkStatus(next[0], next[1], next[2]);
-      } else if (event.payload.kind === "ai_recovery") {
-        updateWorkStatus("thinking", "正在恢复 AI 请求…", true);
       }
     }).then((dispose) => {
       if (disposed) dispose();
