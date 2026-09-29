@@ -3,4 +3,4 @@ export const AI_STORAGE_KEY = "opsnest.ai-model";
 export const AI_CONNECTION_STATUS_KEY = "opsnest.ai-connection-status";
 export const LANGUAGE_STORAGE_KEY = "opsnest.language";
 
-export const APP_VERSION = "0.2.0-beta.2";
+export const APP_VERSION = "0.2.0-beta.3";

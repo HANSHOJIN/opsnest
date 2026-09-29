@@ -900,6 +900,17 @@ let aiSshMemoryWriteQueue: Promise<void> = Promise.resolve();
 function sanitizeSensitiveText(value: string) {
   return value
     .replace(
+      /(-----BEGIN [^-]+PRIVATE KEY-----)[\s\S]*?(-----END [^-]+PRIVATE KEY-----)/gi,
+      "$1[redacted]$2",
+    )
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|x-api-key|x-opencode-session)\s*["']?\s*[:=]\s*["']?)([^\s,"';}]+)/gi,
+      "$1[redacted]",
+    )
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s,"';}]+/gi, "$1[redacted]")
+    .replace(/(\b(?:API_KEY|OPENAI_API_KEY|OPENCODE_API_KEY|ACCESS_TOKEN|AUTH_TOKEN|PASSWORD|PASSWD)\s*=\s*)[^\s]+/gi, "$1[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .replace(
       /(密码|口令|password|passwd)\s*(是|为|:|：)?\s*[^\s，。；;、]+/gi,
       "$1已由前端安全输入",
     )
@@ -914,9 +925,13 @@ function appendActivity(record: Omit<ActivityRecord, "id" | "timestamp">) {
       ACTIVITY_FILE,
       [],
     );
-    const items = Array.isArray(existing) ? existing : [];
+    const items = (Array.isArray(existing) ? existing : []).map((item) => ({
+      ...item,
+      detail: sanitizeSensitiveText(item.detail),
+    }));
     items.unshift({
       ...record,
+      detail: sanitizeSensitiveText(record.detail),
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       timestamp: new Date().toISOString(),
     });
@@ -6845,6 +6860,8 @@ const SHELL_COMMANDS = new Set([
   "tmux",
   "screen",
   "hermes",
+  "openclaw",
+  "opencode",
   "reboot",
   "shutdown",
 ]);
@@ -6887,13 +6904,13 @@ function collectAiSshMemory(
   const result: PersistedAiSshTurn[] = [];
   for (const item of items) {
     if (item.role === "user_question") {
-      result.push({ role: "user", content: item.content });
+      result.push({ role: "user", content: sanitizeSensitiveText(item.content) });
     } else if (item.role === "ai_reply") {
-      result.push({ role: "assistant", content: item.content });
+      result.push({ role: "assistant", content: sanitizeSensitiveText(item.content) });
     } else if (item.role === "tool_result") {
       result.push({
         role: "assistant",
-        content: `[历史工具结果]\n${item.content}`,
+        content: `[历史工具结果]\n${sanitizeSensitiveText(item.content)}`,
       });
     }
   }

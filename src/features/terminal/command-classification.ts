@@ -1,5 +1,5 @@
 const shellCommandNames = new Set([
-  "1pctl", "alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hermes", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami",
+  "1pctl", "alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hermes", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "openclaw", "opencode", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami",
 ]);
 
 export function isLikelyShellCommand(input: string) {
@@ -30,7 +30,7 @@ export function isInteractiveShellCommand(input: string) {
   // absolute paths too. Routing it through the line-oriented transcript
   // renderer turns its layout into broken scrollback (the vertical 3/4/5...
   // artefact users see when the command is launched directly).
-  if (firstBase === "hermes") return true;
+  if (["hermes", "openclaw", "opencode"].includes(firstBase)) return true;
   if (/\b(?:vim|vi|nvim|nano|emacs|top|htop|btop|less|more|man|watch|fzf|dialog|whiptail|mysql|mariadb|psql|python|python3|ipython|node|bash|zsh|fish|sftp|ftp)\b/.test(normalized)) return true;
   const words = normalized.split(/\s+/);
   if (words[0] !== "sudo" && words[0] !== "doas") return false;
@@ -62,5 +62,5 @@ export function isInteractiveShellCommand(input: string) {
   }
   if (interactiveOption) return true;
   const commandBase = command.split("/").at(-1) ?? command;
-  return new Set(["su", "bash", "sh", "zsh", "fish", "tmux", "screen", "hermes"]).has(commandBase);
+  return new Set(["su", "bash", "sh", "zsh", "fish", "tmux", "screen", "hermes", "openclaw", "opencode"]).has(commandBase);
 }

@@ -25,13 +25,22 @@ export class TerminalDispatcher {
       this.context.onBusy?.();
       return;
     }
-    const forcedAi = trimmed.startsWith("/ai ");
-    const command = trimmed.startsWith("/cmd ") ? trimmed.slice(5).trim() : trimmed;
+    const forcedAi = trimmed === "/ai" || trimmed.startsWith("/ai ");
+    const forcedCommand = trimmed === "/cmd" || trimmed.startsWith("/cmd ");
+    const command = forcedCommand ? trimmed.slice(4).trim() : trimmed;
+    if (forcedCommand) {
+      if (command) {
+        this.context.onCommand(command);
+        this.context.writeCommand(command);
+      }
+      return;
+    }
     if (!forcedAi && (this.context.looksLikeCommand(trimmed) || (this.context.probeCommand && await this.context.probeCommand(trimmed)))) {
       this.context.onCommand(command);
       this.context.writeCommand(command);
       return;
     }
-    this.context.askAi(forcedAi ? trimmed.slice(4).trim() : trimmed);
+    const prompt = forcedAi ? trimmed.slice(3).trim() : trimmed;
+    if (prompt) this.context.askAi(prompt);
   }
 }
