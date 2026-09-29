@@ -7161,6 +7161,15 @@ function InteractiveTerminalPanel({
     startedAt: number;
     cancellable: boolean;
   };
+  type AgentActivity = {
+    id: number;
+    step: number;
+    phase: string;
+    label: string;
+    toolCalls: number;
+    completedTools: number;
+    timestamp: number;
+  };
   const hostRef = React.useRef<HTMLDivElement>(null);
   const termRef = React.useRef<Terminal | null>(null);
   const modelRef = React.useRef(model);
@@ -7197,6 +7206,8 @@ function InteractiveTerminalPanel({
     ((approved: boolean) => void) | null
   >(null);
   const [workStatus, setWorkStatus] = React.useState<WorkStatus | null>(null);
+  const [agentActivities, setAgentActivities] = React.useState<AgentActivity[]>([]);
+  const agentActivityIdRef = React.useRef(0);
   const workStatusRef = React.useRef<WorkStatus | null>(null);
   const cancelRequestedRef = React.useRef(false);
   const [statusNow, setStatusNow] = React.useState(() => Date.now());
@@ -7898,6 +7909,7 @@ function InteractiveTerminalPanel({
       }
       terminalOperationInFlight = true;
       cancelRequestedRef.current = false;
+      setAgentActivities([]);
       updateWorkStatus("thinking", "AI 正在分析…");
       const currentModel = modelRef.current;
       void writeDebugLog("debug", "AI-SSH input received", {
@@ -8562,8 +8574,15 @@ function InteractiveTerminalPanel({
       if (event.payload.sessionId !== sessionRef.current) return;
       if (event.payload.kind === "agent_phase") {
         let phase = "";
+        let step = 0;
+        let toolCalls = 0;
+        let completedTools = 0;
         try {
-          phase = JSON.parse(event.payload.text)?.phase ?? "";
+          const payload = JSON.parse(event.payload.text);
+          phase = payload?.phase ?? "";
+          step = Number(payload?.step) || 0;
+          toolCalls = Number(payload?.toolCalls) || 0;
+          completedTools = Number(payload?.completedTools) || 0;
         } catch {
           return;
         }
@@ -8578,7 +8597,21 @@ function InteractiveTerminalPanel({
           failed: ["error", "AI 请求失败", false],
         };
         const next = statusByPhase[phase];
-        if (next) updateWorkStatus(next[0], next[1], next[2]);
+        if (next) {
+          updateWorkStatus(next[0], next[1], next[2]);
+          setAgentActivities((items) => [
+            ...items.slice(-19),
+            {
+              id: ++agentActivityIdRef.current,
+              step,
+              phase,
+              label: next[1],
+              toolCalls,
+              completedTools,
+              timestamp: Date.now(),
+            },
+          ]);
+        }
       }
     }).then((dispose) => {
       if (disposed) dispose();
@@ -9091,6 +9124,25 @@ function InteractiveTerminalPanel({
           {workStatus.cancellable && (
             <button type="button" onClick={stopWork}>停止</button>
           )}
+        </div>
+      )}
+      {agentActivities.length > 0 && (
+        <div className="interactive-terminal-activity" role="log" aria-label="AI 活动">
+          <div className="interactive-terminal-activity-title">AI 活动</div>
+          {agentActivities.slice(-6).map((activity) => (
+            <div className="interactive-terminal-activity-item" key={activity.id}>
+              <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
+              <span className="interactive-terminal-activity-step">
+                Step {activity.step || "—"}
+              </span>
+              <span className="interactive-terminal-activity-label">{activity.label}</span>
+              {activity.toolCalls > 0 && (
+                <span className="interactive-terminal-activity-tools">
+                  {activity.completedTools}/{activity.toolCalls}
+                </span>
+              )}
+            </div>
+          ))}
         </div>
       )}
       <div ref={hostRef} className="interactive-terminal-host" />

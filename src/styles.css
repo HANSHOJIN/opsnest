@@ -859,6 +859,16 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .interactive-terminal-status-elapsed { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .interactive-terminal-status button { border: 1px solid color-mix(in srgb,#e06470 55%,var(--line)); border-radius: 999px; padding: 3px 8px; background: rgba(120,42,52,.18); color: #f0a0a8; font: inherit; cursor: pointer; }
 .interactive-terminal-status button:hover { background: rgba(120,42,52,.34); color: #fff; }
+.interactive-terminal-activity { position: absolute; top: 45px; right: 14px; z-index: 7; width: min(360px, calc(100% - 28px)); padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(20,20,23,.92); color: var(--muted); box-shadow: 0 6px 20px rgba(0,0,0,.28); font-size: 11px; pointer-events: none; }
+.interactive-terminal-activity-title { margin-bottom: 5px; color: var(--text-strong); font-weight: 600; }
+.interactive-terminal-activity-item { display: flex; align-items: center; gap: 6px; min-height: 19px; white-space: nowrap; overflow: hidden; }
+.interactive-terminal-activity-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #39b9e9; }
+.interactive-terminal-activity-dot.is-completed { background: #58cc87; }
+.interactive-terminal-activity-dot.is-failed { background: #e06470; }
+.interactive-terminal-activity-dot.is-cancelled { background: #a9a9ae; }
+.interactive-terminal-activity-step { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.interactive-terminal-activity-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--chrome-text); }
+.interactive-terminal-activity-tools { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .interactive-terminal-host { flex: 1; min-height: 0; box-sizing: border-box; padding: 0; overflow: hidden; }
 /*
  * FitAddon measures the host height and subtracts padding from the xterm
