@@ -7767,6 +7767,11 @@ function InteractiveTerminalPanel({
         sessionId: sessionRef.current,
         data,
       }).catch((reason) => setError(String(reason)));
+    const writeRawPtyInput = (data: string) =>
+      invoke("write_interactive_ssh_terminal_input", {
+        sessionId: sessionRef.current,
+        data,
+      }).catch((reason) => setError(String(reason)));
     let keyBackspaceHandled = false;
     const eraseInputCharacter = () => {
       const characters = Array.from(inputRef.current);
@@ -8816,7 +8821,10 @@ function InteractiveTerminalPanel({
         // Do not interpret line endings, backspace or paste while an
         // interactive program owns the PTY. xterm/PTY must receive the exact
         // byte stream so readline, Hermes and full-screen apps can handle it.
-        void write(data);
+        // Raw PTY input must bypass the AI command execution guard. The
+        // program owning the terminal may be waiting for this exact byte
+        // stream while the command runner is still collecting its output.
+        void writeRawPtyInput(data);
         if (rawMenuInputRef.current) {
           // The PTY is intentionally allocated with ECHO disabled for the
           // AI line editor. A menu program's `read` still accepts the choice,

@@ -559,6 +559,24 @@ pub async fn write_interactive_ssh_terminal(
     write_interactive_ssh_terminal_data(session_id, data, true, true).await
 }
 
+/// Write bytes from a program that currently owns the interactive PTY.
+///
+/// The AI command runner may still hold the execution guard while that
+/// program is waiting for a menu choice or another line of input. Raw PTY
+/// input must reach the program immediately; queueing it behind the runner
+/// turns a visible prompt into a swallowed keystroke and can later replay the
+/// input at the outer shell.
+#[tauri::command]
+pub async fn write_interactive_ssh_terminal_input(
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    if data.is_empty() || data.len() > 256 * 1024 {
+        return Err("SSH terminal input is invalid".to_string());
+    }
+    write_interactive_ssh_terminal_data(session_id, data, false, true).await
+}
+
 /// Write a response to a prompt owned by the command currently running in the
 /// interactive PTY. This intentionally bypasses the command execution guard:
 /// waiting for that guard would queue `y`/`n` until the command times out, at
