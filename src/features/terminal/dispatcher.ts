@@ -6,7 +6,6 @@ export type TerminalDispatchContext = {
   isBusy?: () => boolean;
   onBusy?: () => void;
   looksLikeCommand: (value: string) => boolean;
-  probeCommand?: (value: string) => Promise<boolean>;
   onCommand: (command: string) => void;
 };
 
@@ -35,7 +34,7 @@ export class TerminalDispatcher {
       }
       return;
     }
-    if (!forcedAi && (this.context.looksLikeCommand(trimmed) || (this.context.probeCommand && await this.context.probeCommand(trimmed)))) {
+    if (!forcedAi && this.context.looksLikeCommand(trimmed)) {
       this.context.onCommand(command);
       this.context.writeCommand(command);
       return;

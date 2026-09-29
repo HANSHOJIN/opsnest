@@ -6973,7 +6973,6 @@ const terminalBuffers = new Map<string, string>();
 const terminalPrompts = new Map<string, string>();
 const terminalRawModes = new Map<string, boolean>();
 const terminalRawAutoReturnModes = new Map<string, boolean>();
-const remoteCommandCache = new Map<string, boolean>();
 const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
   return `opsnest-terminal-buffer:${sessionId}`;
@@ -8702,40 +8701,6 @@ function InteractiveTerminalPanel({
       onBusy: () =>
         render("\r\n\x1b[38;5;220mAI is still handling the previous request. Please wait.\x1b[0m\r\n"),
       looksLikeCommand: looksLikeShellCommand,
-      probeCommand: async (line) => {
-        // Avoid probing ordinary one-line conversation. Multi-word input with
-        // an executable-looking first token is the common shape of a newly
-        // installed CLI (for example `hermes chat`).
-        const first = line.trim().split(/\s+/, 1)[0] ?? "";
-        if (!line.includes(" ") || !/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(first))
-          return false;
-        const cacheKey = `${server.id}:${first.toLowerCase()}`;
-        const cached = remoteCommandCache.get(cacheKey);
-        if (cached !== undefined) return cached;
-        let probeSession: string | undefined;
-        try {
-          const opened = await invoke<{ sessionId: string }>(
-            "open_ssh_session",
-            { request },
-          );
-          probeSession = opened.sessionId;
-          const output = await invoke<string>("execute_ssh_command", {
-            sessionId: probeSession,
-            command: `command -v ${shellQuote(first)}`,
-            approved: true,
-          });
-          const found = Boolean(output.trim());
-          // Cache only positive discoveries. A negative result may simply be
-          // the install-before-PATH-refresh race this probe is meant to fix.
-          if (found) remoteCommandCache.set(cacheKey, true);
-          return found;
-        } catch {
-          return false;
-        } finally {
-          if (probeSession)
-            void invoke("close_ssh_session", { sessionId: probeSession });
-        }
-      },
       onCommand: (command) => {
         sessionContextRef.current.push({
           role: "user_command",
