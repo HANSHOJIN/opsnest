@@ -6947,6 +6947,7 @@ function isRiskyShellCommand(input: string) {
 const terminalBuffers = new Map<string, string>();
 const terminalPrompts = new Map<string, string>();
 const terminalRawModes = new Map<string, boolean>();
+const terminalRawAutoReturnModes = new Map<string, boolean>();
 const remoteCommandCache = new Map<string, boolean>();
 const intentionallyClosedSessions = new Set<string>();
 function terminalBufferStorageKey(sessionId: string) {
@@ -6986,6 +6987,53 @@ function rememberTerminalRawMode(sessionId: string, active: boolean) {
   } catch {
     /* storage is best effort */
   }
+}
+function terminalRawAutoReturnStorageKey(sessionId: string) {
+  return `opsnest-terminal-raw-auto-return:${sessionId}`;
+}
+function readTerminalRawAutoReturn(sessionId: string) {
+  const cached = terminalRawAutoReturnModes.get(sessionId);
+  if (cached !== undefined) return cached;
+  try {
+    const stored = window.sessionStorage.getItem(terminalRawAutoReturnStorageKey(sessionId));
+    const value = stored === "1";
+    if (stored !== null) terminalRawAutoReturnModes.set(sessionId, value);
+    return value;
+  } catch {
+    return false;
+  }
+}
+function rememberTerminalRawAutoReturn(sessionId: string, active: boolean) {
+  terminalRawAutoReturnModes.set(sessionId, active);
+  try {
+    window.sessionStorage.setItem(terminalRawAutoReturnStorageKey(sessionId), active ? "1" : "0");
+  } catch {
+    /* storage is best effort */
+  }
+}
+function shouldReturnToAiAfterInteractiveCommand(command: string) {
+  const words = command.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const first = words[0]?.split("/").at(-1) ?? "";
+  const persistentShells = ["bash", "sh", "zsh", "fish", "su", "tmux", "screen"];
+  if (persistentShells.includes(first)) return false;
+  if (
+    ["sudo", "doas"].includes(first) &&
+    (words.some((word) => ["-i", "--login", "-s", "--shell"].includes(word)) ||
+      words.some((word) => persistentShells.includes(word.split("/").at(-1) ?? word)))
+  ) return false;
+  if (["exec", "command", "env"].includes(first) &&
+    words.slice(1).some((word) => persistentShells.includes(word.split("/").at(-1) ?? word)))
+    return false;
+  return true;
+}
+function endsWithRemoteShellPrompt(data: string) {
+  const plain = data
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+  const tail = plain.split("\n").at(-1)?.trim() ?? "";
+  return /^(?:(?:[\w.-]+@[\w.-]+|[\w.-]+:)[^\r\n]{0,160}|\[[\w.-]+@[\w.-]+[^\r\n]{0,160}\])[#$]\s*$/.test(tail);
 }
 function readTerminalOutput(sessionId: string) {
   const cached = terminalBuffers.get(sessionId);
@@ -7048,10 +7096,12 @@ function clearTerminalOutput(sessionId: string) {
   terminalBuffers.delete(sessionId);
   terminalPrompts.delete(sessionId);
   terminalRawModes.delete(sessionId);
+  terminalRawAutoReturnModes.delete(sessionId);
   try {
     window.sessionStorage.removeItem(terminalBufferStorageKey(sessionId));
     window.sessionStorage.removeItem(terminalPromptStorageKey(sessionId));
     window.sessionStorage.removeItem(terminalRawModeStorageKey(sessionId));
+    window.sessionStorage.removeItem(terminalRawAutoReturnStorageKey(sessionId));
   } catch {
     /* storage is best effort */
   }
@@ -7095,9 +7145,11 @@ function InteractiveTerminalPanel({
   }, [model]);
   const inputRef = React.useRef("");
   // Once an interactive CLI (for example `hermes chat`) owns the PTY, keep
-  // bytes and ANSI control sequences on the native xterm path until Ctrl+C.
+  // bytes and ANSI control sequences on the native xterm path until it exits.
   const rawPtyModeRef = React.useRef(false);
   const rawPtyExitRequestedRef = React.useRef(false);
+  const rawPtyAutoExitOnShellPromptRef = React.useRef(readTerminalRawAutoReturn(server.id));
+  const rawPtyShellOutputTailRef = React.useRef("");
   // Some shell menu scripts use `read` while the AI terminal keeps PTY echo
   // disabled. Their numeric choice reaches the server but is invisible, so
   // echo only the short menu response locally while that prompt is active.
@@ -7647,16 +7699,30 @@ function InteractiveTerminalPanel({
     const previousLooksLikeRawPty =
       /\x1b\[\?(?:47|1047|1049)[hl]/.test(previous) ||
       /\x1b\[\??(?:\d{1,4}(?:;\d{1,4})*)?[ABCDEFGHfJK]/.test(previous);
-    const previousRawPtyMode =
+    let previousRawPtyMode =
       Boolean(previous) && (readTerminalRawMode(server.id) || previousLooksLikeRawPty);
+    if (
+      previousRawPtyMode &&
+      rawPtyAutoExitOnShellPromptRef.current &&
+      endsWithRemoteShellPrompt(previous)
+    ) {
+      // A dev remount can happen after the interactive program exits but
+      // before the output listener switches the editor back to AI mode.
+      previousRawPtyMode = false;
+      rawPtyAutoExitOnShellPromptRef.current = false;
+      rememberTerminalRawAutoReturn(server.id, false);
+      rememberTerminalRawMode(server.id, false);
+    }
     rawPtyModeRef.current = previousRawPtyMode;
-    if (previousLooksLikeRawPty && !readTerminalRawMode(server.id))
+    rawPtyExitRequestedRef.current = false;
+    rawPtyShellOutputTailRef.current = previousRawPtyMode ? previous.slice(-4096) : "";
+    if (previousRawPtyMode && previousLooksLikeRawPty && !readTerminalRawMode(server.id))
       rememberTerminalRawMode(server.id, true);
     // Raw PTY programs emit cursor-addressed bytes. Replaying those bytes
     // through TranscriptRuntime would reproduce the old broken scrollback on
     // every tab switch or dev remount, so restore them through xterm directly.
     if (previous) {
-      if (previousRawPtyMode) term.write(previous);
+      if (previousLooksLikeRawPty || previousRawPtyMode) term.write(previous);
       else render(previous, false);
     }
     const at = server.host.indexOf("@");
@@ -8462,6 +8528,10 @@ function InteractiveTerminalPanel({
         if (event.payload.sessionId !== sessionRef.current) return;
         if (event.payload.closed) {
           sshClosed = true;
+          rawPtyModeRef.current = false;
+          rawPtyExitRequestedRef.current = false;
+          rawPtyAutoExitOnShellPromptRef.current = false;
+          rawPtyShellOutputTailRef.current = "";
           resetAiOrchestration();
           clearTerminalOutput(server.id);
           promptRef.current = "";
@@ -8488,19 +8558,28 @@ function InteractiveTerminalPanel({
             });
           }
           renderRawPty(rawData);
-          // Ctrl+C may produce several redraw/control chunks before the
-          // shell prompt returns. Keep raw PTY rendering active until that
-          // prompt is actually observed; switching modes immediately
-          // reinterprets the remaining redraw bytes as extra newlines.
+          rawPtyShellOutputTailRef.current =
+            `${rawPtyShellOutputTailRef.current}${rawData}`.slice(-4096);
+          // Interactive applications can exit by themselves (or crash) and
+          // return to the host shell without Ctrl+C. Detect that prompt across
+          // split PTY chunks, then restore the AI editor so the next message
+          // is not accidentally executed by Bash.
+          const shellPromptReturned = endsWithRemoteShellPrompt(rawPtyShellOutputTailRef.current);
           if (
-            rawPtyExitRequestedRef.current &&
-            /(?:^|\r?\n)[^\r\n]{1,160}(?:#|\$)\s*$/.test(
-              rawData.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, ""),
-            )
+            shellPromptReturned &&
+            (rawPtyExitRequestedRef.current || rawPtyAutoExitOnShellPromptRef.current)
           ) {
+            const exitReason = rawPtyExitRequestedRef.current ? "ctrl-c" : "shell-prompt";
             rawPtyExitRequestedRef.current = false;
             rawPtyModeRef.current = false;
+            rawPtyAutoExitOnShellPromptRef.current = false;
+            rawPtyShellOutputTailRef.current = "";
             rememberTerminalRawMode(server.id, false);
+            rememberTerminalRawAutoReturn(server.id, false);
+            void writeDebugLog("info", "AI-SSH raw PTY returned to AI input mode", {
+              serverId: server.id,
+              reason: exitReason,
+            });
           }
         }
         else {
@@ -8560,14 +8639,21 @@ function InteractiveTerminalPanel({
     const dispatcher = new TerminalDispatcher({
       writeCommand: (command) => {
         const interactive = classifyInteractiveShellCommand(command);
+        const returnToAiOnShellPrompt =
+          interactive && shouldReturnToAiAfterInteractiveCommand(command);
         void writeDebugLog("debug", "AI-SSH command dispatch", {
           serverId: server.id,
           commandHead: command.trim().split(/\s+/, 1)[0] ?? "",
           interactive,
+          returnToAiOnShellPrompt,
         });
         if (interactive) {
           rawPtyModeRef.current = true;
+          rawPtyExitRequestedRef.current = false;
+          rawPtyAutoExitOnShellPromptRef.current = returnToAiOnShellPrompt;
+          rawPtyShellOutputTailRef.current = "";
           rememberTerminalRawMode(server.id, true);
+          rememberTerminalRawAutoReturn(server.id, rawPtyAutoExitOnShellPromptRef.current);
           inputRef.current = "";
         }
         void write(`${command}\r`);
