@@ -1,7 +1,7 @@
 use crate::{agent_workflow::AgentTurn, file_manager, ssh_scan, ssh_session, tools::ToolKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -1186,7 +1186,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             "output": output,
             "terminalMarker": terminal_marker
         }));
-        workflow.tool_completed();
+        let result_summary = safe_result_summary(&output, if output.contains("__OPSNEST_COMMAND_ERROR__") {
+            "命令执行失败"
+        } else {
+            "命令执行完成"
+        });
+        workflow.tool_completed_with_result(result_summary);
         record_agent_phase(&request.session_id, &workflow);
         messages.push(serde_json::json!({
             "role":"user",
@@ -1197,6 +1202,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             )
         }));
     }
+    const MAX_RECOVERY_ATTEMPTS: u8 = 2;
     let mut recovery_attempts = 0u8;
     for round in 0..8 {
         if round > 0 {
@@ -1230,14 +1236,18 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 })
                 .to_string());
             }
-            Err(error) if recovery_attempts < 1 => {
+            Err(_error) if recovery_attempts < MAX_RECOVERY_ATTEMPTS => {
                 recovery_attempts += 1;
-                let _ = ssh_session::record_session_event(&request.session_id, "ai_recovery", format!("AI 请求失败，正在重试（第 {} 次）：{}", recovery_attempts, error));
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_recovery",
+                    format!("AI 请求失败，正在重试（第 {} 次）", recovery_attempts),
+                );
                 tokio::time::sleep(Duration::from_millis(500 * u64::from(recovery_attempts))).await;
                 continue;
             }
             Err(error) if !executed.is_empty() => {
-                workflow.fail();
+                workflow.fail_with("AI 请求失败，重试后仍未恢复");
                 record_agent_phase(&request.session_id, &workflow);
                 return Ok(serde_json::json!({
                     "status": "error",
@@ -1252,7 +1262,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         let payload: Value = match serde_json::from_str(&raw) {
             Ok(payload) => payload,
             Err(error) => {
-                workflow.fail();
+                workflow.fail_with("AI 响应不是有效 JSON");
                 record_agent_phase(&request.session_id, &workflow);
                 return Err(format!("Invalid AI response: {error}"));
             }
@@ -1260,12 +1270,71 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         let choice = match payload.get("choices").and_then(|items| items.get(0)) {
             Some(choice) => choice,
             None => {
-                workflow.fail();
+                workflow.fail_with("AI 响应缺少 choices");
                 record_agent_phase(&request.session_id, &workflow);
                 return Err("AI response did not contain choices".to_string());
             }
         };
-        let message = choice.get("message").cloned().unwrap_or_default();
+        let message = match normalize_assistant_message(choice.get("message").cloned().unwrap_or_default()) {
+            Ok(message) => message,
+            Err(reason) if recovery_attempts < MAX_RECOVERY_ATTEMPTS => {
+                recovery_attempts += 1;
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_recovery",
+                    format!("模型工具调用格式无效，正在重试（第 {} 次）", recovery_attempts),
+                );
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!("上一次响应的工具调用格式无效（{reason}）。请重新生成一个完整、单工具的调用，或直接用文字回答。")
+                }));
+                continue;
+            }
+            Err(reason) => {
+                workflow.fail_with("模型工具调用格式无效");
+                record_agent_phase(&request.session_id, &workflow);
+                return Ok(serde_json::json!({
+                    "status": "error",
+                    "content": format!("模型工具调用格式无效，已停止恢复：{reason}"),
+                    "recoveryAttempts": recovery_attempts,
+                    "executed": executed,
+                    "uiActions": ui_actions
+                }).to_string());
+            }
+        };
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+        if !has_tool_calls
+            && message
+                .get("content")
+                .and_then(Value::as_str)
+                .map_or(true, |content| content.trim().is_empty())
+        {
+            if recovery_attempts < MAX_RECOVERY_ATTEMPTS {
+                recovery_attempts += 1;
+                let _ = ssh_session::record_session_event(
+                    &request.session_id,
+                    "ai_recovery",
+                    format!("模型返回空响应，正在重试（第 {} 次）", recovery_attempts),
+                );
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": "上一次响应为空。请根据当前任务继续，返回简洁结论或一个完整的工具调用。"
+                }));
+                continue;
+            }
+            workflow.fail_with("模型返回空响应");
+            record_agent_phase(&request.session_id, &workflow);
+            return Ok(serde_json::json!({
+                "status": "error",
+                "content": "模型连续返回空响应，已停止恢复。",
+                "recoveryAttempts": recovery_attempts,
+                "executed": executed,
+                "uiActions": ui_actions
+            }).to_string());
+        }
         if let Some(call) = message.get("tool_calls").and_then(|calls| calls.get(0)) {
             let tool_name = call
                 .get("function")
@@ -1313,7 +1382,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     "ai_tool_result",
                     format!("工具：{}\n结果：{}", display, output),
                 );
-                workflow.tool_completed();
+                let result_summary = safe_result_summary(&output, if output.starts_with("__OPSNEST_UI_ERROR__") {
+                    "界面操作失败"
+                } else {
+                    "界面操作完成"
+                });
+                workflow.tool_completed_with_result(result_summary);
                 record_agent_phase(&request.session_id, &workflow);
                 messages.push(message.clone());
                 messages.push(serde_json::json!({
@@ -1369,7 +1443,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                     "command": display,
                     "output": output
                 }));
-                workflow.tool_completed();
+                let result_summary = safe_result_summary(&output, if output.starts_with("__OPSNEST_READONLY_ERROR__") {
+                    "只读工具失败"
+                } else {
+                    "只读工具完成"
+                });
+                workflow.tool_completed_with_result(result_summary);
                 record_agent_phase(&request.session_id, &workflow);
                 messages.push(message.clone());
                 messages.push(serde_json::json!({
@@ -1404,12 +1483,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 .unwrap_or("medium")
                 .to_string();
             if command.is_empty() {
-                workflow.fail();
+                workflow.fail_with("AI 请求的命令为空");
                 record_agent_phase(&request.session_id, &workflow);
                 return Err("AI requested an invalid command".into());
             }
             if is_interactive_agent_command(&command) {
-                workflow.fail();
+                workflow.fail_with("AI 请求了不允许的交互式命令");
                 record_agent_phase(&request.session_id, &workflow);
                 return Ok(serde_json::json!({
                     "status": "error",
@@ -1516,7 +1595,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 "terminalMarker": terminal_marker,
                 "verificationTerminalMarker": verification_marker
             }));
-            workflow.tool_completed();
+            let result_summary = safe_result_summary(&output, if output.contains("__OPSNEST_COMMAND_ERROR__") {
+                "命令执行失败"
+            } else {
+                "命令执行完成"
+            });
+            workflow.tool_completed_with_result(result_summary);
             record_agent_phase(&request.session_id, &workflow);
             let tool_call_id = call
                 .get("id")
@@ -1547,12 +1631,12 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         return Ok(serde_json::json!({"status":if executed.is_empty() { "answer" } else { "executed" },"content":content,"summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed,"uiActions":ui_actions}).to_string());
     }
     if recovery_attempts > 0 {
-        workflow.fail();
+        workflow.fail_with("本轮达到最大恢复步数");
         record_agent_phase(&request.session_id, &workflow);
         let summary = summarize_execution(&executed);
         return Ok(serde_json::json!({"status":"recovery_required","content":"本轮达到最大恢复步数，已停止继续执行。请查看摘要后决定是否继续。","summary":summary,"recoveryAttempts":recovery_attempts,"executed":executed,"uiActions":ui_actions}).to_string());
     }
-    workflow.fail();
+    workflow.fail_with("本轮达到最大步骤数");
     record_agent_phase(&request.session_id, &workflow);
     Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed,"uiActions":ui_actions}).to_string())
 }
@@ -1565,6 +1649,105 @@ fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
     );
 }
 
+fn safe_result_summary(output: &str, fallback: &str) -> String {
+    let plain_output = output.replace('\u{1b}', "");
+    let candidate = plain_output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| {
+            !line.is_empty()
+                && !line.contains("__OPSNEST_")
+                && !line.starts_with("password")
+                && !line.starts_with("Password")
+        })
+        .unwrap_or_default();
+    if candidate.is_empty() {
+        return fallback.to_string();
+    }
+    let redacted = candidate
+        .split_inclusive(|character: char| character.is_whitespace())
+        .map(|segment| {
+            let token_length = segment.trim_end().len();
+            let token = &segment[..token_length];
+            let whitespace = &segment[token_length..];
+            let lower = token.to_ascii_lowercase();
+            let secret = lower.starts_with("sk-")
+                || lower.starts_with("bearer ")
+                || ["api_key=", "api-key=", "access_token=", "auth_token=", "password=", "passwd=", "secret="]
+                    .iter()
+                    .any(|prefix| lower.starts_with(prefix));
+            let token = if secret {
+                token
+                    .find(|character: char| matches!(character, '=' | ':'))
+                    .map(|index| format!("{}=[REDACTED]", &token[..index]))
+                    .unwrap_or_else(|| "[REDACTED_TOKEN]".to_string())
+            } else {
+                token.to_string()
+            };
+            token + whitespace
+        })
+        .collect::<String>();
+    let summary = redacted.trim();
+    if summary.is_empty() {
+        return fallback.to_string();
+    }
+    summary.chars().take(180).collect()
+}
+
+/// Providers occasionally return a tool call without an id (or reuse the same
+/// id for two calls). Such an assistant message cannot be followed by valid
+/// `tool_call_id` messages. Normalize it before it enters the conversation so
+/// the next request remains a valid tool-call transaction.
+fn normalize_assistant_message(mut message: Value) -> Result<Value, String> {
+    let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+        return Ok(message);
+    };
+    let mut used_ids = HashSet::new();
+    for (index, call) in calls.iter_mut().enumerate() {
+        let Some(object) = call.as_object_mut() else {
+            return Err(format!("第 {} 个工具调用不是对象", index + 1));
+        };
+        {
+            let Some(function) = object.get_mut("function").and_then(Value::as_object_mut) else {
+                return Err(format!("第 {} 个工具调用缺少 function", index + 1));
+            };
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if name.is_empty() {
+                return Err(format!("第 {} 个工具调用缺少名称", index + 1));
+            }
+            if let Some(arguments) = function.get_mut("arguments") {
+                if !arguments.is_string() {
+                    *arguments = Value::String(arguments.to_string());
+                }
+            } else {
+                function.insert("arguments".to_string(), Value::String("{}".to_string()));
+            }
+        }
+        let existing = object.get("id").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+        let mut id = if existing.is_empty() {
+            format!("opsnest-call-{}", index + 1)
+        } else {
+            existing.to_string()
+        };
+        if !used_ids.insert(id.clone()) {
+            let base = format!("opsnest-call-{}", index + 1);
+            id = base.clone();
+            let mut suffix = 2;
+            while !used_ids.insert(id.clone()) {
+                id = format!("{base}-{suffix}");
+                suffix += 1;
+            }
+        }
+        object.insert("id".to_string(), Value::String(id));
+    }
+    Ok(message)
+}
+
 fn deferred_tool_results(message: &Value) -> Vec<Value> {
     message
         .get("tool_calls")
@@ -1572,16 +1755,19 @@ fn deferred_tool_results(message: &Value) -> Vec<Value> {
         .into_iter()
         .flatten()
         .skip(1)
-        .filter_map(|call| {
-            let call_id = call.get("id").and_then(Value::as_str)?.trim();
-            if call_id.is_empty() {
-                return None;
-            }
-            Some(serde_json::json!({
+        .enumerate()
+        .map(|(index, call)| {
+            let call_id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("opsnest-call-deferred-{}", index + 1));
+            serde_json::json!({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": "This tool call was not executed in this pass. OpsNest processes one server operation at a time; request this action again after reviewing the previous tool result."
-            }))
+            })
         })
         .collect()
 }
@@ -1828,7 +2014,10 @@ fn execute_opsnest_ui_tool(
 
 #[cfg(test)]
 mod tests {
-    use super::{cached_service_discovery, is_interactive_agent_command, remember_service_discovery};
+    use super::{
+        cached_service_discovery, is_interactive_agent_command, normalize_assistant_message,
+        remember_service_discovery, safe_result_summary,
+    };
 
     #[test]
     fn service_discovery_cache_marks_recent_result() {
@@ -1855,5 +2044,49 @@ mod tests {
         assert!(is_interactive_agent_command("1pctl uninstall"));
         assert!(is_interactive_agent_command("/usr/local/bin/1pctl remove"));
         assert!(!is_interactive_agent_command("1pctl status"));
+    }
+
+    #[test]
+    fn normalizes_missing_and_duplicate_tool_call_ids() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [
+                {"id": null, "type": "function", "function": {"name": "read_file"}},
+                {"id": "same", "type": "function", "function": {"name": "list_files"}},
+                {"id": "same", "type": "function", "function": {"name": "run_command"}}
+            ]
+        });
+        let normalized = normalize_assistant_message(message).expect("tool calls should normalize");
+        let ids = normalized["tool_calls"]
+            .as_array()
+            .expect("tool calls should remain an array")
+            .iter()
+            .map(|call| call["id"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.iter().all(|id| !id.is_empty()));
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(normalized["tool_calls"][0]["function"]["arguments"], "{}");
+    }
+
+    #[test]
+    fn rejects_tool_call_without_function_name() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "tool_calls": [{"id": "call-1", "function": {"arguments": "{}"}}]
+        });
+        assert!(normalize_assistant_message(message).is_err());
+    }
+
+    #[test]
+    fn result_summary_redacts_tokens_and_keeps_failure_context() {
+        let summary = safe_result_summary(
+            &format!("curl: authorization=Bearer {}\nconnection refused", "abcdefghijklmnop"),
+            "命令失败",
+        );
+        assert_eq!(summary, "connection refused");
+        let token = format!("sk-{}", "1234567890123456");
+        let token_summary = safe_result_summary(&format!("api_key={token}"), "命令失败");
+        assert_eq!(token_summary, "api_key=[REDACTED]");
     }
 }

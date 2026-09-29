@@ -7170,6 +7170,8 @@ function InteractiveTerminalPanel({
     completedTools: number;
     tool?: string;
     durationMs?: number;
+    result?: string;
+    failure?: string;
     timestamp: number;
   };
   const hostRef = React.useRef<HTMLDivElement>(null);
@@ -8362,6 +8364,7 @@ function InteractiveTerminalPanel({
     };
     let unlisten: (() => void) | undefined;
     let unlistenAgentActivity: (() => void) | undefined;
+    let unlistenCommandBoundary: (() => void) | undefined;
     let markerCarry = "";
     let markerCarryTimer: number | undefined;
     const startMarkerPrefix = "__OPSNEST_INTERACTIVE_START_";
@@ -8584,6 +8587,8 @@ function InteractiveTerminalPanel({
         let completedTools = 0;
         let tool = "";
         let lastTool = "";
+        let result = "";
+        let failure = "";
         try {
           const payload = JSON.parse(event.payload.text);
           phase = payload?.phase ?? "";
@@ -8592,6 +8597,8 @@ function InteractiveTerminalPanel({
           completedTools = Number(payload?.completedTools) || 0;
           tool = typeof payload?.tool === "string" ? payload.tool : "";
           lastTool = typeof payload?.lastTool === "string" ? payload.lastTool : "";
+          result = typeof payload?.result === "string" ? payload.result : "";
+          failure = typeof payload?.failure === "string" ? payload.failure : "";
         } catch {
           return;
         }
@@ -8634,6 +8641,8 @@ function InteractiveTerminalPanel({
               completedTools,
               tool: displayTool || undefined,
               durationMs,
+              result: result || undefined,
+              failure: failure || undefined,
               timestamp: Date.now(),
             },
           ]);
@@ -8642,6 +8651,37 @@ function InteractiveTerminalPanel({
     }).then((dispose) => {
       if (disposed) dispose();
       else unlistenAgentActivity = dispose;
+    });
+    void listen<{
+      sessionId: string;
+      marker: string;
+      phase: "started" | "completed" | "failed";
+      success?: boolean;
+      timestamp: number;
+    }>("ssh-command-boundary", (event) => {
+      if (event.payload.sessionId !== sessionRef.current) return;
+      const { marker, phase, success } = event.payload;
+      if (!marker) return;
+      if (phase === "started") {
+        startedToolMarkers.add(marker);
+        if (aiOrchestrationActive) {
+          aiOperationHadTools = true;
+          updateWorkStatus("executing", "正在执行命令");
+        }
+      } else {
+        completedToolMarkers.add(marker);
+        if (aiOrchestrationActive) {
+          aiOperationHadTools = true;
+          awaitingPromptAfterMarker = true;
+          deferredPromptTail = "";
+          if (success === false) updateWorkStatus("error", "命令执行失败", false);
+          else if (!aiSummaryFinished) updateWorkStatus("waiting", "等待 AI 分析执行结果…");
+        }
+        tryFinalizeAiConclusion();
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenCommandBoundary = dispose;
     });
     void listen<{ sessionId: string; data: string; closed: boolean }>(
       "ssh-terminal-output",
@@ -9043,6 +9083,7 @@ function InteractiveTerminalPanel({
       input.dispose();
       unlisten?.();
       unlistenAgentActivity?.();
+      unlistenCommandBoundary?.();
       hostResizeObserver.disconnect();
       window.removeEventListener("resize", resize);
       window.removeEventListener(
@@ -9179,6 +9220,11 @@ function InteractiveTerminalPanel({
               {activity.durationMs !== undefined && (
                 <span className="interactive-terminal-activity-tools">
                   {(activity.durationMs / 1000).toFixed(1)}s
+                </span>
+              )}
+              {(activity.result || activity.failure) && (
+                <span className="interactive-terminal-activity-result">
+                  {activity.failure || activity.result}
                 </span>
               )}
             </div>

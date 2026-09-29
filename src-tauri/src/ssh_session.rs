@@ -159,6 +159,19 @@ pub struct SessionActivityEvent {
     pub timestamp: u64,
 }
 
+/// Authoritative command transaction boundaries from the Rust PTY runner.
+/// React consumes these events for state; its remaining marker handling is
+/// presentation cleanup for raw PTY bytes, not command-completion inference.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandBoundaryEvent {
+    pub session_id: String,
+    pub marker: String,
+    pub phase: String,
+    pub success: Option<bool>,
+    pub timestamp: u64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BlackboardSnapshot {
@@ -262,6 +275,60 @@ fn detect_cwd_from_terminal_output(text: &str) -> Option<String> {
     None
 }
 
+fn redact_sensitive_text(text: &str) -> String {
+    let mut redacted = text.to_string();
+    loop {
+        let Some(start) = redacted.find("-----BEGIN ") else {
+            break;
+        };
+        let Some(end_marker) = redacted[start..].find("-----END ") else {
+            break;
+        };
+        let end_start = start + end_marker;
+        let end_prefix_len = "-----END ".len();
+        let Some(end_line) = redacted[end_start + end_prefix_len..].find("-----") else {
+            break;
+        };
+        let end = end_start + end_prefix_len + end_line + 5;
+        redacted.replace_range(start..end, "[REDACTED_PRIVATE_KEY]");
+    }
+    redacted
+        .split_inclusive(|character: char| character.is_whitespace())
+        .map(|segment| {
+            let token_length = segment.trim_end().len();
+            let token = &segment[..token_length];
+            let whitespace = &segment[token_length..];
+            let lower = token.to_ascii_lowercase();
+            let value_looks_like_key = token
+                .find(|character: char| matches!(character, '=' | ':'))
+                .map(|index| lower[index + 1..].starts_with("sk-"))
+                .unwrap_or(false);
+            let labeled_secret = [
+                "api_key=",
+                "api-key=",
+                "access_token=",
+                "auth_token=",
+                "password=",
+                "passwd=",
+                "secret=",
+            ]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix));
+            (if ((lower.starts_with("sk-") && token.len() >= 16) || value_looks_like_key)
+                || lower.starts_with("bearer ")
+                || labeled_secret
+            {
+                token
+                    .find(|character: char| matches!(character, '=' | ':'))
+                    .map(|index| format!("{}=[REDACTED]", &token[..index]))
+                    .unwrap_or_else(|| "[REDACTED_TOKEN]".to_string())
+            } else {
+                token.to_string()
+            }) + whitespace
+        })
+        .collect()
+}
+
 fn append_blackboard(
     shell: &InteractiveShell,
     kind: &str,
@@ -284,7 +351,7 @@ fn append_blackboard(
     let event = BlackboardEvent {
         sequence: state.next_sequence,
         kind: kind.to_string(),
-        text,
+        text: redact_sensitive_text(&text),
         timestamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -750,6 +817,25 @@ pub fn record_session_event(
     Ok(())
 }
 
+fn emit_command_boundary(
+    shell: &InteractiveShell,
+    session_id: &str,
+    marker: &str,
+    phase: &str,
+    success: Option<bool>,
+) {
+    let _ = shell.app.emit(
+        "ssh-command-boundary",
+        CommandBoundaryEvent {
+            session_id: session_id.to_string(),
+            marker: marker.to_string(),
+            phase: phase.to_string(),
+            success,
+            timestamp: unix_seconds(),
+        },
+    );
+}
+
 /// Converts a leading `sudo` into a non-interactive sudo invocation while
 /// keeping the password out of the command string. Commands without an
 /// explicitly configured sudo credential retain their original behavior.
@@ -961,6 +1047,7 @@ async fn run_interactive_command_with_marker_inner(
             });
         }
     }
+    emit_command_boundary(&shell, session_id, &marker, "started", None);
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     let mut timeout_interrupt_sent = false;
     let mut sudo_password_sent = false;
@@ -998,6 +1085,17 @@ async fn run_interactive_command_with_marker_inner(
             }
         }
         if let Some(index) = text.find(&marker) {
+            let exit_code = text[index + marker.len()..]
+                .strip_prefix(" rc=")
+                .and_then(|tail| tail.lines().next())
+                .and_then(|value| value.trim().parse::<i32>().ok());
+            emit_command_boundary(
+                &shell,
+                session_id,
+                &marker,
+                "completed",
+                exit_code.map(|code| code == 0),
+            );
             // Return only command output. The marker line is the protocol
             // boundary; the following shell prompt remains in the PTY stream
             // and is rendered once by the terminal listener.
@@ -1042,6 +1140,7 @@ async fn run_interactive_command_with_marker_inner(
                 deadline = tokio::time::Instant::now() + Duration::from_secs(10);
                 continue;
             }
+            emit_command_boundary(&shell, session_id, &marker, "failed", Some(false));
             return Ok(InteractiveCommandResult {
                 output: command_result_error(
                     "Interactive command timed out and did not return its completion marker",
@@ -1294,7 +1393,7 @@ pub async fn close_ssh_session(session_id: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::detect_cwd_from_terminal_output;
+    use super::{detect_cwd_from_terminal_output, redact_sensitive_text};
 
     #[test]
     fn detects_standard_shell_cwd_prompt() {
@@ -1311,5 +1410,14 @@ mod tests {
     #[test]
     fn ignores_output_that_ends_with_a_dollar_sign() {
         assert_eq!(detect_cwd_from_terminal_output("price: $"), None);
+    }
+
+    #[test]
+    fn redacts_blackboard_secrets_without_collapsing_output() {
+        let secret = format!("sk-{}", "1234567890123456");
+        let text = format!("token={secret}\nroot@host:~# next");
+        let redacted = redact_sensitive_text(&text);
+        assert!(!redacted.contains(&secret));
+        assert!(redacted.contains("\nroot@host:~# next"));
     }
 }

@@ -40,6 +40,8 @@ pub struct AgentTurn {
     pub completed_tools: u32,
     pub active_tool: Option<String>,
     pub last_tool: Option<String>,
+    pub last_result: Option<String>,
+    pub failure: Option<String>,
 }
 
 impl AgentTurn {
@@ -52,6 +54,8 @@ impl AgentTurn {
             completed_tools: 0,
             active_tool: None,
             last_tool: None,
+            last_result: None,
+            failure: None,
         }
     }
 
@@ -63,6 +67,8 @@ impl AgentTurn {
     pub fn tool_requested_named(&mut self, tool: impl Into<String>, requires_approval: bool) {
         self.active_tool = Some(tool.into());
         self.last_tool = None;
+        self.last_result = None;
+        self.failure = None;
         self.tool_requested_phase(requires_approval);
     }
 
@@ -81,9 +87,11 @@ impl AgentTurn {
         }
     }
 
-    pub fn tool_completed(&mut self) {
+    pub fn tool_completed_with_result(&mut self, result: impl Into<String>) {
         self.completed_tools = self.completed_tools.saturating_add(1);
         self.last_tool = self.active_tool.take();
+        self.last_result = Some(result.into());
+        self.failure = None;
         self.phase = AgentPhase::AwaitingContinuation;
     }
 
@@ -99,8 +107,9 @@ impl AgentTurn {
         self.phase = AgentPhase::Cancelled;
     }
 
-    pub fn fail(&mut self) {
+    pub fn fail_with(&mut self, reason: impl Into<String>) {
         self.phase = AgentPhase::Failed;
+        self.failure = Some(reason.into());
     }
 
     pub fn event_payload(&self) -> serde_json::Value {
@@ -112,6 +121,8 @@ impl AgentTurn {
             "completedTools": self.completed_tools,
             "tool": self.active_tool,
             "lastTool": self.last_tool,
+            "result": self.last_result,
+            "failure": self.failure,
         })
     }
 }
@@ -127,7 +138,7 @@ mod tests {
 
         turn.tool_requested_named("read_file", false);
         assert_eq!(turn.phase, AgentPhase::ExecutingTool);
-        turn.tool_completed();
+        turn.tool_completed_with_result("工具执行完成");
         assert_eq!(turn.phase, AgentPhase::AwaitingContinuation);
 
         turn.begin_step();
@@ -138,7 +149,7 @@ mod tests {
         assert_eq!(turn.phase, AgentPhase::AwaitingApproval);
         turn.approval_granted();
         assert_eq!(turn.phase, AgentPhase::ExecutingTool);
-        turn.tool_completed();
+        turn.tool_completed_with_result("工具执行完成");
         turn.finalize();
         turn.complete();
         assert_eq!(turn.completed_tools, 2);

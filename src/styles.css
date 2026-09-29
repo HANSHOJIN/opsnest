@@ -872,6 +872,7 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .interactive-terminal-activity-step { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .interactive-terminal-activity-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--chrome-text); }
 .interactive-terminal-activity-tools { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.interactive-terminal-activity-result { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
 .interactive-terminal-host { flex: 1; min-height: 0; box-sizing: border-box; padding: 0; overflow: hidden; }
 /*
  * FitAddon measures the host height and subtracts padding from the xterm
