@@ -4317,9 +4317,17 @@ function TaskHistoryView({ servers }: { servers: ServerSummary[] }) {
     setLoading(true);
     try {
       const saved = await readPortableJson<ActivityRecord[]>(ACTIVITY_FILE, []);
-      setRecords(Array.isArray(saved) ? saved : []);
+      const records = (Array.isArray(saved) ? saved : []).map((record) => ({
+        ...record,
+        detail: sanitizeSensitiveText(record.detail),
+      }));
+      setRecords(records);
+      if (
+        records.some((record, index) => record.detail !== saved[index]?.detail)
+      )
+        void writePortableJson(ACTIVITY_FILE, records).catch(() => undefined);
       const log = await invoke<string>("read_debug_log");
-      setDebugLog(log || "");
+      setDebugLog(sanitizeSensitiveText(log || ""));
     } finally {
       setLoading(false);
     }
