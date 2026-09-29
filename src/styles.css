@@ -859,8 +859,11 @@ button:focus-visible { outline: 2px solid #6b8afd; outline-offset: 2px; }
 .interactive-terminal-status-elapsed { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .interactive-terminal-status button { border: 1px solid color-mix(in srgb,#e06470 55%,var(--line)); border-radius: 999px; padding: 3px 8px; background: rgba(120,42,52,.18); color: #f0a0a8; font: inherit; cursor: pointer; }
 .interactive-terminal-status button:hover { background: rgba(120,42,52,.34); color: #fff; }
-.interactive-terminal-activity { position: absolute; top: 45px; right: 14px; z-index: 7; width: min(360px, calc(100% - 28px)); padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(20,20,23,.92); color: var(--muted); box-shadow: 0 6px 20px rgba(0,0,0,.28); font-size: 11px; pointer-events: none; }
-.interactive-terminal-activity-title { margin-bottom: 5px; color: var(--text-strong); font-weight: 600; }
+.interactive-terminal-activity { position: absolute; top: 45px; right: 14px; z-index: 7; width: min(360px, calc(100% - 28px)); max-height: min(320px, calc(100% - 62px)); overflow: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(20,20,23,.92); color: var(--muted); box-shadow: 0 6px 20px rgba(0,0,0,.28); font-size: 11px; }
+.interactive-terminal-activity-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 5px; }
+.interactive-terminal-activity-title { color: var(--text-strong); font-weight: 600; }
+.interactive-terminal-activity-toggle { padding: 2px 6px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--chrome-text); font: inherit; cursor: pointer; }
+.interactive-terminal-activity-toggle:hover { background: var(--control-hover); color: var(--text-strong); }
 .interactive-terminal-activity-item { display: flex; align-items: center; gap: 6px; min-height: 19px; white-space: nowrap; overflow: hidden; }
 .interactive-terminal-activity-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: #39b9e9; }
 .interactive-terminal-activity-dot.is-completed { background: #58cc87; }

@@ -7209,6 +7209,7 @@ function InteractiveTerminalPanel({
   >(null);
   const [workStatus, setWorkStatus] = React.useState<WorkStatus | null>(null);
   const [agentActivities, setAgentActivities] = React.useState<AgentActivity[]>([]);
+  const [agentActivityExpanded, setAgentActivityExpanded] = React.useState(false);
   const agentActivityIdRef = React.useRef(0);
   const agentToolStartsRef = React.useRef(new Map<string, number>());
   const workStatusRef = React.useRef<WorkStatus | null>(null);
@@ -9153,8 +9154,17 @@ function InteractiveTerminalPanel({
       )}
       {agentActivities.length > 0 && (
         <div className="interactive-terminal-activity" role="log" aria-label="AI 活动">
-          <div className="interactive-terminal-activity-title">AI 活动</div>
-          {agentActivities.slice(-6).map((activity) => (
+          <div className="interactive-terminal-activity-header">
+            <div className="interactive-terminal-activity-title">AI 活动</div>
+            <button
+              type="button"
+              className="interactive-terminal-activity-toggle"
+              onClick={() => setAgentActivityExpanded((expanded) => !expanded)}
+            >
+              {agentActivityExpanded ? "收起" : "详情"}
+            </button>
+          </div>
+          {(agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
             <div className="interactive-terminal-activity-item" key={activity.id}>
               <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
               <span className="interactive-terminal-activity-step">
