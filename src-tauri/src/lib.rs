@@ -6,6 +6,7 @@ use std::{
 
 mod agent_workflow;
 mod ai;
+mod redaction;
 mod file_manager;
 mod ssh_scan;
 mod ssh_session;

@@ -8085,7 +8085,7 @@ function InteractiveTerminalPanel({
             modelRef.current.contextLength,
             workspaceIdRef.current,
           );
-        const resultFailed = result.status === "error";
+        const resultFailed = result.status === "error" || result.status === "recovery_required";
         let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({
@@ -8261,7 +8261,7 @@ function InteractiveTerminalPanel({
           window.dispatchEvent(new CustomEvent("opsnest-ui-action", { detail: action }));
         pendingRef.current = null;
         setPendingApproval(null);
-        const resultFailed = result.status === "error";
+        const resultFailed = result.status === "error" || result.status === "recovery_required";
         let conclusion = "";
         if (result.content) {
           sessionContextRef.current.push({ role: "ai_reply", content: result.content });
@@ -8364,7 +8364,6 @@ function InteractiveTerminalPanel({
     };
     let unlisten: (() => void) | undefined;
     let unlistenAgentActivity: (() => void) | undefined;
-    let unlistenCommandBoundary: (() => void) | undefined;
     let markerCarry = "";
     let markerCarryTimer: number | undefined;
     const startMarkerPrefix = "__OPSNEST_INTERACTIVE_START_";
@@ -8652,37 +8651,8 @@ function InteractiveTerminalPanel({
       if (disposed) dispose();
       else unlistenAgentActivity = dispose;
     });
-    void listen<{
-      sessionId: string;
-      marker: string;
-      phase: "started" | "completed" | "failed";
-      success?: boolean;
-      timestamp: number;
-    }>("ssh-command-boundary", (event) => {
-      if (event.payload.sessionId !== sessionRef.current) return;
-      const { marker, phase, success } = event.payload;
-      if (!marker) return;
-      if (phase === "started") {
-        startedToolMarkers.add(marker);
-        if (aiOrchestrationActive) {
-          aiOperationHadTools = true;
-          updateWorkStatus("executing", "正在执行命令");
-        }
-      } else {
-        completedToolMarkers.add(marker);
-        if (aiOrchestrationActive) {
-          aiOperationHadTools = true;
-          awaitingPromptAfterMarker = true;
-          deferredPromptTail = "";
-          if (success === false) updateWorkStatus("error", "命令执行失败", false);
-          else if (!aiSummaryFinished) updateWorkStatus("waiting", "等待 AI 分析执行结果…");
-        }
-        tryFinalizeAiConclusion();
-      }
-    }).then((dispose) => {
-      if (disposed) dispose();
-      else unlistenCommandBoundary = dispose;
-    });
+    // Ordered PTY records own display buffering. A second completion listener
+    // must not clear prompt/output bytes already received on this stream.
     void listen<{ sessionId: string; data: string; closed: boolean }>(
       "ssh-terminal-output",
       (event) => {
@@ -9083,7 +9053,6 @@ function InteractiveTerminalPanel({
       input.dispose();
       unlisten?.();
       unlistenAgentActivity?.();
-      unlistenCommandBoundary?.();
       hostResizeObserver.disconnect();
       window.removeEventListener("resize", resize);
       window.removeEventListener(

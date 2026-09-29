@@ -2679,6 +2679,7 @@ version = "0.2.0-beta.3"
 dependencies = [
  "base64 0.22.1",
  "keyring",
+ "regex",
  "reqwest 0.12.28",
  "russh",
  "russh-sftp",

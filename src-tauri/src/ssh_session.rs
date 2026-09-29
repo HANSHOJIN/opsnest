@@ -160,8 +160,8 @@ pub struct SessionActivityEvent {
 }
 
 /// Authoritative command transaction boundaries from the Rust PTY runner.
-/// React consumes these events for state; its remaining marker handling is
-/// presentation cleanup for raw PTY bytes, not command-completion inference.
+/// These events are diagnostic. Ordered PTY records still own React display
+/// buffering so an out-of-band event cannot erase an already received prompt.
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandBoundaryEvent {
@@ -181,6 +181,7 @@ pub struct BlackboardSnapshot {
 }
 
 struct BlackboardState {
+    redactor: crate::redaction::StreamRedactor,
     cwd: Option<String>,
     next_sequence: u64,
     events: VecDeque<BlackboardEvent>,
@@ -188,6 +189,7 @@ struct BlackboardState {
 
 fn new_blackboard() -> Mutex<BlackboardState> {
     Mutex::new(BlackboardState {
+        redactor: crate::redaction::StreamRedactor::default(),
         cwd: None,
         next_sequence: 1,
         events: VecDeque::with_capacity(256),
@@ -276,57 +278,7 @@ fn detect_cwd_from_terminal_output(text: &str) -> Option<String> {
 }
 
 fn redact_sensitive_text(text: &str) -> String {
-    let mut redacted = text.to_string();
-    loop {
-        let Some(start) = redacted.find("-----BEGIN ") else {
-            break;
-        };
-        let Some(end_marker) = redacted[start..].find("-----END ") else {
-            break;
-        };
-        let end_start = start + end_marker;
-        let end_prefix_len = "-----END ".len();
-        let Some(end_line) = redacted[end_start + end_prefix_len..].find("-----") else {
-            break;
-        };
-        let end = end_start + end_prefix_len + end_line + 5;
-        redacted.replace_range(start..end, "[REDACTED_PRIVATE_KEY]");
-    }
-    redacted
-        .split_inclusive(|character: char| character.is_whitespace())
-        .map(|segment| {
-            let token_length = segment.trim_end().len();
-            let token = &segment[..token_length];
-            let whitespace = &segment[token_length..];
-            let lower = token.to_ascii_lowercase();
-            let value_looks_like_key = token
-                .find(|character: char| matches!(character, '=' | ':'))
-                .map(|index| lower[index + 1..].starts_with("sk-"))
-                .unwrap_or(false);
-            let labeled_secret = [
-                "api_key=",
-                "api-key=",
-                "access_token=",
-                "auth_token=",
-                "password=",
-                "passwd=",
-                "secret=",
-            ]
-            .iter()
-            .any(|prefix| lower.starts_with(prefix));
-            (if ((lower.starts_with("sk-") && token.len() >= 16) || value_looks_like_key)
-                || lower.starts_with("bearer ")
-                || labeled_secret
-            {
-                token
-                    .find(|character: char| matches!(character, '=' | ':'))
-                    .map(|index| format!("{}=[REDACTED]", &token[..index]))
-                    .unwrap_or_else(|| "[REDACTED_TOKEN]".to_string())
-            } else {
-                token.to_string()
-            }) + whitespace
-        })
-        .collect()
+    crate::redaction::sanitize(text)
 }
 
 fn append_blackboard(
@@ -345,13 +297,14 @@ fn append_blackboard(
     if let Some(cwd) = detected_cwd {
         state.cwd = Some(cwd);
     }
+    let text = if kind == "terminal_output" { state.redactor.push(&text) } else { text };
     if kind == "terminal_output" && text.trim().is_empty() {
         return None;
     }
     let event = BlackboardEvent {
         sequence: state.next_sequence,
         kind: kind.to_string(),
-        text: redact_sensitive_text(&text),
+        text: if kind == "agent_phase" { text } else { redact_sensitive_text(&text) },
         timestamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -890,6 +843,14 @@ pub fn session_request(session_id: &str) -> Result<SessionRequest, String> {
     Ok(shell.request.clone())
 }
 
+fn completion_record(text: &str, marker: &str) -> Option<(usize, i32)> {
+    let index = text.find(marker)?;
+    let tail = text[index + marker.len()..].strip_prefix(" rc=")?;
+    let end = tail.find('\n')?;
+    let code = tail[..end].trim_end_matches('\r').parse::<i32>().ok()?;
+    Some((index, code))
+}
+
 fn command_result_error(error: impl ToString) -> String {
     format!("__OPSNEST_COMMAND_ERROR__{}", error.to_string())
 }
@@ -1084,17 +1045,13 @@ async fn run_interactive_command_with_marker_inner(
                 }
             }
         }
-        if let Some(index) = text.find(&marker) {
-            let exit_code = text[index + marker.len()..]
-                .strip_prefix(" rc=")
-                .and_then(|tail| tail.lines().next())
-                .and_then(|value| value.trim().parse::<i32>().ok());
+        if let Some((index, exit_code)) = completion_record(&text, &marker) {
             emit_command_boundary(
                 &shell,
                 session_id,
                 &marker,
                 "completed",
-                exit_code.map(|code| code == 0),
+                Some(exit_code == 0 && !timeout_interrupt_sent),
             );
             // Return only command output. The marker line is the protocol
             // boundary; the following shell prompt remains in the PTY stream
@@ -1108,6 +1065,9 @@ async fn run_interactive_command_with_marker_inner(
                 .to_string();
             if let Some(prompt) = sudo_prompt_marker.as_deref() {
                 output = output.replace(prompt, "");
+            }
+            if exit_code != 0 {
+                output.push_str(&format!("\n__OPSNEST_COMMAND_ERROR__Process exited with code {exit_code}"));
             }
             if timeout_interrupt_sent {
                 output.push_str(
@@ -1394,6 +1354,15 @@ pub async fn close_ssh_session(session_id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{detect_cwd_from_terminal_output, redact_sensitive_text};
+
+    #[test]
+    fn completion_requires_the_entire_exit_code_line() {
+        let record = "__END__ rc=127\r\nprompt";
+        for end in 0..record.find('\n').unwrap() + 1 {
+            assert!(super::completion_record(&record[..end], "__END__").is_none());
+        }
+        assert_eq!(super::completion_record(record, "__END__"), Some((0, 127)));
+    }
 
     #[test]
     fn detects_standard_shell_cwd_prompt() {

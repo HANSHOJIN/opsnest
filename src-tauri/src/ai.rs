@@ -1236,7 +1236,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 })
                 .to_string());
             }
-            Err(_error) if recovery_attempts < MAX_RECOVERY_ATTEMPTS => {
+            Err(error) if recovery_attempts < MAX_RECOVERY_ATTEMPTS
+                && recover_request(&error, &mut messages) => {
                 recovery_attempts += 1;
                 let _ = ssh_session::record_session_event(
                     &request.session_id,
@@ -1251,13 +1252,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 record_agent_phase(&request.session_id, &workflow);
                 return Ok(serde_json::json!({
                     "status": "error",
-                    "content": format!("AI 请求失败，重试后仍未恢复：{error}"),
+                    "content": format!("AI 请求失败，重试后仍未恢复：{}", crate::redaction::sanitize(&error)),
                     "executed": executed,
                     "uiActions": ui_actions
                 })
                 .to_string());
             }
-            Err(error) => return Err(format!("AI 请求失败，重试后仍未恢复：{error}")),
+            Err(error) => {
+                workflow.fail_with("AI 请求失败");
+                record_agent_phase(&request.session_id, &workflow);
+                return Err(format!("AI 请求失败：{}", crate::redaction::sanitize(&error)));
+            },
         };
         let payload: Value = match serde_json::from_str(&raw) {
             Ok(payload) => payload,
@@ -1302,16 +1307,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 }).to_string());
             }
         };
-        let has_tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .is_some_and(|calls| !calls.is_empty());
-        if !has_tool_calls
-            && message
-                .get("content")
-                .and_then(Value::as_str)
-                .map_or(true, |content| content.trim().is_empty())
-        {
+        if unexpected_empty_response(&message, !executed.is_empty() || !ui_actions.is_empty()) {
             if recovery_attempts < MAX_RECOVERY_ATTEMPTS {
                 recovery_attempts += 1;
                 let _ = ssh_session::record_session_event(
@@ -1638,7 +1634,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     }
     workflow.fail_with("本轮达到最大步骤数");
     record_agent_phase(&request.session_id, &workflow);
-    Ok(serde_json::json!({"status":"executed","content":"达到本轮 AI-SSH 最大步骤数，请确认后继续。","executed":executed,"uiActions":ui_actions}).to_string())
+    Ok(serde_json::json!({"status":"recovery_required","content":"达到本轮 AI-SSH 最大步骤数，请输入继续；已执行结果会保留。","executed":executed,"uiActions":ui_actions}).to_string())
 }
 
 fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
@@ -1649,50 +1645,79 @@ fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
     );
 }
 
+fn unexpected_empty_response(message: &Value, had_results: bool) -> bool {
+    !had_results
+        && message.get("tool_calls").and_then(Value::as_array).map_or(true, Vec::is_empty)
+        && message.get("content").and_then(Value::as_str).map_or(true, |text| text.trim().is_empty())
+}
+
+/// Retry transient transport/provider failures. A schema 400 is retried only
+/// when we actually repaired the conversation; authentication/configuration
+/// errors must not consume more requests with the identical invalid body.
+fn recover_request(error: &str, messages: &mut Vec<Value>) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.starts_with("400 ") {
+        if !(lower.contains("tool_call") || lower.contains("toolcall")
+            || lower.contains("tool message") || lower.contains("tool result")) {
+            return false;
+        }
+        return repair_tool_history(messages);
+    }
+    if lower.starts_with("401 ") || lower.starts_with("403 ")
+        || lower.starts_with("404 ") || lower.starts_with("422 ") {
+        return false;
+    }
+    lower.starts_with("429 ") || lower.starts_with("5")
+        || lower.contains("timeout") || lower.contains("timed out")
+        || lower.contains("connect") || lower.contains("sending request")
+}
+
+fn repair_tool_history(messages: &mut Vec<Value>) -> bool {
+    let original = messages.clone();
+    let mut repaired = Vec::new();
+    let mut index = 0;
+    while index < original.len() {
+        let message = &original[index];
+        if message.get("role").and_then(Value::as_str) == Some("tool") {
+            // An orphan tool result cannot appear without a preceding call.
+            index += 1;
+            continue;
+        }
+        repaired.push(message.clone());
+        index += 1;
+        let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut results = HashMap::new();
+        while index < original.len()
+            && original[index].get("role").and_then(Value::as_str) == Some("tool") {
+            if let Some(id) = original[index].get("tool_call_id").and_then(Value::as_str) {
+                results.entry(id.to_string()).or_insert_with(|| original[index].clone());
+            }
+            index += 1;
+        }
+        for call in calls {
+            if let Some(id) = call.get("id").and_then(Value::as_str) {
+                repaired.push(results.remove(id).unwrap_or_else(|| serde_json::json!({
+                    "role": "tool", "tool_call_id": id,
+                    "content": "Tool result unavailable. Execution status is unknown. Inspect current state before requesting any repeated action."
+                })));
+            }
+        }
+    }
+    let changed = original != repaired;
+    if changed { *messages = repaired; }
+    changed
+}
+
 fn safe_result_summary(output: &str, fallback: &str) -> String {
-    let plain_output = output.replace('\u{1b}', "");
-    let candidate = plain_output
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| {
-            !line.is_empty()
-                && !line.contains("__OPSNEST_")
-                && !line.starts_with("password")
-                && !line.starts_with("Password")
-        })
-        .unwrap_or_default();
-    if candidate.is_empty() {
-        return fallback.to_string();
+    let sanitized = crate::redaction::sanitize(output);
+    if let Some((_, reason)) = sanitized.rsplit_once("__OPSNEST_COMMAND_ERROR__") {
+        return format!("命令失败：{}", reason.trim().chars().take(160).collect::<String>());
     }
-    let redacted = candidate
-        .split_inclusive(|character: char| character.is_whitespace())
-        .map(|segment| {
-            let token_length = segment.trim_end().len();
-            let token = &segment[..token_length];
-            let whitespace = &segment[token_length..];
-            let lower = token.to_ascii_lowercase();
-            let secret = lower.starts_with("sk-")
-                || lower.starts_with("bearer ")
-                || ["api_key=", "api-key=", "access_token=", "auth_token=", "password=", "passwd=", "secret="]
-                    .iter()
-                    .any(|prefix| lower.starts_with(prefix));
-            let token = if secret {
-                token
-                    .find(|character: char| matches!(character, '=' | ':'))
-                    .map(|index| format!("{}=[REDACTED]", &token[..index]))
-                    .unwrap_or_else(|| "[REDACTED_TOKEN]".to_string())
-            } else {
-                token.to_string()
-            };
-            token + whitespace
-        })
-        .collect::<String>();
-    let summary = redacted.trim();
-    if summary.is_empty() {
-        return fallback.to_string();
-    }
-    summary.chars().take(180).collect()
+    sanitized.lines().rev().map(str::trim)
+        .find(|line| !line.is_empty() && !line.contains("__OPSNEST_"))
+        .unwrap_or(fallback).chars().take(180).collect()
 }
 
 /// Providers occasionally return a tool call without an id (or reuse the same
@@ -2014,6 +2039,28 @@ fn execute_opsnest_ui_tool(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_response_after_tools_is_an_allowed_silent_completion() {
+        let empty = serde_json::json!({"content":null, "tool_calls":[]});
+        assert!(super::unexpected_empty_response(&empty, false));
+        assert!(!super::unexpected_empty_response(&empty, true));
+        assert!(!super::unexpected_empty_response(&serde_json::json!({"tool_calls":[{"id":"a"}]}), false));
+    }
+    #[test]
+    fn schema_recovery_repairs_missing_results_without_reexecution() {
+        let mut messages = vec![
+            serde_json::json!({"role":"assistant","tool_calls":[{"id":"a"},{"id":"b"}]}),
+            serde_json::json!({"role":"tool","tool_call_id":"a","content":"done"}),
+            serde_json::json!({"role":"user","content":"continue"}),
+        ];
+        assert!(super::recover_request("400 missing tool_calls results", &mut messages));
+        assert_eq!(messages[2]["tool_call_id"], "b");
+        assert_eq!(messages[1]["content"], "done");
+        assert!(!super::recover_request("400 missing tool_calls results", &mut messages));
+        assert!(!super::recover_request("400 invalid tool_choice", &mut messages));
+        assert!(!super::recover_request("401 invalid key", &mut messages));
+        assert!(super::recover_request("503 unavailable", &mut messages));
+    }
     use super::{
         cached_service_discovery, is_interactive_agent_command, normalize_assistant_message,
         remember_service_discovery, safe_result_summary,
