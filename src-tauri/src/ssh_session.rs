@@ -181,16 +181,103 @@ fn new_blackboard() -> Mutex<BlackboardState> {
     })
 }
 
+fn strip_terminal_control_sequences(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != 0x1b {
+            let next = text[index..].chars().next().unwrap_or_default();
+            output.push(next);
+            index += next.len_utf8();
+            continue;
+        }
+        index += 1;
+        if index >= bytes.len() {
+            break;
+        }
+        match bytes[index] {
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            b']' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'\\') {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    output
+}
+
+fn detect_cwd_from_terminal_output(text: &str) -> Option<String> {
+    let plain = strip_terminal_control_sequences(text);
+    for line in plain.split(['\r', '\n']).rev() {
+        let line = line.trim();
+        let Some(end) = line
+            .char_indices()
+            .rev()
+            .find_map(|(index, character)| matches!(character, '#' | '$').then_some(index))
+        else {
+            continue;
+        };
+        if !line[end + 1..].trim().is_empty() {
+            continue;
+        }
+        let prefix = line[..end].trim_end();
+        let Some(at) = prefix.rfind('@') else {
+            continue;
+        };
+        let host_and_path = &prefix[at + 1..];
+        let Some(colon) = host_and_path.find(':') else {
+            continue;
+        };
+        let host = &host_and_path[..colon];
+        let cwd = host_and_path[colon + 1..].trim();
+        if host.is_empty()
+            || host.chars().any(char::is_whitespace)
+            || !(cwd.starts_with('/') || cwd.starts_with('~'))
+        {
+            continue;
+        }
+        return Some(cwd.to_string());
+    }
+    None
+}
+
 fn append_blackboard(
     shell: &InteractiveShell,
     kind: &str,
     text: impl Into<String>,
 ) -> Option<BlackboardEvent> {
     touch_activity(shell);
+    let text = text.into();
+    let detected_cwd = (kind == "terminal_output")
+        .then(|| detect_cwd_from_terminal_output(&text))
+        .flatten();
     let Ok(mut state) = shell.blackboard.lock() else {
         return None;
     };
-    let text = text.into();
+    if let Some(cwd) = detected_cwd {
+        state.cwd = Some(cwd);
+    }
     if kind == "terminal_output" && text.trim().is_empty() {
         return None;
     }
@@ -1203,4 +1290,26 @@ pub async fn close_ssh_session(session_id: String) -> Result<(), String> {
             .await;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::detect_cwd_from_terminal_output;
+
+    #[test]
+    fn detects_standard_shell_cwd_prompt() {
+        assert_eq!(
+            detect_cwd_from_terminal_output("output\r\nhansho@Feiniu:/vol2/1000/music$ "),
+            Some("/vol2/1000/music".to_string())
+        );
+        assert_eq!(
+            detect_cwd_from_terminal_output("\u{1b}[32mroot@host:~#\u{1b}[0m "),
+            Some("~".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_output_that_ends_with_a_dollar_sign() {
+        assert_eq!(detect_cwd_from_terminal_output("price: $"), None);
+    }
 }
