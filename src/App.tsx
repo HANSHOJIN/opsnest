@@ -7168,6 +7168,8 @@ function InteractiveTerminalPanel({
     label: string;
     toolCalls: number;
     completedTools: number;
+    tool?: string;
+    durationMs?: number;
     timestamp: number;
   };
   const hostRef = React.useRef<HTMLDivElement>(null);
@@ -7208,6 +7210,7 @@ function InteractiveTerminalPanel({
   const [workStatus, setWorkStatus] = React.useState<WorkStatus | null>(null);
   const [agentActivities, setAgentActivities] = React.useState<AgentActivity[]>([]);
   const agentActivityIdRef = React.useRef(0);
+  const agentToolStartsRef = React.useRef(new Map<string, number>());
   const workStatusRef = React.useRef<WorkStatus | null>(null);
   const cancelRequestedRef = React.useRef(false);
   const [statusNow, setStatusNow] = React.useState(() => Date.now());
@@ -7910,6 +7913,7 @@ function InteractiveTerminalPanel({
       terminalOperationInFlight = true;
       cancelRequestedRef.current = false;
       setAgentActivities([]);
+      agentToolStartsRef.current.clear();
       updateWorkStatus("thinking", "AI 正在分析…");
       const currentModel = modelRef.current;
       void writeDebugLog("debug", "AI-SSH input received", {
@@ -8577,12 +8581,16 @@ function InteractiveTerminalPanel({
         let step = 0;
         let toolCalls = 0;
         let completedTools = 0;
+        let tool = "";
+        let lastTool = "";
         try {
           const payload = JSON.parse(event.payload.text);
           phase = payload?.phase ?? "";
           step = Number(payload?.step) || 0;
           toolCalls = Number(payload?.toolCalls) || 0;
           completedTools = Number(payload?.completedTools) || 0;
+          tool = typeof payload?.tool === "string" ? payload.tool : "";
+          lastTool = typeof payload?.lastTool === "string" ? payload.lastTool : "";
         } catch {
           return;
         }
@@ -8596,18 +8604,35 @@ function InteractiveTerminalPanel({
           cancelled: ["stopped", "已停止", false],
           failed: ["error", "AI 请求失败", false],
         };
+        const toolKey = `${step}:${tool || lastTool}`;
+        if (phase === "executing_tool" && tool) {
+          agentToolStartsRef.current.set(toolKey, Date.now());
+        }
+        const durationMs = phase === "awaiting_continuation" && lastTool
+          ? Math.max(0, Date.now() - (agentToolStartsRef.current.get(toolKey) ?? Date.now()))
+          : undefined;
+        if (phase === "awaiting_continuation" && lastTool)
+          agentToolStartsRef.current.delete(toolKey);
         const next = statusByPhase[phase];
         if (next) {
-          updateWorkStatus(next[0], next[1], next[2]);
+          const displayTool = tool || lastTool;
+          const displayLabel = displayTool && phase === "executing_tool"
+            ? `${next[1]} · ${displayTool}`
+            : displayTool && phase === "awaiting_continuation"
+              ? `已完成 ${displayTool}`
+              : next[1];
+          updateWorkStatus(next[0], displayLabel, next[2]);
           setAgentActivities((items) => [
             ...items.slice(-19),
             {
               id: ++agentActivityIdRef.current,
               step,
               phase,
-              label: next[1],
+              label: displayLabel,
               toolCalls,
               completedTools,
+              tool: displayTool || undefined,
+              durationMs,
               timestamp: Date.now(),
             },
           ]);
@@ -9139,6 +9164,11 @@ function InteractiveTerminalPanel({
               {activity.toolCalls > 0 && (
                 <span className="interactive-terminal-activity-tools">
                   {activity.completedTools}/{activity.toolCalls}
+                </span>
+              )}
+              {activity.durationMs !== undefined && (
+                <span className="interactive-terminal-activity-tools">
+                  {(activity.durationMs / 1000).toFixed(1)}s
                 </span>
               )}
             </div>

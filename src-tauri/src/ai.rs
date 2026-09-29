@@ -1150,7 +1150,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             })
             .to_string());
         }
-        workflow.tool_requested(true);
+        workflow.tool_requested_named("run_command", true);
         workflow.approval_granted();
         record_agent_phase(&request.session_id, &workflow);
         let (output, terminal_marker) =
@@ -1286,7 +1286,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 tool_kind,
                 ToolKind::OpenFileManager | ToolKind::OpenFileEditor
             ) {
-                workflow.tool_requested(false);
+                workflow.tool_requested_named(tool_name, false);
                 record_agent_phase(&request.session_id, &workflow);
                 let tool_call_id = call
                     .get("id")
@@ -1326,7 +1326,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 continue;
             }
             if tool_kind != ToolKind::RunCommand {
-                workflow.tool_requested(false);
+                workflow.tool_requested_named(tool_name, false);
                 record_agent_phase(&request.session_id, &workflow);
                 let tool_call_id = call
                     .get("id")
@@ -1421,7 +1421,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             }
             let requires_approval =
                 !approved_for_this_turn && command_requires_approval(&command, &risk);
-            workflow.tool_requested(requires_approval);
+            workflow.tool_requested_named("run_command", requires_approval);
             record_agent_phase(&request.session_id, &workflow);
             if requires_approval {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());

@@ -38,6 +38,8 @@ pub struct AgentTurn {
     pub phase: AgentPhase,
     pub tool_calls: u32,
     pub completed_tools: u32,
+    pub active_tool: Option<String>,
+    pub last_tool: Option<String>,
 }
 
 impl AgentTurn {
@@ -48,6 +50,8 @@ impl AgentTurn {
             phase: AgentPhase::WaitingModel,
             tool_calls: 0,
             completed_tools: 0,
+            active_tool: None,
+            last_tool: None,
         }
     }
 
@@ -56,7 +60,13 @@ impl AgentTurn {
         self.phase = AgentPhase::WaitingModel;
     }
 
-    pub fn tool_requested(&mut self, requires_approval: bool) {
+    pub fn tool_requested_named(&mut self, tool: impl Into<String>, requires_approval: bool) {
+        self.active_tool = Some(tool.into());
+        self.last_tool = None;
+        self.tool_requested_phase(requires_approval);
+    }
+
+    fn tool_requested_phase(&mut self, requires_approval: bool) {
         self.tool_calls = self.tool_calls.saturating_add(1);
         self.phase = if requires_approval {
             AgentPhase::AwaitingApproval
@@ -73,6 +83,7 @@ impl AgentTurn {
 
     pub fn tool_completed(&mut self) {
         self.completed_tools = self.completed_tools.saturating_add(1);
+        self.last_tool = self.active_tool.take();
         self.phase = AgentPhase::AwaitingContinuation;
     }
 
@@ -99,6 +110,8 @@ impl AgentTurn {
             "phase": self.phase.as_str(),
             "toolCalls": self.tool_calls,
             "completedTools": self.completed_tools,
+            "tool": self.active_tool,
+            "lastTool": self.last_tool,
         })
     }
 }
@@ -112,7 +125,7 @@ mod tests {
         let mut turn = AgentTurn::start(7);
         assert_eq!(turn.phase, AgentPhase::WaitingModel);
 
-        turn.tool_requested(false);
+        turn.tool_requested_named("read_file", false);
         assert_eq!(turn.phase, AgentPhase::ExecutingTool);
         turn.tool_completed();
         assert_eq!(turn.phase, AgentPhase::AwaitingContinuation);
@@ -121,7 +134,7 @@ mod tests {
         assert_eq!(turn.step, 2);
         assert_eq!(turn.phase, AgentPhase::WaitingModel);
 
-        turn.tool_requested(true);
+        turn.tool_requested_named("run_command", true);
         assert_eq!(turn.phase, AgentPhase::AwaitingApproval);
         turn.approval_granted();
         assert_eq!(turn.phase, AgentPhase::ExecutingTool);
@@ -135,7 +148,7 @@ mod tests {
     #[test]
     fn cancellation_is_terminal_for_the_current_turn() {
         let mut turn = AgentTurn::start(1);
-        turn.tool_requested(false);
+        turn.tool_requested_named("read_file", false);
         turn.cancel();
         assert_eq!(turn.phase, AgentPhase::Cancelled);
     }
