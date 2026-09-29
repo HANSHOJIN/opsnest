@@ -8344,6 +8344,7 @@ function InteractiveTerminalPanel({
       }, 1800);
     };
     let unlisten: (() => void) | undefined;
+    let unlistenAgentActivity: (() => void) | undefined;
     let markerCarry = "";
     let markerCarryTimer: number | undefined;
     const startMarkerPrefix = "__OPSNEST_INTERACTIVE_START_";
@@ -8551,6 +8552,40 @@ function InteractiveTerminalPanel({
     // login can emit its first prompt immediately; subscribing afterwards
     // loses that prompt and leaves a blank terminal with only the cursor.
     let disposed = false;
+    void listen<{
+      sessionId: string;
+      sequence: number;
+      kind: string;
+      text: string;
+      timestamp: number;
+    }>("ssh-agent-activity", (event) => {
+      if (event.payload.sessionId !== sessionRef.current) return;
+      if (event.payload.kind === "agent_phase") {
+        let phase = "";
+        try {
+          phase = JSON.parse(event.payload.text)?.phase ?? "";
+        } catch {
+          return;
+        }
+        const statusByPhase: Record<string, [WorkStatus["kind"], string, boolean]> = {
+          waiting_model: ["thinking", "AI 正在分析…", true],
+          awaiting_approval: ["approval", "等待确认执行", false],
+          executing_tool: ["executing", "正在执行命令", true],
+          awaiting_continuation: ["waiting", "等待 AI 分析执行结果…", true],
+          finalizing: ["waiting", "正在整理执行结果…", true],
+          completed: ["done", "已完成", false],
+          cancelled: ["stopped", "已停止", false],
+          failed: ["error", "AI 请求失败", false],
+        };
+        const next = statusByPhase[phase];
+        if (next) updateWorkStatus(next[0], next[1], next[2]);
+      } else if (event.payload.kind === "ai_recovery") {
+        updateWorkStatus("thinking", "正在恢复 AI 请求…", true);
+      }
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlistenAgentActivity = dispose;
+    });
     void listen<{ sessionId: string; data: string; closed: boolean }>(
       "ssh-terminal-output",
       (event) => {
@@ -8950,6 +8985,7 @@ function InteractiveTerminalPanel({
       });
       input.dispose();
       unlisten?.();
+      unlistenAgentActivity?.();
       hostResizeObserver.disconnect();
       window.removeEventListener("resize", resize);
       window.removeEventListener(

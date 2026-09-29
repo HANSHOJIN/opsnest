@@ -61,6 +61,7 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
 }
 
 struct InteractiveShell {
+    app: AppHandle,
     // Keep the credentials associated with the already-open PTY in backend
     // memory. AI read-only tools can open a short-lived SFTP/scan connection
     // without asking the frontend to send credentials through the model
@@ -150,6 +151,16 @@ pub struct BlackboardEvent {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SessionActivityEvent {
+    pub session_id: String,
+    pub sequence: u64,
+    pub kind: String,
+    pub text: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BlackboardSnapshot {
     pub session_id: String,
     pub cwd: Option<String>,
@@ -170,14 +181,18 @@ fn new_blackboard() -> Mutex<BlackboardState> {
     })
 }
 
-fn append_blackboard(shell: &InteractiveShell, kind: &str, text: impl Into<String>) {
+fn append_blackboard(
+    shell: &InteractiveShell,
+    kind: &str,
+    text: impl Into<String>,
+) -> Option<BlackboardEvent> {
     touch_activity(shell);
     let Ok(mut state) = shell.blackboard.lock() else {
-        return;
+        return None;
     };
     let text = text.into();
     if kind == "terminal_output" && text.trim().is_empty() {
-        return;
+        return None;
     }
     let event = BlackboardEvent {
         sequence: state.next_sequence,
@@ -189,10 +204,12 @@ fn append_blackboard(shell: &InteractiveShell, kind: &str, text: impl Into<Strin
             .as_secs(),
     };
     state.next_sequence += 1;
+    let published = event.clone();
     state.events.push_back(event);
     while state.events.len() > 300 {
         state.events.pop_front();
     }
+    Some(published)
 }
 
 fn snapshot_blackboard(shell: &InteractiveShell, session_id: &str) -> BlackboardSnapshot {
@@ -460,6 +477,7 @@ pub async fn open_interactive_ssh_terminal(
         .await
         .map_err(|error| error.to_string())?;
     let shell = Arc::new(InteractiveShell {
+        app: app.clone(),
         request: request.clone(),
         writer: tokio::sync::Mutex::new(writer),
         execution: tokio::sync::Mutex::new(()),
@@ -627,7 +645,21 @@ pub fn record_session_event(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
-    append_blackboard(&shell, kind, text);
+    let Some(event) = append_blackboard(&shell, kind, text) else {
+        return Ok(());
+    };
+    if matches!(kind, "agent_phase" | "ai_tool_result" | "ai_recovery") {
+        let _ = shell.app.emit(
+            "ssh-agent-activity",
+            SessionActivityEvent {
+                session_id: session_id.to_string(),
+                sequence: event.sequence,
+                kind: event.kind,
+                text: event.text,
+                timestamp: event.timestamp,
+            },
+        );
+    }
     Ok(())
 }
 
