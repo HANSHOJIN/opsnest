@@ -1215,7 +1215,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             &request.base_url,
             &request.api_key,
             &request.model,
-            serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tool_schemas,"tool_choice":tool_choice}),
+            serde_json::json!({"model":request.model.trim(),"temperature":0.1,"messages":messages,"tools":tool_schemas,"tool_choice":tool_choice,"parallel_tool_calls":false}),
             Duration::from_secs(60),
             Some(&mut cancel_receiver),
         ).await {
