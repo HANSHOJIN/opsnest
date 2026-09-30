@@ -7172,6 +7172,7 @@ function InteractiveTerminalPanel({
     durationMs?: number;
     result?: string;
     failure?: string;
+    action?: string;
     timestamp: number;
   };
   const hostRef = React.useRef<HTMLDivElement>(null);
@@ -7214,12 +7215,18 @@ function InteractiveTerminalPanel({
   const [agentActivityExpanded, setAgentActivityExpanded] = React.useState(false);
   const agentActivityIdRef = React.useRef(0);
   const agentToolStartsRef = React.useRef(new Map<string, number>());
+  const agentActionRef = React.useRef("");
   const workStatusRef = React.useRef<WorkStatus | null>(null);
   const statusClearTimerRef = React.useRef<number | undefined>(undefined);
   const cancelRequestedRef = React.useRef(false);
   const [statusNow, setStatusNow] = React.useState(() => Date.now());
   const updateWorkStatus = React.useCallback(
     (kind: WorkStatus["kind"], label: string, cancellable = true) => {
+      if (label === "正在执行命令" && agentActionRef.current) {
+        label = agentActionRef.current;
+      } else if (label === "等待 AI 分析执行结果…" && agentActionRef.current) {
+        label = "分析结果：" + agentActionRef.current;
+      }
       const next = { kind, label, startedAt: Date.now(), cancellable };
       if (statusClearTimerRef.current !== undefined) {
         window.clearTimeout(statusClearTimerRef.current);
@@ -7931,6 +7938,7 @@ function InteractiveTerminalPanel({
       cancelRequestedRef.current = false;
       setAgentActivities([]);
       setAgentActivityExpanded(false);
+      agentActionRef.current = "";
       agentToolStartsRef.current.clear();
       updateWorkStatus("thinking", "AI 正在分析…");
       const currentModel = modelRef.current;
@@ -8603,6 +8611,7 @@ function InteractiveTerminalPanel({
         let lastTool = "";
         let result = "";
         let failure = "";
+        let action = "";
         try {
           const payload = JSON.parse(event.payload.text);
           phase = payload?.phase ?? "";
@@ -8613,6 +8622,7 @@ function InteractiveTerminalPanel({
           lastTool = typeof payload?.lastTool === "string" ? payload.lastTool : "";
           result = typeof payload?.result === "string" ? payload.result : "";
           failure = typeof payload?.failure === "string" ? payload.failure : "";
+          action = typeof payload?.action === "string" ? payload.action : "";
         } catch {
           return;
         }
@@ -8627,7 +8637,7 @@ function InteractiveTerminalPanel({
           failed: ["error", "AI 请求失败", false],
         };
         const toolKey = `${step}:${tool || lastTool}`;
-        if (phase === "executing_tool" && tool) {
+        if (phase === "executing_tool" && tool && !agentToolStartsRef.current.has(toolKey)) {
           agentToolStartsRef.current.set(toolKey, Date.now());
         }
         const durationMs = phase === "awaiting_continuation" && lastTool
@@ -8643,20 +8653,31 @@ function InteractiveTerminalPanel({
             : displayTool && phase === "awaiting_continuation"
               ? `已完成 ${displayTool}`
               : next[1];
-          updateWorkStatus(next[0], displayLabel, next[2]);
+          agentActionRef.current = action;
+          const actionLabel = action && phase === "executing_tool"
+            ? action
+            : action && phase === "awaiting_approval"
+              ? "等待确认：" + action
+              : action && (phase === "awaiting_continuation" || phase === "waiting_model")
+                ? "分析结果：" + action
+                : failure && phase === "failed"
+                  ? failure
+                  : displayLabel;
+          updateWorkStatus(next[0], actionLabel, next[2]);
           setAgentActivities((items) => [
             ...items.slice(-19),
             {
               id: ++agentActivityIdRef.current,
               step,
               phase,
-              label: displayLabel,
+              label: actionLabel,
               toolCalls,
               completedTools,
               tool: displayTool || undefined,
               durationMs,
               result: result || undefined,
               failure: failure || undefined,
+              action: action || undefined,
               timestamp: Date.now(),
             },
           ]);
@@ -9205,13 +9226,13 @@ function InteractiveTerminalPanel({
           </div>
           {agentActivityExpanded && agentActivities.length > 0 && (
             <div className="interactive-terminal-activity-stream">
-              {agentActivities.map((activity) => (
-                <div className="interactive-terminal-activity-item" key={activity.id}>
+              {agentActivities.slice(-1).map((activity) => (
+                <div className="interactive-terminal-activity-item" key={activity.id} title={[activity.action || activity.label, activity.failure || activity.result].filter(Boolean).join(" · ")}>
                   <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
                   <span className="interactive-terminal-activity-step">
                     Step {activity.step || "—"}
                   </span>
-                  <span className="interactive-terminal-activity-label">{activity.label}</span>
+                  <span className="interactive-terminal-activity-label">{activity.action || activity.label}</span>
                   {activity.toolCalls > 0 && (
                     <span className="interactive-terminal-activity-tools">
                       {activity.completedTools}/{activity.toolCalls}

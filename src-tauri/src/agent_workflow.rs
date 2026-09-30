@@ -42,6 +42,7 @@ pub struct AgentTurn {
     pub last_tool: Option<String>,
     pub last_result: Option<String>,
     pub failure: Option<String>,
+    pub action: Option<String>,
 }
 
 impl AgentTurn {
@@ -56,6 +57,7 @@ impl AgentTurn {
             last_tool: None,
             last_result: None,
             failure: None,
+            action: None,
         }
     }
 
@@ -70,6 +72,10 @@ impl AgentTurn {
         self.last_result = None;
         self.failure = None;
         self.tool_requested_phase(requires_approval);
+    }
+
+    pub fn describe_action(&mut self, action: impl Into<String>) {
+        self.action = Some(action.into());
     }
 
     fn tool_requested_phase(&mut self, requires_approval: bool) {
@@ -123,6 +129,7 @@ impl AgentTurn {
             "lastTool": self.last_tool,
             "result": self.last_result,
             "failure": self.failure,
+            "action": self.action,
         })
     }
 }

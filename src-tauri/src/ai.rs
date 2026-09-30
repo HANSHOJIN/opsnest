@@ -1151,6 +1151,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             .to_string());
         }
         workflow.tool_requested_named("run_command", true);
+        workflow.describe_action(tool_activity_description("run_command", &serde_json::json!({"command":command})));
         workflow.approval_granted();
         record_agent_phase(&request.session_id, &workflow);
         let (output, terminal_marker) =
@@ -1352,6 +1353,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 ToolKind::OpenFileManager | ToolKind::OpenFileEditor
             ) {
                 workflow.tool_requested_named(tool_name, false);
+                workflow.describe_action(tool_activity_description(tool_name, &arguments));
                 record_agent_phase(&request.session_id, &workflow);
                 let tool_call_id = call
                     .get("id")
@@ -1397,6 +1399,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             }
             if tool_kind != ToolKind::RunCommand {
                 workflow.tool_requested_named(tool_name, false);
+                workflow.describe_action(tool_activity_description(tool_name, &arguments));
                 record_agent_phase(&request.session_id, &workflow);
                 let tool_call_id = call
                     .get("id")
@@ -1497,6 +1500,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             let requires_approval =
                 !approved_for_this_turn && command_requires_approval(&command, &risk);
             workflow.tool_requested_named("run_command", requires_approval);
+            workflow.describe_action(tool_activity_description("run_command", &arguments));
             record_agent_phase(&request.session_id, &workflow);
             if requires_approval {
                 return Ok(serde_json::json!({"status":"approval_required","command":command,"verifyCommand":verify_command,"explain":explain,"risk":risk,"executed":executed}).to_string());
@@ -1540,6 +1544,8 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 if verify_command.is_empty() || verify_command == command {
                     (None, None)
                 } else {
+                    workflow.describe_action(tool_activity_description("run_command", &serde_json::json!({"command":verify_command})));
+                    record_agent_phase(&request.session_id, &workflow);
                     let verification_execution =
                         match ssh_session::run_interactive_command_with_marker_cancel(
                             &request.session_id,
@@ -1596,6 +1602,7 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
             } else {
                 "命令执行完成"
             });
+            workflow.describe_action(tool_activity_description("run_command", &arguments));
             workflow.tool_completed_with_result(result_summary);
             record_agent_phase(&request.session_id, &workflow);
             let tool_call_id = call
@@ -1643,6 +1650,32 @@ fn record_agent_phase(session_id: &str, turn: &AgentTurn) {
         "agent_phase",
         turn.event_payload().to_string(),
     );
+}
+
+/// Describe observable tool actions, never private model reasoning or file
+/// contents. Sanitize the complete descriptor before limiting its length.
+fn tool_activity_description(tool: &str, arguments: &Value) -> String {
+    let path = |key: &str, default: &str| {
+        arguments.get(key).and_then(Value::as_str).filter(|value| !value.is_empty())
+            .unwrap_or(default).to_string()
+    };
+    let description = match tool {
+        "run_command" => format!("执行：{}", path("command", "服务器命令")),
+        "list_files" => format!("查看远程目录：{}", path("path", "/root")),
+        "read_file" => format!("读取远程文件：{}", path("path", "指定文件")),
+        "discover_services" => "扫描 Web 服务、Docker 容器和系统服务".to_string(),
+        "workspace_list_files" => format!("查看工作区目录：{}", path("path", "/")),
+        "workspace_read_file" => format!("读取工作区文件：{}", path("path", "指定文件")),
+        "workspace_write_file" => format!("保存工作区文件：{}", path("path", "指定文件")),
+        "workspace_delete_file" => format!("删除工作区文件：{}", path("path", "指定文件")),
+        "download_to_workspace" => format!("下载：{} → {}", path("remote_path", "远程文件"), path("path", "工作区")),
+        "upload_workspace_file" => format!("上传：{} → {}", path("path", "工作区文件"), path("remote_path", "远程路径")),
+        "opsnest_open_file_manager" => "打开远程文件管理器".to_string(),
+        "opsnest_open_file_editor" => format!("打开编辑器：{}", path("path", "指定文件")),
+        _ => format!("调用工具：{tool}"),
+    };
+    crate::redaction::sanitize(&description).split_whitespace().collect::<Vec<_>>()
+        .join(" ").chars().take(240).collect()
 }
 
 fn unexpected_empty_response(message: &Value, had_results: bool) -> bool {
@@ -1992,6 +2025,19 @@ fn execute_opsnest_ui_tool(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn activity_description_identifies_target_without_file_contents_or_credentials() {
+        let description = super::tool_activity_description("workspace_write_file", &serde_json::json!({
+            "path":"nginx.conf", "content":"do-not-publish-file-content"
+        }));
+        assert!(description.contains("nginx.conf"));
+        assert!(!description.contains("do-not-publish-file-content"));
+        let description = super::tool_activity_description("run_command", &serde_json::json!({
+            "command":"curl -H 'Authorization: Bearer dummySensitiveToken' example.test"
+        }));
+        assert!(description.contains("curl"));
+        assert!(!description.contains("dummySensitiveToken"));
+    }
     #[test]
     fn empty_response_after_tools_is_an_allowed_silent_completion() {
         let empty = serde_json::json!({"content":null, "tool_calls":[]});
