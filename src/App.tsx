@@ -9193,30 +9193,34 @@ function InteractiveTerminalPanel({
               )}
             </div>
           </div>
-          {agentActivities.length > 0 && (agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
-            <div className="interactive-terminal-activity-item" key={activity.id}>
-              <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
-              <span className="interactive-terminal-activity-step">
-                Step {activity.step || "—"}
-              </span>
-              <span className="interactive-terminal-activity-label">{activity.label}</span>
-              {activity.toolCalls > 0 && (
-                <span className="interactive-terminal-activity-tools">
-                  {activity.completedTools}/{activity.toolCalls}
-                </span>
-              )}
-              {activity.durationMs !== undefined && (
-                <span className="interactive-terminal-activity-tools">
-                  {(activity.durationMs / 1000).toFixed(1)}s
-                </span>
-              )}
-              {(activity.result || activity.failure) && (
-                <span className="interactive-terminal-activity-result">
-                  {activity.failure || activity.result}
-                </span>
-              )}
+          {agentActivities.length > 0 && (
+            <div className="interactive-terminal-activity-stream">
+              {(agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
+                <div className="interactive-terminal-activity-item" key={activity.id}>
+                  <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
+                  <span className="interactive-terminal-activity-step">
+                    Step {activity.step || "—"}
+                  </span>
+                  <span className="interactive-terminal-activity-label">{activity.label}</span>
+                  {activity.toolCalls > 0 && (
+                    <span className="interactive-terminal-activity-tools">
+                      {activity.completedTools}/{activity.toolCalls}
+                    </span>
+                  )}
+                  {activity.durationMs !== undefined && (
+                    <span className="interactive-terminal-activity-tools">
+                      {(activity.durationMs / 1000).toFixed(1)}s
+                    </span>
+                  )}
+                  {(activity.result || activity.failure) && (
+                    <span className="interactive-terminal-activity-result">
+                      {activity.failure || activity.result}
+                    </span>
+                  )}
+                </div>
+              ))}
             </div>
-          ))}
+          )}
         </div>
       )}
       <div ref={hostRef} className="interactive-terminal-host" />
