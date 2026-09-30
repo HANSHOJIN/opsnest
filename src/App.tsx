@@ -7215,14 +7215,28 @@ function InteractiveTerminalPanel({
   const agentActivityIdRef = React.useRef(0);
   const agentToolStartsRef = React.useRef(new Map<string, number>());
   const workStatusRef = React.useRef<WorkStatus | null>(null);
+  const statusClearTimerRef = React.useRef<number | undefined>(undefined);
   const cancelRequestedRef = React.useRef(false);
   const [statusNow, setStatusNow] = React.useState(() => Date.now());
   const updateWorkStatus = React.useCallback(
     (kind: WorkStatus["kind"], label: string, cancellable = true) => {
       const next = { kind, label, startedAt: Date.now(), cancellable };
+      if (statusClearTimerRef.current !== undefined) {
+        window.clearTimeout(statusClearTimerRef.current);
+        statusClearTimerRef.current = undefined;
+      }
       workStatusRef.current = next;
       setWorkStatus(next);
       setStatusNow(next.startedAt);
+      if (kind === "done" || kind === "error" || kind === "stopped") {
+        statusClearTimerRef.current = window.setTimeout(() => {
+          statusClearTimerRef.current = undefined;
+          if (workStatusRef.current === next) {
+            workStatusRef.current = null;
+            setWorkStatus(null);
+          }
+        }, 1600);
+      }
     },
     [],
   );
@@ -9037,6 +9051,10 @@ function InteractiveTerminalPanel({
     resize();
     return () => {
       disposed = true;
+      if (statusClearTimerRef.current !== undefined) {
+        window.clearTimeout(statusClearTimerRef.current);
+        statusClearTimerRef.current = undefined;
+      }
       clearFinalizationTimers();
       clearMarkerCarryTimer();
       const pendingInlineApproval = inlineApprovalResolverRef.current;
@@ -9149,32 +9167,33 @@ function InteractiveTerminalPanel({
   return (
     <section className="interactive-terminal-panel">
       {workStatus && (
-        <div className={`interactive-terminal-status is-${workStatus.kind}`} role="status">
-          <span className="interactive-terminal-status-dot" />
-          <span>{workStatus.label}</span>
-          {workStatus.kind !== "done" && workStatus.kind !== "error" && workStatus.kind !== "stopped" && (
-            <span className="interactive-terminal-status-elapsed">
-              {Math.floor(Math.max(0, statusNow - workStatus.startedAt) / 1000)}s
-            </span>
-          )}
-          {workStatus.cancellable && (
-            <button type="button" onClick={stopWork}>停止</button>
-          )}
-        </div>
-      )}
-      {agentActivities.length > 0 && (
         <div className="interactive-terminal-activity" role="log" aria-label="AI 活动">
           <div className="interactive-terminal-activity-header">
-            <div className="interactive-terminal-activity-title">AI 活动</div>
-            <button
-              type="button"
-              className="interactive-terminal-activity-toggle"
-              onClick={() => setAgentActivityExpanded((expanded) => !expanded)}
-            >
-              {agentActivityExpanded ? "收起" : "详情"}
-            </button>
+            <div className="interactive-terminal-activity-status" role="status">
+              <span className={`interactive-terminal-status-dot is-${workStatus?.kind ?? "waiting"}`} />
+              <span>{workStatus?.label ?? "AI 活动"}</span>
+              {workStatus && !["done", "error", "stopped"].includes(workStatus.kind) && (
+                <span className="interactive-terminal-status-elapsed">
+                  {Math.floor(Math.max(0, statusNow - workStatus.startedAt) / 1000)}s
+                </span>
+              )}
+            </div>
+            <div className="interactive-terminal-activity-actions">
+              {workStatus?.cancellable && (
+                <button type="button" onClick={stopWork}>停止</button>
+              )}
+              {agentActivities.length > 0 && (
+                <button
+                  type="button"
+                  className="interactive-terminal-activity-toggle"
+                  onClick={() => setAgentActivityExpanded((expanded) => !expanded)}
+                >
+                  {agentActivityExpanded ? "收起" : "详情"}
+                </button>
+              )}
+            </div>
           </div>
-          {(agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
+          {agentActivities.length > 0 && (agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
             <div className="interactive-terminal-activity-item" key={activity.id}>
               <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
               <span className="interactive-terminal-activity-step">

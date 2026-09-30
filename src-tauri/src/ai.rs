@@ -1820,10 +1820,17 @@ fn is_interactive_agent_command(command: &str) -> bool {
         "bash", "sh", "zsh", "fish", "vim", "nvim", "nano", "top", "htop", "tmux",
         "screen", "mysql", "psql", "sftp", "ftp",
     ];
-    if interactive_programs.contains(&first)
-        && !words.iter().any(|word| word == "-c" || word == "--command")
-    {
-        return true;
+    if interactive_programs.contains(&first) {
+        let has_non_interactive_flag = match first {
+            "top" | "htop" => words.iter().any(|word| matches!(word.as_str(), "-b" | "--batch" | "-n" | "--iterations")),
+            "mysql" => words.iter().any(|word| matches!(word.as_str(), "-e" | "--execute")),
+            "psql" => words.iter().any(|word| matches!(word.as_str(), "-c" | "--command")),
+            "bash" | "sh" | "zsh" | "fish" => words.iter().any(|word| matches!(word.as_str(), "-c" | "--command")),
+            _ => false,
+        };
+        if !has_non_interactive_flag {
+            return true;
+        }
     }
     if first != "sudo" && first != "doas" {
         return false;
@@ -1875,7 +1882,7 @@ pub fn cancel_ai_ssh_chat(session_id: String) -> Result<(), String> {
     Ok(())
 }
 
-fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
+fn command_requires_approval(command: &str, _declared_risk: &str) -> bool {
     let lowered = command.to_ascii_lowercase();
     // The model's risk label is advisory. Read-only inspection should remain
     // one-click/automatic even when the model conservatively labels it high.
@@ -1883,9 +1890,6 @@ fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
         "sudo ",
         "rm ",
         "mv ",
-        "cp ",
-        "chmod ",
-        "chown ",
         "systemctl start",
         "systemctl stop",
         "systemctl restart",
@@ -1915,57 +1919,6 @@ fn command_requires_approval(command: &str, declared_risk: &str) -> bool {
     ]
     .iter()
     .any(|token| lowered.contains(token))
-        || (declared_risk.eq_ignore_ascii_case("high") && !is_read_only_command(&lowered))
-}
-
-fn is_read_only_command(command: &str) -> bool {
-    let read_only = [
-        "which ",
-        "command -v ",
-        "type ",
-        "ls",
-        "stat ",
-        "cat ",
-        "head ",
-        "tail ",
-        "grep ",
-        "egrep ",
-        "fgrep ",
-        "awk ",
-        "sed -n",
-        "find ",
-        "ps",
-        "top",
-        "free",
-        "df",
-        "du ",
-        "uname",
-        "id",
-        "whoami",
-        "hostname",
-        "uptime",
-        "env",
-        "printenv",
-        "systemctl status",
-        "systemctl is-active",
-        "systemctl list-units",
-        "service --status-all",
-        "docker ps",
-        "docker inspect",
-        "docker version",
-        "docker info",
-        "ss ",
-        "netstat ",
-        "ip ",
-        "curl -i",
-        "curl -I",
-        "wget --spider",
-    ];
-    command
-        .split(|ch| ch == '&' || ch == '|' || ch == ';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .all(|part| read_only.iter().any(|prefix| part.starts_with(prefix)))
 }
 
 fn execute_opsnest_ui_tool(
@@ -2062,7 +2015,7 @@ mod tests {
         assert!(super::recover_request("503 unavailable", &mut messages));
     }
     use super::{
-        cached_service_discovery, is_interactive_agent_command, normalize_assistant_message,
+        cached_service_discovery, command_requires_approval, is_interactive_agent_command, normalize_assistant_message,
         remember_service_discovery, safe_result_summary,
     };
 
@@ -2091,6 +2044,22 @@ mod tests {
         assert!(is_interactive_agent_command("1pctl uninstall"));
         assert!(is_interactive_agent_command("/usr/local/bin/1pctl remove"));
         assert!(!is_interactive_agent_command("1pctl status"));
+    }
+
+    #[test]
+    fn non_interactive_inspection_commands_are_allowed() {
+        assert!(!is_interactive_agent_command("top -b -n 1"));
+        assert!(!is_interactive_agent_command("mysql -e 'show databases'"));
+        assert!(!is_interactive_agent_command("psql -c 'select 1'"));
+        assert!(is_interactive_agent_command("top"));
+    }
+
+    #[test]
+    fn only_explicitly_destructive_commands_need_review() {
+        assert!(!command_requires_approval("cp config.yml config.bak", "high"));
+        assert!(!command_requires_approval("chmod 644 config.yml", "high"));
+        assert!(command_requires_approval("systemctl restart nginx", "low"));
+        assert!(command_requires_approval("rm -rf /tmp/cache", "low"));
     }
 
     #[test]
