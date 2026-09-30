@@ -7930,6 +7930,7 @@ function InteractiveTerminalPanel({
       terminalOperationInFlight = true;
       cancelRequestedRef.current = false;
       setAgentActivities([]);
+      setAgentActivityExpanded(false);
       agentToolStartsRef.current.clear();
       updateWorkStatus("thinking", "AI 正在分析…");
       const currentModel = modelRef.current;
@@ -9167,11 +9168,19 @@ function InteractiveTerminalPanel({
   return (
     <section className="interactive-terminal-panel">
       {workStatus && (
-        <div className="interactive-terminal-activity" role="log" aria-label="AI 活动">
+        <div className={"interactive-terminal-activity" + (agentActivityExpanded ? " is-expanded" : "")} role="log" aria-label="AI 活动">
           <div className="interactive-terminal-activity-header">
             <div className="interactive-terminal-activity-status" role="status">
               <span className={`interactive-terminal-status-dot is-${workStatus?.kind ?? "waiting"}`} />
-              <span>{workStatus?.label ?? "AI 活动"}</span>
+              <span className="interactive-terminal-activity-current" title={workStatus.label}>
+                {agentActivities.at(-1)?.step ? "Step " + agentActivities.at(-1)?.step + " · " : ""}
+                {workStatus.label}
+              </span>
+              {(agentActivities.at(-1)?.toolCalls ?? 0) > 0 && (
+                <span className="interactive-terminal-activity-progress">
+                  {agentActivities.at(-1)?.completedTools}/{agentActivities.at(-1)?.toolCalls}
+                </span>
+              )}
               {workStatus && !["done", "error", "stopped"].includes(workStatus.kind) && (
                 <span className="interactive-terminal-status-elapsed">
                   {Math.floor(Math.max(0, statusNow - workStatus.startedAt) / 1000)}s
@@ -9186,6 +9195,7 @@ function InteractiveTerminalPanel({
                 <button
                   type="button"
                   className="interactive-terminal-activity-toggle"
+                  aria-expanded={agentActivityExpanded}
                   onClick={() => setAgentActivityExpanded((expanded) => !expanded)}
                 >
                   {agentActivityExpanded ? "收起" : "详情"}
@@ -9193,9 +9203,9 @@ function InteractiveTerminalPanel({
               )}
             </div>
           </div>
-          {agentActivities.length > 0 && (
+          {agentActivityExpanded && agentActivities.length > 0 && (
             <div className="interactive-terminal-activity-stream">
-              {(agentActivityExpanded ? agentActivities : agentActivities.slice(-6)).map((activity) => (
+              {agentActivities.map((activity) => (
                 <div className="interactive-terminal-activity-item" key={activity.id}>
                   <span className={`interactive-terminal-activity-dot is-${activity.phase}`} />
                   <span className="interactive-terminal-activity-step">
