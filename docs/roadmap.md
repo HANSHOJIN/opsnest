@@ -143,6 +143,19 @@ Alpha 阶段交互流程：
 - 多服务器并行配置与分批配置
 - 失败通知和执行结果摘要
 
+## P1：Live Host Telemetry（已确认，待开发）
+
+目标：打开服务器后即可看到实时生命体征，并能把资源变化与 SSH / AI 操作关联起来。
+
+- 可选的一键安装 OpsNest 轻量 Agent，自动完成上传、注册服务、启动和配对。
+- Monitor Channel 独立于终端输入，首选经 SSH 通道 / 隧道连接 Desktop；不依赖 Beszel Hub。
+- 概览显示 CPU、Memory、Disk、Network、Load、Temperature、Uptime；详情逐步支持 CPU cores、Disk IO、Docker、GPU、Processes。
+- 保持紧凑指标与短趋势，后续接入 Activity timeline 和 AI 只读指标工具。
+
+分三期：轻量原型与概览 → 一键启用与扩展指标 → 操作关联与 AI 诊断。
+
+详细设计与验收见 [Live Host Telemetry 开发计划](live-host-telemetry-plan.md)。当前仅纳入计划，功能冻结的重构阶段结束后再安排落码。
+
 ## P2：文件与任务联动
 
 - “上传并部署这个文件”任务

@@ -64,6 +64,14 @@ Opsnet-V2/
 - Server credentials and user data stay in the V2 portable data directory.
 - New V2 storage is intentionally incompatible with the old archive format; no legacy migration is required.
 
+## Confirmed next capability: Live Host Telemetry
+
+Add an optional lightweight OpsNest Agent and a dedicated Monitor Channel alongside SSH. Expose live host health in compact rows, with expandable details, operation correlation, and read-only AI diagnostics.
+
+OpsNest Agent must connect with OpsNest Desktop without a Beszel Hub dependency. Prefer an authenticated SSH channel or tunnel so users do not need a publicly reachable desktop or manual port configuration.
+
+See [Live Host Telemetry development plan](live-host-telemetry-plan.md) for onboarding, metrics, lifecycle, phases, and acceptance criteria. This is a planning-only addition dated 2026-10-02; implementation is scheduled after the feature-frozen refactoring phase.
+
 ## Portable storage contract
 
 - The V2 data root is `data/` beside the running executable: `current_exe().parent()/data`.
