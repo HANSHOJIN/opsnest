@@ -622,6 +622,8 @@ pub fn run() {
             ssh_session::open_interactive_ssh_terminal,
             ssh_session::write_interactive_ssh_terminal,
             ssh_session::write_interactive_ssh_terminal_input,
+            ssh_session::probe_interactive_ssh_command,
+            ssh_session::set_interactive_ssh_native_input,
             ssh_session::write_interactive_ssh_terminal_response,
             ssh_session::write_interactive_ssh_terminal_password,
             ssh_session::get_ssh_session_blackboard,

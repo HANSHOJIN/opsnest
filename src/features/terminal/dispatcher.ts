@@ -1,15 +1,17 @@
 export type TerminalDispatchContext = {
-  writeCommand: (command: string) => void;
+  writeCommand: (command: string) => void | Promise<void>;
   askAi: (prompt: string) => void;
   approve: (command: string) => void;
   pendingCommand: () => string | null;
   isBusy?: () => boolean;
   onBusy?: () => void;
   looksLikeCommand: (value: string) => boolean;
+  resolveUnknownCommand?: (value: string) => Promise<"command" | "ai" | "cancel">;
   onCommand: (command: string) => void;
 };
 
 export class TerminalDispatcher {
+  private resolving = false;
   constructor(private readonly context: TerminalDispatchContext) {}
 
   async dispatch(line: string) {
@@ -20,7 +22,7 @@ export class TerminalDispatcher {
       this.context.approve(pending);
       return;
     }
-    if (this.context.isBusy?.()) {
+    if (this.resolving || this.context.isBusy?.()) {
       this.context.onBusy?.();
       return;
     }
@@ -30,14 +32,26 @@ export class TerminalDispatcher {
     if (forcedCommand) {
       if (command) {
         this.context.onCommand(command);
-        this.context.writeCommand(command);
+        await this.context.writeCommand(command);
       }
       return;
     }
     if (!forcedAi && this.context.looksLikeCommand(trimmed)) {
       this.context.onCommand(command);
-      this.context.writeCommand(command);
+      await this.context.writeCommand(command);
       return;
+    }
+    if (!forcedAi && this.context.resolveUnknownCommand) {
+      this.resolving = true;
+      try {
+        const route = await this.context.resolveUnknownCommand(trimmed);
+        if (route === "cancel") return;
+        if (route === "command") {
+          this.context.onCommand(command);
+          await this.context.writeCommand(command);
+          return;
+        }
+      } finally { this.resolving = false; }
     }
     const prompt = forcedAi ? trimmed.slice(3).trim() : trimmed;
     if (prompt) this.context.askAi(prompt);

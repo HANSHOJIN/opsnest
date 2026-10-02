@@ -55,7 +55,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { listen } from "@tauri-apps/api/event";
 import { ImeGate } from "./features/terminal/ime-gate";
 import { RemoteIcon as CachedRemoteIcon } from "./features/icons/catalog";
-import { isInteractiveShellCommand as classifyInteractiveShellCommand } from "./features/terminal/command-classification";
+import { isLikelyShellCommand as looksLikeShellCommand, executableName, shouldAutoReturnToAi } from "./features/terminal/command-classification";
 import { TerminalDispatcher } from "./features/terminal/dispatcher";
 import { TranscriptRuntime } from "./features/terminal/emulator-runtime";
 import { formatAiConclusion } from "./features/terminal/ai-format";
@@ -6780,99 +6780,7 @@ function TerminalWorkspace({
     </>
   );
 }
-const SHELL_COMMANDS = new Set([
-  "cd",
-  "ls",
-  "pwd",
-  "cat",
-  "echo",
-  "printf",
-  "clear",
-  "history",
-  "find",
-  "grep",
-  "sed",
-  "awk",
-  "head",
-  "tail",
-  "less",
-  "more",
-  "sort",
-  "uniq",
-  "cut",
-  "xargs",
-  "tee",
-  "touch",
-  "mkdir",
-  "cp",
-  "mv",
-  "rm",
-  "ln",
-  "chmod",
-  "chown",
-  "sudo",
-  "apt",
-  "apt-get",
-  "apk",
-  "yum",
-  "dnf",
-  "pacman",
-  "brew",
-  "docker",
-  "podman",
-  "systemctl",
-  "service",
-  "journalctl",
-  "ps",
-  "top",
-  "htop",
-  "kill",
-  "df",
-  "du",
-  "free",
-  "uname",
-  "hostname",
-  "whoami",
-  "id",
-  "env",
-  "export",
-  "source",
-  "set",
-  "ssh",
-  "scp",
-  "curl",
-  "wget",
-  "tar",
-  "zip",
-  "unzip",
-  "git",
-  "npm",
-  "pnpm",
-  "yarn",
-  "pip",
-  "python",
-  "python3",
-  "node",
-  "go",
-  "cargo",
-  "make",
-  "cmake",
-  "java",
-  "php",
-  "ruby",
-  "perl",
-  "openssl",
-  "vim",
-  "vi",
-  "nano",
-  "tmux",
-  "screen",
-  "hermes",
-  "openclaw",
-  "opencode",
-  "reboot",
-  "shutdown",
-]);
+
 const RISKY_SHELL_PARTS = [
   "sudo ",
   "rm ",
@@ -6925,43 +6833,7 @@ function collectAiSshMemory(
   return normalizeAiSshMemory(result, maxChars);
 }
 
-function looksLikeShellCommand(input: string) {
-  const value = input.trim();
-  if (!value) return false;
-  if (value.startsWith("/cmd ")) return true;
-  // A pasted shell block must stay on the PTY path.  In particular, brace
-  // groups and control structures are valid commands even when their first
-  // line is only `{`, `if`, or `for` and therefore cannot be recognized by a
-  // single-token command whitelist.
-  if (value.includes("\n")) {
-    const lines = value
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    if (
-      lines.some((line) => /^(?:\{|\}|\(|\)|if\b|then\b|elif\b|else\b|fi\b|for\b|while\b|until\b|do\b|done\b|case\b|esac\b)/.test(line))
-    )
-      return true;
-    const commandLines = lines.filter((line) => !/^(?:#|[{}()])/.test(line));
-    if (
-      commandLines.length > 1 &&
-      commandLines.every((line) => {
-        const first = line.split(/\s+/, 1)[0].toLowerCase();
-        return SHELL_COMMANDS.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(line);
-      })
-    )
-      return true;
-    // Do not let punctuation in arbitrary pasted prose (for example a
-    // Markdown table, quoted text, or a tab-indented document) route the whole
-    // block into the remote shell. A multiline block is a command only when
-    // its structure or each executable-looking line positively identifies it.
-    return false;
-  }
-  if (/^(?:[.!/~$][^\s]*|[A-Za-z]:\\[^\s]*)/.test(value)) return true;
-  if (/[|;&<>`]|	/.test(value)) return true;
-  const first = value.split(/\s+/, 1)[0].toLowerCase();
-  return SHELL_COMMANDS.has(first);
-}
+
 // These programs own the PTY after they start.  Their cursor movement,
 // carriage returns and alternate-screen sequences must be interpreted by
 // xterm itself, rather than by the AI-SSH line dispatcher/transcript cleaner.
@@ -7034,21 +6906,6 @@ function rememberTerminalRawAutoReturn(sessionId: string, active: boolean) {
   } catch {
     /* storage is best effort */
   }
-}
-function shouldReturnToAiAfterInteractiveCommand(command: string) {
-  const words = command.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const first = words[0]?.split("/").at(-1) ?? "";
-  const persistentShells = ["bash", "sh", "zsh", "fish", "su", "tmux", "screen"];
-  if (persistentShells.includes(first)) return false;
-  if (
-    ["sudo", "doas"].includes(first) &&
-    (words.some((word) => ["-i", "--login", "-s", "--shell"].includes(word)) ||
-      words.some((word) => persistentShells.includes(word.split("/").at(-1) ?? word)))
-  ) return false;
-  if (["exec", "command", "env"].includes(first) &&
-    words.slice(1).some((word) => persistentShells.includes(word.split("/").at(-1) ?? word)))
-    return false;
-  return true;
 }
 function endsWithRemoteShellPrompt(data: string) {
   const plain = data
@@ -7185,6 +7042,8 @@ function InteractiveTerminalPanel({
   // Once an interactive CLI (for example `hermes chat`) owns the PTY, keep
   // bytes and ANSI control sequences on the native xterm path until it exits.
   const rawPtyModeRef = React.useRef(false);
+  const rawNativeEchoRef = React.useRef(readTerminalRawMode(server.id));
+  const nativePromptTokenRef = React.useRef(window.sessionStorage.getItem("opsnest-native-prompt:" + server.id) ?? "");
   const rawPtyExitRequestedRef = React.useRef(false);
   const rawPtyAutoExitOnShellPromptRef = React.useRef(readTerminalRawAutoReturn(server.id));
   const rawPtyShellOutputTailRef = React.useRef("");
@@ -7206,6 +7065,8 @@ function InteractiveTerminalPanel({
     null,
   );
   const inlineApprovalCommandRef = React.useRef<string | null>(null);
+  const [routeChoice, setRouteChoice] = React.useState<string | null>(null);
+  const routeChoiceResolverRef = React.useRef<((route: "command" | "ai" | "cancel") => void) | null>(null);
   const inlineApprovalKindRef = React.useRef<"ai" | "command" | null>(null);
   const inlineApprovalResolverRef = React.useRef<
     ((approved: boolean) => void) | null
@@ -8715,6 +8576,7 @@ function InteractiveTerminalPanel({
           render("\r\n\x1b[31m[SSH connection closed]\x1b[0m\r\n");
         } else if (rawPtyModeRef.current) {
           const rawData = event.payload.data;
+          detectConfirmationPrompt(rawData);
           if (rawOutputTraceCount < 5) {
             rawOutputTraceCount += 1;
             void writeDebugLog("debug", "AI-SSH raw PTY output", {
@@ -8731,7 +8593,9 @@ function InteractiveTerminalPanel({
           // return to the host shell without Ctrl+C. Detect that prompt across
           // split PTY chunks, then restore the AI editor so the next message
           // is not accidentally executed by Bash.
-          const shellPromptReturned = endsWithRemoteShellPrompt(rawPtyShellOutputTailRef.current);
+          const shellPromptReturned = nativePromptTokenRef.current
+            ? rawPtyShellOutputTailRef.current.includes(nativePromptTokenRef.current)
+            : endsWithRemoteShellPrompt(rawPtyShellOutputTailRef.current);
           if (
             shellPromptReturned &&
             (rawPtyExitRequestedRef.current || rawPtyAutoExitOnShellPromptRef.current)
@@ -8743,6 +8607,23 @@ function InteractiveTerminalPanel({
             rawPtyShellOutputTailRef.current = "";
             rememberTerminalRawMode(server.id, false);
             rememberTerminalRawAutoReturn(server.id, false);
+            discoveredCommands.clear();
+            terminalOperationInFlight = true;
+            void invoke("set_interactive_ssh_native_input", {
+              sessionId: sessionRef.current, enabled: false,
+            }).then(() => {
+              rawNativeEchoRef.current = false;
+              nativePromptTokenRef.current = "";
+              window.sessionStorage.removeItem("opsnest-native-prompt:" + server.id);
+            }).catch((reason) => {
+              // Keep input native if echo could not be restored; never
+              // double-echo local input while the remote shell still echoes.
+              rawPtyModeRef.current = true;
+              rawPtyAutoExitOnShellPromptRef.current = false;
+              rememberTerminalRawMode(server.id, true);
+              rememberTerminalRawAutoReturn(server.id, false);
+              setError(String(reason));
+            }).finally(() => { terminalOperationInFlight = false; });
             void writeDebugLog("info", "AI-SSH raw PTY returned to AI input mode", {
               serverId: server.id,
               reason: exitReason,
@@ -8803,18 +8684,25 @@ function InteractiveTerminalPanel({
           `\r\n\x1b[31mSSH connection failed: ${String(reason)}\x1b[0m\r\n`,
         );
       });
+    const discoveredCommands = new Set<string>();
     const dispatcher = new TerminalDispatcher({
-      writeCommand: (command) => {
-        const interactive = classifyInteractiveShellCommand(command);
-        const returnToAiOnShellPrompt =
-          interactive && shouldReturnToAiAfterInteractiveCommand(command);
-        void writeDebugLog("debug", "AI-SSH command dispatch", {
-          serverId: server.id,
-          commandHead: command.trim().split(/\s+/, 1)[0] ?? "",
-          interactive,
-          returnToAiOnShellPrompt,
-        });
-        if (interactive) {
+      writeCommand: async (command) => {
+        const interactive = true;
+        const returnToAiOnShellPrompt = shouldAutoReturnToAi(command);
+        terminalOperationInFlight = true;
+        try {
+          const promptToken = await invoke<string | null>("set_interactive_ssh_native_input", {
+            sessionId: sessionRef.current, enabled: true,
+          });
+          nativePromptTokenRef.current = promptToken ?? "";
+          window.sessionStorage.setItem("opsnest-native-prompt:" + server.id, promptToken ?? "");
+          rawNativeEchoRef.current = true;
+          void writeDebugLog("debug", "AI-SSH command dispatch", {
+            serverId: server.id,
+            commandHead: command.trim().split(/\s+/, 1)[0] ?? "",
+            interactive,
+            returnToAiOnShellPrompt,
+          });
           rawPtyModeRef.current = true;
           rawPtyExitRequestedRef.current = false;
           rawPtyAutoExitOnShellPromptRef.current = returnToAiOnShellPrompt;
@@ -8822,8 +8710,16 @@ function InteractiveTerminalPanel({
           rememberTerminalRawMode(server.id, true);
           rememberTerminalRawAutoReturn(server.id, rawPtyAutoExitOnShellPromptRef.current);
           inputRef.current = "";
-        }
-        void write(`${command}\r`);
+          await invoke("write_interactive_ssh_terminal", {
+            // The local editor already displayed this first line. Enable
+            // remote echo only once the shell starts executing it.
+            sessionId: sessionRef.current, data: "stty echo; " + command + "\r",
+          });
+        } catch (reason) {
+          rawPtyModeRef.current = rawNativeEchoRef.current;
+          rememberTerminalRawMode(server.id, rawPtyModeRef.current);
+          setError(String(reason));
+        } finally { terminalOperationInFlight = false; }
       },
       askAi: (prompt) => {
         void askAi(prompt, false);
@@ -8835,10 +8731,33 @@ function InteractiveTerminalPanel({
       },
       pendingCommand: () => pendingRef.current,
       isBusy: () =>
-        terminalOperationInFlight || inlineApprovalResolverRef.current !== null,
+        terminalOperationInFlight || inlineApprovalResolverRef.current !== null || routeChoiceResolverRef.current !== null,
       onBusy: () =>
         render("\r\n\x1b[38;5;220mAI is still handling the previous request. Please wait.\x1b[0m\r\n"),
       looksLikeCommand: looksLikeShellCommand,
+      resolveUnknownCommand: async (line) => {
+        const name = executableName(line);
+        if (!name) return "ai";
+        if (discoveredCommands.has(name)) return "command";
+        terminalOperationInFlight = true;
+        try {
+          const found = await invoke<boolean>("probe_interactive_ssh_command", {
+            sessionId: sessionRef.current, name,
+          });
+          if (found) {
+            discoveredCommands.add(name);
+            return "command";
+          }
+        } catch (reason) {
+          void writeDebugLog("warn", "current shell command lookup unavailable", {
+            serverId: server.id, commandHead: name, reason: String(reason),
+          });
+        } finally { terminalOperationInFlight = false; }
+        return new Promise<"command" | "ai" | "cancel">((resolve) => {
+          routeChoiceResolverRef.current = resolve;
+          setRouteChoice(line);
+        });
+      },
       onCommand: (command) => {
         sessionContextRef.current.push({
           role: "user_command",
@@ -8928,7 +8847,7 @@ function InteractiveTerminalPanel({
         // program owning the terminal may be waiting for this exact byte
         // stream while the command runner is still collecting its output.
         void writeRawPtyInput(data);
-        if (rawMenuInputRef.current) {
+        if (rawMenuInputRef.current && !rawNativeEchoRef.current) {
           // The PTY is intentionally allocated with ECHO disabled for the
           // AI line editor. A menu program's `read` still accepts the choice,
           // but its digits are otherwise invisible. Echo only printable menu
@@ -8954,7 +8873,7 @@ function InteractiveTerminalPanel({
         }
         return;
       }
-      if (terminalOperationInFlight) {
+      if (terminalOperationInFlight || routeChoiceResolverRef.current !== null) {
         // The visible prompt is deliberately withheld while OpsNest orders
         // tool output and the AI conclusion. Do not let local keystrokes race
         // a late real prompt and create another same-line collision.
@@ -9073,6 +8992,9 @@ function InteractiveTerminalPanel({
     resize();
     return () => {
       disposed = true;
+      routeChoiceResolverRef.current?.("cancel");
+      routeChoiceResolverRef.current = null;
+      setRouteChoice(null);
       if (statusClearTimerRef.current !== undefined) {
         window.clearTimeout(statusClearTimerRef.current);
         statusClearTimerRef.current = undefined;
@@ -9186,6 +9108,13 @@ function InteractiveTerminalPanel({
   const stopWork = () => {
     stopHandlerRef.current?.();
   };
+  const chooseInputRoute = (route: "command" | "ai" | "cancel") => {
+    const resolve = routeChoiceResolverRef.current;
+    routeChoiceResolverRef.current = null;
+    setRouteChoice(null);
+    resolve?.(route);
+    termRef.current?.focus();
+  };
   return (
     <section className="interactive-terminal-panel">
       {workStatus && (
@@ -9255,6 +9184,18 @@ function InteractiveTerminalPanel({
         </div>
       )}
       <div ref={hostRef} className="interactive-terminal-host" />
+      {routeChoice && (
+        <div className="interactive-terminal-approval" role="dialog" aria-label="选择输入方式">
+          <div className="interactive-terminal-approval-title">未确认此服务器命令</div>
+          <p>可能尚未安装或当前终端无法找到，请选择如何处理这行输入。</p>
+          <pre>{routeChoice}</pre>
+          <div className="interactive-terminal-approval-actions">
+            <button className="primary" onClick={() => chooseInputRoute("command")}>作为命令执行</button>
+            <button className="secondary" onClick={() => chooseInputRoute("ai")}>交给 AI</button>
+            <button className="secondary" onClick={() => chooseInputRoute("cancel")}>取消</button>
+          </div>
+        </div>
+      )}
       {pendingApproval && (
         <div className="interactive-terminal-approval" role="alert">
           <div className="interactive-terminal-approval-title">

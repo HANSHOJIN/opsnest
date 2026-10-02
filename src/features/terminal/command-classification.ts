@@ -1,66 +1,166 @@
 const shellCommandNames = new Set([
-  "1pctl", "alias", "apt", "awk", "cat", "cd", "chmod", "chown", "clear", "cp", "curl", "df", "docker", "du", "echo", "env", "find", "git", "grep", "head", "hermes", "hostname", "journalctl", "kill", "less", "ls", "mkdir", "mv", "nginx", "openclaw", "opencode", "ping", "ps", "pwd", "rm", "sed", "ss", "ssh", "systemctl", "tail", "tar", "top", "touch", "uname", "uptime", "whoami",
+  "bash",
+  "sh",
+  "zsh",
+  "fish",
+  "dash",
+  "ash",
+  "cd",
+  "ls",
+  "pwd",
+  "cat",
+  "echo",
+  "printf",
+  "clear",
+  "history",
+  "find",
+  "grep",
+  "sed",
+  "awk",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "sort",
+  "uniq",
+  "cut",
+  "xargs",
+  "tee",
+  "touch",
+  "mkdir",
+  "cp",
+  "mv",
+  "rm",
+  "ln",
+  "chmod",
+  "chown",
+  "sudo",
+  "apt",
+  "apt-get",
+  "apk",
+  "yum",
+  "dnf",
+  "pacman",
+  "brew",
+  "docker",
+  "podman",
+  "systemctl",
+  "service",
+  "journalctl",
+  "ps",
+  "top",
+  "htop",
+  "kill",
+  "df",
+  "du",
+  "free",
+  "uname",
+  "hostname",
+  "whoami",
+  "id",
+  "env",
+  "export",
+  "source",
+  "set",
+  "ssh",
+  "scp",
+  "curl",
+  "wget",
+  "tar",
+  "zip",
+  "unzip",
+  "git",
+  "npm",
+  "pnpm",
+  "yarn",
+  "pip",
+  "python",
+  "python3",
+  "node",
+  "go",
+  "cargo",
+  "make",
+  "cmake",
+  "java",
+  "php",
+  "ruby",
+  "perl",
+  "openssl",
+  "vim",
+  "vi",
+  "nano",
+  "tmux",
+  "screen",
+  "hermes",
+  "openclaw",
+  "opencode",
+  "reboot",
+  "shutdown",
 ]);
 
 export function isLikelyShellCommand(input: string) {
-  const trimmed = input.trim();
-  const firstWord = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
-  if (shellCommandNames.has(firstWord)) return true;
-  // Bash users commonly type directory changes as `cd..`, `cd.` or `cd/`.
-  // These are still raw shell input (even when the remote shell later reports
-  // that the exact spelling is invalid), so never send them through the AI
-  // task/chat pipeline where an older task could influence the result.
-  if (/^cd(?:\s|[.~\/])/i.test(trimmed)) return true;
-  if (/^(sudo|doas)\s+\S+/.test(trimmed) || /^[.\/][\w./-]+/.test(trimmed) || /\|\s*[a-z][\w-]*|&&|;\s*[a-z][\w-]*/i.test(trimmed)) return true;
-  // Unknown third-party CLI commands such as hermes update stay raw SSH commands.
-  return /^[a-z_][\w.-]*\s+[\w./:@%+=~-]+(?:\s|$)/i.test(trimmed);
+  const value = input.trim();
+  if (!value) return false;
+  if (value.startsWith("/cmd ")) return true;
+  // A pasted shell block must stay on the PTY path.  In particular, brace
+  // groups and control structures are valid commands even when their first
+  // line is only `{`, `if`, or `for` and therefore cannot be recognized by a
+  // single-token command whitelist.
+  if (value.includes("\n")) {
+    const lines = value
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (
+      lines.some((line) => /^(?:\{|\}|\(|\)|if\b|then\b|elif\b|else\b|fi\b|for\b|while\b|until\b|do\b|done\b|case\b|esac\b)/.test(line))
+    )
+      return true;
+    const commandLines = lines.filter((line) => !/^(?:#|[{}()])/.test(line));
+    if (
+      commandLines.length > 1 &&
+      commandLines.every((line) => {
+        const first = line.split(/\s+/, 1)[0].toLowerCase();
+        return shellCommandNames.has(first) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(line);
+      })
+    )
+      return true;
+    // Do not let punctuation in arbitrary pasted prose (for example a
+    // Markdown table, quoted text, or a tab-indented document) route the whole
+    // block into the remote shell. A multiline block is a command only when
+    // its structure or each executable-looking line positively identifies it.
+    return false;
+  }
+  if (/^(?:[.!/~$][^\s]*|[A-Za-z]:\\[^\s]*)/.test(value)) return true;
+  if (/[|;&<>`]|	/.test(value)) return true;
+  const first = value.split(/\s+/, 1)[0].toLowerCase();
+  return shellCommandNames.has(first);
 }
 
-export function isInteractiveShellCommand(input: string) {
-  const normalized = input.trim().toLowerCase();
-  if (!normalized) return false;
-  const firstToken = normalized.split(/\s+/, 1)[0] ?? "";
-  const firstBase = firstToken.split("/").at(-1) ?? firstToken;
-  // 1Panel's management CLI asks for a destructive y/n confirmation during
-  // uninstall/remove. Keep both `1pctl` and `/usr/local/bin/1pctl` on the
-  // native PTY path so the answer never reaches the outer shell.
-  if (firstBase === "1pctl" && /\b(?:uninstall|remove|delete|purge|install|upgrade)\b/.test(normalized)) return true;
-  // Hermes owns the PTY and uses carriage returns/cursor movement for its live
-  // UI. It is commonly started as either `hermes` or `hermes chat`; support
-  // absolute paths too. Routing it through the line-oriented transcript
-  // renderer turns its layout into broken scrollback (the vertical 3/4/5...
-  // artefact users see when the command is launched directly).
-  if (["hermes", "openclaw", "opencode"].includes(firstBase)) return true;
-  if (/\b(?:vim|vi|nvim|nano|emacs|top|htop|btop|less|more|man|watch|fzf|dialog|whiptail|mysql|mariadb|psql|python|python3|ipython|node|bash|zsh|fish|sftp|ftp)\b/.test(normalized)) return true;
-  const words = normalized.split(/\s+/);
-  if (words[0] !== "sudo" && words[0] !== "doas") return false;
-  let index = 1;
-  let interactiveOption = false;
-  let command = "";
-  while (index < words.length) {
-    const word = words[index];
-    if (word === "--") {
-      index += 1;
-      command = words[index] || "";
+export function executableName(input: string): string | null {
+  const name = input.trim().split(/\s+/, 1)[0] ?? "";
+  return /^[A-Za-z_][A-Za-z0-9_.-]{0,127}$/.test(name) ? name : null;
+}
+
+// Native input does not depend on the executable's name. This only selects
+// whether a nested persistent shell should retain keyboard ownership.
+export function shouldAutoReturnToAi(input: string): boolean {
+  const words = input.trim().split(/\s+/);
+  let index = 0;
+  const base = (word: string) => word.split("/").at(-1) ?? word;
+  if (["sudo", "doas", "env", "command", "exec"].includes(base(words[0] ?? ""))) {
+    index = 1;
+    while (index < words.length) {
+      const word = words[index];
+      if (["-u", "-g", "-r", "-R", "-C"].includes(word)) { index += 2; continue; }
+      if (word.startsWith("-") || /^[A-Za-z_]\w*=/.test(word)) { index++; continue; }
       break;
     }
-    if (word === "-n" || word === "--non-interactive") return false;
-    if (word === "-i" || word === "--login" || word === "-s" || word === "--shell") {
-      interactiveOption = true;
-      index += 1;
-      continue;
-    }
-    if (word.startsWith("-")) {
-      // Skip the argument of the common sudo options that take one. This
-      // keeps `sudo -u root -i` and `sudo -u root bash` on the PTY path.
-      if (/^-([ugRPC])$/.test(word) && index + 1 < words.length) index += 2;
-      else index += 1;
-      continue;
-    }
-    command = word;
-    break;
+    if (index >= words.length) return false;
   }
-  if (interactiveOption) return true;
-  const commandBase = command.split("/").at(-1) ?? command;
-  return new Set(["su", "bash", "sh", "zsh", "fish", "tmux", "screen", "hermes", "openclaw", "opencode"]).has(commandBase);
+  const name = base(words[index] ?? "");
+  if (["tmux", "screen", "su"].includes(name)) return false;
+  if (!["bash", "sh", "zsh", "fish", "dash", "ash"].includes(name)) return true;
+  const args = words.slice(index + 1);
+  if (args.some(arg => /^-[^-]*c/.test(arg) || arg === "--command")) return true;
+  return args.some(arg => !arg.startsWith("-"));
 }

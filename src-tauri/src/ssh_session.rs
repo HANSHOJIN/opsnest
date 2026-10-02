@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -61,6 +61,7 @@ fn sessions() -> &'static Mutex<HashMap<String, Arc<Session>>> {
 }
 
 struct InteractiveShell {
+    quiet_query: AtomicBool,
     app: AppHandle,
     // Keep the credentials associated with the already-open PTY in backend
     // memory. AI read-only tools can open a short-lived SFTP/scan connection
@@ -357,7 +358,7 @@ pub fn session_context(session_id: &str, max_chars: usize) -> String {
         // Marker lines are an internal synchronization detail of the PTY command
         // runner. Keep the surrounding output for the model, but never expose
         // the opaque marker token itself as useful terminal context.
-        let mut text = event.text.clone();
+        let mut text = strip_terminal_control_sequences(&event.text);
         for prefix in ["__OPSNEST_INTERACTIVE_START_", "__OPSNEST_INTERACTIVE_END_"] {
             while let Some(start) = text.find(prefix) {
                 let remainder = &text[start + prefix.len()..];
@@ -584,6 +585,7 @@ pub async fn open_interactive_ssh_terminal(
         .await
         .map_err(|error| error.to_string())?;
     let shell = Arc::new(InteractiveShell {
+        quiet_query: AtomicBool::new(false),
         app: app.clone(),
         request: request.clone(),
         writer: tokio::sync::Mutex::new(writer),
@@ -605,6 +607,10 @@ pub async fn open_interactive_ssh_terminal(
                     let text = String::from_utf8_lossy(&data).into_owned();
                     if let Ok(mut output) = shell.output.lock() {
                         output.extend_from_slice(&data);
+                    }
+                    if shell.quiet_query.load(Ordering::Acquire) {
+                        shell.notify.notify_waiters();
+                        continue;
                     }
                     append_blackboard(&shell, "terminal_output", text.clone());
                     let _ = app.emit(
@@ -849,6 +855,88 @@ fn completion_record(text: &str, marker: &str) -> Option<(usize, i32)> {
     let end = tail.find('\n')?;
     let code = tail[..end].trim_end_matches('\r').parse::<i32>().ok()?;
     Some((index, code))
+}
+
+struct QuietQuery<'a>(&'a AtomicBool);
+impl Drop for QuietQuery<'_> {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+}
+
+fn observed_shell_prompt(text: &str) -> Option<String> {
+    let plain = strip_terminal_control_sequences(text);
+    let tail = plain.rsplit('\n').next()?.trim_matches('\r').trim_end();
+    if !tail.is_empty() && tail.len() < 240
+        && tail.ends_with(['#', '$', '%', '❯', '➜'])
+    {
+        Some(tail.to_string())
+    } else { None }
+}
+
+/// Run only fixed housekeeping queries in the actual PTY. Never open another
+/// login session: PATH, aliases and functions belong to this shell.
+async fn query_current_shell(session_id: &str, query: &str) -> Result<i32, String> {
+    let shell = interactive().lock().map_err(|_| "SSH terminal lock failed")?
+        .get(session_id).cloned().ok_or("SSH terminal is not connected")?;
+    let _execution = tokio::time::timeout(Duration::from_secs(3), shell.execution.lock())
+        .await.map_err(|_| "Terminal is busy; command discovery deferred")?;
+    let (start, prompt) = {
+        let output = shell.output.lock().map_err(|_| "SSH output lock failed")?;
+        let prompt = observed_shell_prompt(&String::from_utf8_lossy(&output))
+            .ok_or("The shell has not returned to a prompt")?;
+        (output.len(), prompt)
+    };
+    let token = format!("__OPSNEST_QUERY_{}__", SystemTime::now()
+        .duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
+    shell.quiet_query.store(true, Ordering::Release);
+    let _quiet = QuietQuery(&shell.quiet_query);
+    shell.writer.lock().await.data_bytes(
+        format!("{query}; printf '\\n{token} rc=%s\\n' \"$?\"\n").into_bytes()
+    ).await.map_err(|error| error.to_string())?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let text = {
+            let output = shell.output.lock().map_err(|_| "SSH output lock failed")?;
+            String::from_utf8_lossy(&output[start..]).into_owned()
+        };
+        if let Some((index, code)) = completion_record(&text, &token) {
+            // Consume the real prompt too, so a late query prompt cannot
+            // release keyboard ownership of the user's next command.
+            let tail = &text[index..];
+            if observed_shell_prompt(tail).as_deref() == Some(prompt.as_str()) {
+                return Ok(code);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("Current-shell query did not return its prompt".into());
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(50), shell.notify.notified()).await;
+    }
+}
+
+#[tauri::command]
+pub async fn probe_interactive_ssh_command(session_id: String, name: String) -> Result<bool, String> {
+    if name.is_empty() || name.len() > 128
+        || !name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+        || name.starts_with('-')
+    { return Err("Invalid executable name".into()); }
+    let query = format!("command -v '{name}' >/dev/null 2>&1");
+    Ok(query_current_shell(&session_id, &query).await? == 0)
+}
+
+#[tauri::command]
+pub async fn set_interactive_ssh_native_input(session_id: String, enabled: bool) -> Result<Option<String>, String> {
+    // A private OSC suffix in the parent shell's PS1 proves the shell itself
+    // is ready; a program printing a lookalike prompt must retain input.
+    let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let token = format!("\u{1b}]777;opsnest-native-{id}\u{7}");
+    let query = if enabled {
+        format!("if [ \"${{__OPSNEST_NATIVE_ACTIVE-}}\" != 1 ]; then __OPSNEST_NATIVE_PS1=\"${{PS1-}}\"; fi; __OPSNEST_NATIVE_ACTIVE=1; __OPSNEST_NATIVE_MARKER=$(printf '\\033]777;opsnest-native-{id}\\007'); if [ -n \"${{BASH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}\\\\[${{__OPSNEST_NATIVE_MARKER}}\\\\]\"; elif [ -n \"${{ZSH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}%{{${{__OPSNEST_NATIVE_MARKER}}%}}\"; else PS1=\"${{__OPSNEST_NATIVE_PS1}}${{__OPSNEST_NATIVE_MARKER}}\"; fi; stty -echo")
+    } else {
+        "if [ \"${__OPSNEST_NATIVE_ACTIVE-}\" = 1 ]; then PS1=\"$__OPSNEST_NATIVE_PS1\"; unset __OPSNEST_NATIVE_ACTIVE __OPSNEST_NATIVE_PS1 __OPSNEST_NATIVE_MARKER; fi; stty -echo".to_string()
+    };
+    let code = query_current_shell(&session_id, &query).await?;
+    if code != 0 { return Err("Unable to switch terminal echo mode".into()); }
+    Ok(enabled.then_some(token))
 }
 
 fn command_result_error(error: impl ToString) -> String {
@@ -1353,6 +1441,12 @@ pub async fn close_ssh_session(session_id: String) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn query_completion_waits_for_prompt_and_handles_ansi() {
+        assert_eq!(super::observed_shell_prompt("result\r\n\x1b[32mroot@router:~#\x1b[0m "), Some("root@router:~#".into()));
+        assert_eq!(super::observed_shell_prompt("__OPSNEST_QUERY__ rc=0\n"), None);
+        assert_eq!(super::observed_shell_prompt("menu choice [1-4]: "), None);
+    }
     use super::{detect_cwd_from_terminal_output, redact_sensitive_text};
 
     #[test]
