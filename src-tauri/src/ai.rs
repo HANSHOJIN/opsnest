@@ -131,6 +131,8 @@ pub struct AiToolChatRequest {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiSshRequest {
+    #[serde(default)]
+    pub allow_terminal_handoff: bool,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -157,6 +159,16 @@ pub struct AiSshRequest {
 }
 
 const FALLBACK_AI_CONTEXT_TOKENS: usize = 32_000;
+// The model may route original input, never generate a replacement command.
+fn valid_terminal_handoff(allowed: bool, tool_calls: u32, original: &str, command: &str) -> bool {
+    let command = command.trim();
+    if !allowed || tool_calls != 0 || command.is_empty() || command != original.trim() {
+        return false;
+    }
+    let head = command.split_whitespace().next().unwrap_or_default();
+    head.is_ascii() && head.bytes().all(|b| b.is_ascii_alphanumeric() || b"_./~-=;".contains(&b))
+        && !head.eq_ignore_ascii_case("/ai") && !head.eq_ignore_ascii_case("/cmd")
+}
 const MIN_AI_CONTEXT_CHARS: usize = 12_000;
 const MAX_AI_CONTEXT_CHARS: usize = 1_500_000;
 
@@ -1103,7 +1115,17 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
         request.prompt.clone(),
     );
     let tool_registry = crate::tools::default_registry();
-    let tool_schemas = tool_registry.schemas();
+    let mut tool_schemas = tool_registry.schemas();
+    let handoff_allowed = request.allow_terminal_handoff && !request.approved && request.approved_command.is_none();
+    if handoff_allowed {
+        tool_schemas.as_array_mut().expect("tool schemas array").push(serde_json::json!({
+            "type":"function", "function": {
+                "name":"return_to_terminal",
+                "description":"Return a mistakenly intercepted literal shell command to the user's native terminal, unchanged, before any other tool is requested.",
+                "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}
+            }
+        }));
+    }
     let context = request
         .context
         .unwrap_or_else(|| "当前服务器上下文未提供。".to_string());
@@ -1127,6 +1149,9 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
     } else {
         system
     };
+    let system = if handoff_allowed {
+        format!("{system}\n当前输入来自终端自动分流。若用户输入本身是 Shell 命令而不是让 AI 帮助完成任务的自然语言，请在调用其他工具之前调用 return_to_terminal，把本次用户输入原文交回原生终端。不得改写、补充命令，不得使用历史命令，不得声称已执行。不要把自然语言请求转换成命令后交回。")
+    } else { system };
     let mut messages = vec![serde_json::json!({"role":"system","content":system})];
     for (role, content) in conversation_history {
         messages.push(serde_json::json!({"role": role, "content": content}));
@@ -1338,16 +1363,27 @@ pub async fn ai_ssh_chat(request: AiSshRequest) -> Result<String, String> {
                 .and_then(|function| function.get("name"))
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let tool_kind = tool_registry
-                .get(tool_name)
-                .map(|tool| tool.kind)
-                .ok_or_else(|| format!("AI requested an unknown tool: {tool_name}"))?;
             let arguments = call
                 .get("function")
                 .and_then(|function| function.get("arguments"))
                 .and_then(Value::as_str)
                 .and_then(|value| serde_json::from_str::<Value>(value).ok())
                 .unwrap_or_default();
+            if tool_name == "return_to_terminal" {
+                let command = arguments.get("command").and_then(Value::as_str).unwrap_or_default();
+                if !valid_terminal_handoff(handoff_allowed, workflow.tool_calls, &request.prompt, command)
+                    || !executed.is_empty() || !ui_actions.is_empty()
+                {
+                    return Err("AI 退回终端被拒绝：只允许在任何工具执行前退回本次输入原文。".into());
+                }
+                workflow.complete();
+                record_agent_phase(&request.session_id, &workflow);
+                return Ok(serde_json::json!({"status":"terminal_handoff","command":request.prompt.trim(),"executed":[],"uiActions":[]}).to_string());
+            }
+            let tool_kind = tool_registry
+                .get(tool_name)
+                .map(|tool| tool.kind)
+                .ok_or_else(|| format!("AI requested an unknown tool: {tool_name}"))?;
             if matches!(
                 tool_kind,
                 ToolKind::OpenFileManager | ToolKind::OpenFileEditor
@@ -2025,6 +2061,16 @@ fn execute_opsnest_ui_tool(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_handoff_only_routes_original_before_tools() {
+        assert!(super::valid_terminal_handoff(true, 0, "bash -c 'echo ok'", "bash -c 'echo ok'"));
+        assert!(super::valid_terminal_handoff(true, 0, "./cmehers chat", "./cmehers chat"));
+        assert!(!super::valid_terminal_handoff(false, 0, "bash", "bash"));
+        assert!(!super::valid_terminal_handoff(true, 1, "bash", "bash"));
+        assert!(!super::valid_terminal_handoff(true, 0, "bash", "bash -c 'echo ok'"));
+        assert!(!super::valid_terminal_handoff(true, 0, "检查服务器", "检查服务器"));
+        assert!(!super::valid_terminal_handoff(true, 0, "/AI bash", "/AI bash"));
+    }
     #[test]
     fn activity_description_identifies_target_without_file_contents_or_credentials() {
         let description = super::tool_activity_description("workspace_write_file", &serde_json::json!({

@@ -1,12 +1,12 @@
 export type TerminalDispatchContext = {
   writeCommand: (command: string) => void | Promise<void>;
-  askAi: (prompt: string) => void;
+  askAi: (prompt: string, allowTerminalHandoff: boolean) => void;
   approve: (command: string) => void;
   pendingCommand: () => string | null;
   isBusy?: () => boolean;
   onBusy?: () => void;
   looksLikeCommand: (value: string) => boolean;
-  resolveUnknownCommand?: (value: string) => Promise<"command" | "ai" | "cancel">;
+  resolveUnknownCommand?: (value: string) => Promise<"command" | "ai" | "auto-ai" | "cancel">;
   onCommand: (command: string) => void;
 };
 
@@ -26,8 +26,9 @@ export class TerminalDispatcher {
       this.context.onBusy?.();
       return;
     }
-    const forcedAi = trimmed === "/ai" || trimmed.startsWith("/ai ");
-    const forcedCommand = trimmed === "/cmd" || trimmed.startsWith("/cmd ");
+    const forcedAi = /^\/ai(?:\s|$)/i.test(trimmed);
+    const forcedCommand = /^\/cmd(?:\s|$)/i.test(trimmed);
+    let allowTerminalHandoff = !forcedAi;
     const command = forcedCommand ? trimmed.slice(4).trim() : trimmed;
     if (forcedCommand) {
       if (command) {
@@ -45,6 +46,7 @@ export class TerminalDispatcher {
       this.resolving = true;
       try {
         const route = await this.context.resolveUnknownCommand(trimmed);
+        if (route === "ai") allowTerminalHandoff = false;
         if (route === "cancel") return;
         if (route === "command") {
           this.context.onCommand(command);
@@ -54,6 +56,6 @@ export class TerminalDispatcher {
       } finally { this.resolving = false; }
     }
     const prompt = forcedAi ? trimmed.slice(3).trim() : trimmed;
-    if (prompt) this.context.askAi(prompt);
+    if (prompt) this.context.askAi(prompt, allowTerminalHandoff);
   }
 }

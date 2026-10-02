@@ -33,7 +33,7 @@ function scenario(route) {
   const actions = [];
   const dispatcher = new TerminalDispatcher({
     writeCommand: async command => actions.push(["ssh", command]),
-    askAi: prompt => actions.push(["ai", prompt]),
+    askAi: (prompt, handoff) => actions.push(["ai", prompt, handoff]),
     approve: () => {},
     pendingCommand: () => null,
     onCommand: () => {},
@@ -58,13 +58,18 @@ function scenario(route) {
 {
   const { dispatcher, actions } = scenario("ai");
   await dispatcher.dispatch("question");
-  assert.deepEqual(actions, [["lookup", "question"], ["ai", "question"]]);
+  assert.deepEqual(actions, [["lookup", "question"], ["ai", "question", false]]);
 }
 {
   const { dispatcher, actions } = scenario("cancel");
-  await dispatcher.dispatch("/cmd cmehers");
-  await dispatcher.dispatch("/ai 检查服务器");
-  assert.deepEqual(actions, [["ssh", "cmehers"], ["ai", "检查服务器"]]);
+  await dispatcher.dispatch("/CMD cmehers");
+  await dispatcher.dispatch("/AI 检查服务器");
+  assert.deepEqual(actions, [["ssh", "cmehers"], ["ai", "检查服务器", false]]);
+}
+{
+  const { dispatcher, actions } = scenario("auto-ai");
+  await dispatcher.dispatch("检查服务器");
+  assert.deepEqual(actions, [["lookup", null], ["ai", "检查服务器", true]]);
 }
 {
   const { dispatcher, actions } = scenario("cancel");

@@ -47,6 +47,19 @@ The screenshots below use fictional demo servers and addresses for illustration 
 2. **Specialized home pages**: each terminal connection is automatically identified according to its capabilities as a general Linux server, an OpenWrt router, or a NAS. OpsNest then presents the appropriate home-page design. For example, a router home page can show connection counts and other router-specific information.
 3. **Service discovery**: automatically scans ports that expose Web services and presents them as quick-open cards. Open a service with one click instead of remembering every port number, and add custom entries when needed.
 
+## SSH terminal tips
+
+The terminal distinguishes shell commands from natural-language requests and checks commands in the current server shell. If the route is uncertain, choose to execute the input as a command or send it to AI. At a shell prompt, you can also use these case-insensitive prefixes:
+
+- `/CMD original-command`: bypass AI routing and send the original command directly to the SSH terminal. Examples: `/CMD bash ./install.sh` or `/CMD cmehers chat`. Use this for menu scripts, interactive tools, and newly installed programs. OpsNest handles the prefix locally; it is not sent to the server.
+- `/AI request`: explicitly ask AI to handle a task, such as `/AI Check the server's disk space`.
+
+Once a script displays a menu, type an option such as `1` or `2` and press Enter without adding `/CMD`. At a password prompt, enter the password directly; hidden characters are normal. Automatic command/AI routing resumes after the interactive tool exits back to the shell. Trailing newlines in pasted content do not submit it automatically; press Enter yourself.
+
+If AI mistakenly intercepts a command, stop AI, wait for the shell prompt, and rerun it with `/CMD original-command`. First check whether AI has already executed it to avoid repeating an installation or modification. Before calling any tool, AI can also hand mistakenly intercepted input back to the `/CMD` path unchanged. Explicit `/AI` requests and inputs manually assigned to AI are not automatically handed back.
+
+`/CMD` runs commands directly, without AI command review. Check their source and contents, especially installation scripts and commands that delete or overwrite data.
+
 ## Development goals
 
 - More terminal types and more product-specific home pages

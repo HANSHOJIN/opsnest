@@ -7790,7 +7790,7 @@ function InteractiveTerminalPanel({
       }
       return true;
     });
-    const askAi = async (prompt: string, approved: boolean) => {
+    const askAi = async (prompt: string, approved: boolean, allowTerminalHandoff = false) => {
       if (terminalOperationInFlight) {
         render("\r\n\x1b[38;5;220mAI is still handling the previous request. Please wait.\x1b[0m\r\n");
         return;
@@ -7864,6 +7864,7 @@ function InteractiveTerminalPanel({
             serverId: server.id,
             prompt,
             approved,
+            allowTerminalHandoff,
             context,
             contextLength: currentModel.contextLength,
             sudoPassword,
@@ -7915,6 +7916,17 @@ function InteractiveTerminalPanel({
             formatAiConclusion("已停止", term.cols, "stopped"),
             true,
           );
+          return;
+        }
+        if (result.status === "terminal_handoff") {
+          if (!allowTerminalHandoff || aiOperationHadTools || result.executed?.length || result.uiActions?.length
+              || !result.command?.trim() || result.command.trim() !== prompt.trim()) {
+            throw new Error("AI 退回终端校验失败，未执行命令。");
+          }
+          resetAiOrchestration();
+          updateWorkStatus("done", "已转交原生终端", false);
+          render("\r\n已识别为命令，按 /CMD 路径转交终端执行。\r\n");
+          await dispatcher.dispatch(`/CMD ${result.command}`);
           return;
         }
         for (const action of result.uiActions ?? [])
@@ -8721,8 +8733,8 @@ function InteractiveTerminalPanel({
           setError(String(reason));
         } finally { terminalOperationInFlight = false; }
       },
-      askAi: (prompt) => {
-        void askAi(prompt, false);
+      askAi: (prompt, allowTerminalHandoff) => {
+        void askAi(prompt, false, allowTerminalHandoff);
       },
       approve: (command) => {
         pendingRef.current = null;
@@ -8737,7 +8749,7 @@ function InteractiveTerminalPanel({
       looksLikeCommand: looksLikeShellCommand,
       resolveUnknownCommand: async (line) => {
         const name = executableName(line);
-        if (!name) return "ai";
+        if (!name) return "auto-ai";
         if (discoveredCommands.has(name)) return "command";
         terminalOperationInFlight = true;
         try {
