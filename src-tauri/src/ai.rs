@@ -1,4 +1,5 @@
 use crate::{agent_workflow::AgentTurn, file_manager, ssh_scan, ssh_session, tools::ToolKind};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -1789,11 +1790,125 @@ fn safe_result_summary(output: &str, fallback: &str) -> String {
         .unwrap_or(fallback).chars().take(180).collect()
 }
 
+/// Some OpenCode-compatible models emit DeepSeek's DSML tool-call protocol in
+/// the assistant's text instead of the OpenAI `tool_calls` field. Convert that
+/// wire format at the backend boundary so the protocol markup never reaches
+/// the terminal UI or the conversation history.
+fn normalize_dsml_tool_calls(content: &str) -> Option<(String, Vec<Value>)> {
+    let normalized = content
+        .replace('｜', "|")
+        .replace('＜', "<")
+        .replace('＞', ">");
+    if !normalized.contains("DSML")
+        || !normalized.contains("invoke")
+        || !normalized.trim_start().starts_with("<|DSML")
+    {
+        return None;
+    }
+    let invoke_re = Regex::new(
+        r#"(?s)<\|\s*(?:DSML\s*\|\s*>\s*)?<\|\s*invoke\s+name\s*=\s*[\"']([^\"']+)[\"'][^>]*>"#,
+    )
+    .expect("DSML invoke pattern should compile");
+    let parameter_re = Regex::new(
+        r#"<\|\s*parameter\s+name\s*=\s*[\"']([^\"']+)[\"']([^>]*)>"#,
+    )
+    .expect("DSML parameter pattern should compile");
+    let matches = invoke_re.captures_iter(&normalized).collect::<Vec<_>>();
+    if matches.is_empty() {
+        return None;
+    }
+    let mut calls = Vec::new();
+    let mut ranges = Vec::new();
+    for (index, invoke_match) in matches.iter().enumerate() {
+        let segment_end = matches
+            .get(index + 1)
+            .map(|next| next.get(0).expect("DSML invoke match should exist").start())
+            .or_else(|| {
+                let invoke_end = invoke_match.get(0).expect("DSML invoke match should exist").end();
+                normalized[invoke_end..]
+                    .find("/function_calls")
+                    .map(|offset| invoke_end + offset)
+                    .or_else(|| {
+                        normalized[invoke_end..]
+                            .find("/calls")
+                            .map(|offset| invoke_end + offset)
+                    })
+            })
+            .unwrap_or(normalized.len());
+        let invoke = invoke_match.get(0).expect("DSML invoke match should exist");
+        let segment = &normalized[invoke.end()..segment_end];
+        let mut arguments = serde_json::Map::new();
+        for parameter in parameter_re.captures_iter(segment) {
+            let name = parameter.get(1).map(|value| value.as_str().trim()).unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let attributes = parameter.get(2).map(|value| value.as_str()).unwrap_or_default();
+            let value_start = parameter.get(0).map(|value| value.end()).unwrap_or(0);
+            let remainder = &segment[value_start..];
+            let value_end = remainder.find("<|").unwrap_or(remainder.len());
+            let raw_value = remainder[..value_end].trim();
+            let value = if attributes.contains("string=\"false\"")
+                || attributes.contains("string='false'")
+            {
+                serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_string()))
+            } else {
+                Value::String(raw_value.to_string())
+            };
+            arguments.insert(name.to_string(), value);
+        }
+        let name = invoke_match
+            .get(1)
+            .map(|value| value.as_str().trim())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        calls.push(serde_json::json!({
+            "id": format!("opsnest-dsml-call-{}", index + 1),
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": serde_json::Value::Object(arguments).to_string(),
+            }
+        }));
+        let mut range_end = segment_end;
+        if let Some(close) = normalized[segment_end..].find(">") {
+            range_end = (segment_end + close + 1).min(normalized.len());
+        }
+        ranges.push((invoke.start(), range_end));
+    }
+    if calls.is_empty() {
+        return None;
+    }
+    let mut visible = normalized;
+    for (start, end) in ranges.into_iter().rev() {
+        visible.replace_range(start..end, "");
+    }
+    let wrapper_re = Regex::new(
+        r#"<\|\s*/?\s*(?:DSML|function_calls|calls)\s*\|?\s*>"#,
+    )
+    .expect("DSML wrapper pattern should compile");
+    let visible = wrapper_re.replace_all(&visible, "").trim().to_string();
+    Some((visible, calls))
+}
+
 /// Providers occasionally return a tool call without an id (or reuse the same
 /// id for two calls). Such an assistant message cannot be followed by valid
 /// `tool_call_id` messages. Normalize it before it enters the conversation so
 /// the next request remains a valid tool-call transaction.
 fn normalize_assistant_message(mut message: Value) -> Result<Value, String> {
+    if let Some(content) = message.get("content").and_then(Value::as_str) {
+        if let Some((visible, calls)) = normalize_dsml_tool_calls(content) {
+            message["content"] = Value::String(visible);
+            let existing = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            message["tool_calls"] = Value::Array(existing.into_iter().chain(calls).collect());
+        }
+    }
     let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
         return Ok(message);
     };
@@ -2175,6 +2290,33 @@ mod tests {
         assert!(ids.iter().all(|id| !id.is_empty()));
         assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), 3);
         assert_eq!(normalized["tool_calls"][0]["function"]["arguments"], "{}");
+    }
+
+    #[test]
+    fn converts_dsml_tool_call_text_to_internal_call() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "<|DSML|><|function_calls>\n<|DSML|><|invoke name=\"run_command\">\n<|DSML|><|parameter name=\"command\" string=\"true\">systemctl is-active hermes-gateway<|DSML|>\n<|DSML|><|/invoke>\n<|DSML|><|/function_calls>"
+        });
+        let normalized = normalize_assistant_message(message).expect("DSML should normalize");
+        assert_eq!(normalized["content"], "");
+        assert_eq!(normalized["tool_calls"][0]["function"]["name"], "run_command");
+        assert_eq!(
+            normalized["tool_calls"][0]["function"]["arguments"],
+            "{\"command\":\"systemctl is-active hermes-gateway\"}"
+        );
+    }
+
+    #[test]
+    fn converts_dsml_calls_wrapper_variant_and_fullwidth_tokens() {
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": "<｜DSML｜><｜calls｜>\n<｜DSML｜><｜invoke name=\"run_command\">\n<｜DSML｜><｜parameter name=\"command\" string=\"true\">echo hello<｜/DSML｜><｜parameter｜>\n<｜/DSML｜><｜invoke｜>\n<｜/DSML｜><｜/calls｜>\n命令已准备执行。"
+        });
+        let normalized = normalize_assistant_message(message).expect("DSML calls should normalize");
+        assert_eq!(normalized["content"], "命令已准备执行。");
+        assert_eq!(normalized["tool_calls"][0]["function"]["name"], "run_command");
+        assert_eq!(normalized["tool_calls"][0]["function"]["arguments"], "{\"command\":\"echo hello\"}");
     }
 
     #[test]
