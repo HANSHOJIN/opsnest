@@ -7665,11 +7665,18 @@ function InteractiveTerminalPanel({
         sessionId: sessionRef.current,
         data,
       }).catch((reason) => setError(String(reason)));
-    const writeRawPtyInput = (data: string) =>
-      invoke("write_interactive_ssh_terminal_input", {
-        sessionId: sessionRef.current,
-        data,
-      }).catch((reason) => setError(String(reason)));
+    const writeRawPtyInput = async (data: string) => {
+      try {
+        await invoke("write_interactive_ssh_terminal_input", {
+          sessionId: sessionRef.current,
+          data,
+        });
+        return true;
+      } catch (reason) {
+        setError(String(reason));
+        return false;
+      }
+    };
     let keyBackspaceHandled = false;
     const eraseInputCharacter = () => {
       const characters = Array.from(inputRef.current);
@@ -8606,7 +8613,8 @@ function InteractiveTerminalPanel({
           // split PTY chunks, then restore the AI editor so the next message
           // is not accidentally executed by Bash.
           const shellPromptReturned = nativePromptTokenRef.current
-            ? rawPtyShellOutputTailRef.current.includes(nativePromptTokenRef.current)
+            ? rawPtyShellOutputTailRef.current.includes(nativePromptTokenRef.current) ||
+              endsWithRemoteShellPrompt(rawPtyShellOutputTailRef.current)
             : endsWithRemoteShellPrompt(rawPtyShellOutputTailRef.current);
           if (
             shellPromptReturned &&
@@ -8627,13 +8635,29 @@ function InteractiveTerminalPanel({
               rawNativeEchoRef.current = false;
               nativePromptTokenRef.current = "";
               window.sessionStorage.removeItem("opsnest-native-prompt:" + server.id);
-            }).catch((reason) => {
-              // Keep input native if echo could not be restored; never
-              // double-echo local input while the remote shell still echoes.
-              rawPtyModeRef.current = true;
-              rawPtyAutoExitOnShellPromptRef.current = false;
-              rememberTerminalRawMode(server.id, true);
-              rememberTerminalRawAutoReturn(server.id, false);
+            }).catch(async (reason) => {
+              // The command already returned to the parent shell. If the
+              // housekeeping query missed its prompt, make one last direct
+              // attempt to leave the AI editor's echo mode before releasing
+              // native ownership; otherwise the next `sudo`/`su` inherits an
+              // invisible line editor and Ctrl+C appears to do nothing.
+              const recovered = await writeRawPtyInput("stty -echo\r");
+              if (recovered) {
+                rawNativeEchoRef.current = false;
+                nativePromptTokenRef.current = "";
+                window.sessionStorage.removeItem("opsnest-native-prompt:" + server.id);
+                rawPtyModeRef.current = false;
+                rawPtyAutoExitOnShellPromptRef.current = false;
+                rememberTerminalRawMode(server.id, false);
+                rememberTerminalRawAutoReturn(server.id, false);
+              } else {
+                // Keep input native if echo could not be restored; never
+                // double-echo local input while the remote shell still echoes.
+                rawPtyModeRef.current = true;
+                rawPtyAutoExitOnShellPromptRef.current = false;
+                rememberTerminalRawMode(server.id, true);
+                rememberTerminalRawAutoReturn(server.id, false);
+              }
               setError(String(reason));
             }).finally(() => { terminalOperationInFlight = false; });
             void writeDebugLog("info", "AI-SSH raw PTY returned to AI input mode", {
@@ -8963,7 +8987,8 @@ function InteractiveTerminalPanel({
         inputRef.current = "";
         rawMenuInputRef.current = false;
         rawMenuPromptTail = "";
-        void write("\x03");
+        if (rawPtyModeRef.current) void writeRawPtyInput("\x03");
+        else void write("\x03");
         if (rawPtyModeRef.current) rawPtyExitRequestedRef.current = true;
         return;
       }
