@@ -543,6 +543,7 @@ pub struct OpenCodeGoModel {
 }
 
 const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go/v1";
+const COMMANDCODE_BASE_URL: &str = "https://api.commandcode.ai/provider/v1";
 
 fn opencode_go_protocol(model: &str) -> Option<OpenCodeGoProtocol> {
     let model = model.trim();
@@ -590,6 +591,25 @@ fn opencode_go_protocol(model: &str) -> Option<OpenCodeGoProtocol> {
     } else if RESPONSES_MODELS.contains(&model) {
         Some(OpenCodeGoProtocol::Responses)
     } else if MESSAGES_MODELS.contains(&model) {
+        Some(OpenCodeGoProtocol::Messages)
+    } else {
+        None
+    }
+}
+
+fn commandcode_protocol_from_item(item: &Value) -> Option<OpenCodeGoProtocol> {
+    let endpoints = item
+        .get("supported_endpoints")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    if endpoints.iter().any(|endpoint| endpoint.contains("chat/completions") || endpoint.contains("chat_completions")) {
+        Some(OpenCodeGoProtocol::ChatCompletions)
+    } else if endpoints.iter().any(|endpoint| endpoint.contains("responses")) {
+        Some(OpenCodeGoProtocol::Responses)
+    } else if endpoints.iter().any(|endpoint| endpoint.contains("messages")) {
         Some(OpenCodeGoProtocol::Messages)
     } else {
         None
@@ -822,22 +842,36 @@ async fn post_chat(
     timeout: Duration,
     mut cancel: Option<&mut oneshot::Receiver<()>>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(timeout)
+    let is_opencode_go = provider == "opencode-go";
+    let is_commandcode = provider == "commandcode";
+    let mut client_builder = reqwest::Client::builder().timeout(timeout);
+    // Keep the OpenCode Go workaround scoped to that provider. Other
+    // providers use the client's default transport configuration.
+    if is_opencode_go {
+        client_builder = client_builder.http1_only();
+    }
+    let client = client_builder
         .build()
         .map_err(|error| error.to_string())?;
-    let is_opencode_go = provider == "opencode-go";
     let protocol = if is_opencode_go {
         opencode_go_protocol(model)
             .ok_or_else(|| format!("OpenCode Go has no verified API route for model `{model}`. Refresh the model list or select a supported model."))?
+    } else if is_commandcode {
+        match api_mode.unwrap_or("chat-completions") {
+            "responses" => OpenCodeGoProtocol::Responses,
+            "messages" => OpenCodeGoProtocol::Messages,
+            _ => OpenCodeGoProtocol::ChatCompletions,
+        }
     } else if provider == "openai" && api_mode == Some("responses") {
         OpenCodeGoProtocol::Responses
     } else {
         OpenCodeGoProtocol::ChatCompletions
     };
-    let (url, request_body) = if is_opencode_go || matches!(protocol, OpenCodeGoProtocol::Responses) {
+    let (url, request_body) = if is_opencode_go || is_commandcode || matches!(protocol, OpenCodeGoProtocol::Responses) {
         let url = if is_opencode_go {
             format!("{OPENCODE_GO_BASE_URL}/{}", protocol.endpoint())
+        } else if is_commandcode {
+            format!("{COMMANDCODE_BASE_URL}/{}", protocol.endpoint())
         } else {
             format!("{}/{}", base_url.trim().trim_end_matches('/'), protocol.endpoint())
         };
@@ -857,7 +891,7 @@ async fn post_chat(
         (format!("{}/chat/completions", base_url.trim().trim_end_matches('/')), body)
     };
     let mut call = client.post(url).json(&request_body);
-    if is_opencode_go {
+    if is_opencode_go || is_commandcode {
         call = call
             .bearer_auth(api_key.trim())
             .header(reqwest::header::USER_AGENT, format!("OpsNest/{}", env!("CARGO_PKG_VERSION")))
@@ -872,11 +906,11 @@ async fn post_chat(
     }
     let response = if let Some(cancel) = cancel.as_deref_mut() {
         tokio::select! {
-            result = call.send() => result.map_err(|error| error.to_string())?,
+            result = call.send() => result.map_err(provider_transport_error)?,
             _ = cancel => return Err("AI-SSH request cancelled".into()),
         }
     } else {
-        call.send().await.map_err(|error| error.to_string())?
+        call.send().await.map_err(provider_transport_error)?
     };
     let status = response.status();
     let raw = if let Some(cancel) = cancel.as_deref_mut() {
@@ -894,9 +928,9 @@ async fn post_chat(
             raw.chars().take(600).collect::<String>()
         ));
     }
-    if is_opencode_go || matches!(protocol, OpenCodeGoProtocol::Responses) {
+    if is_opencode_go || is_commandcode || matches!(protocol, OpenCodeGoProtocol::Responses) {
         let payload: Value = serde_json::from_str(&raw)
-            .map_err(|error| format!("Invalid OpenCode Go response: {error}"))?;
+            .map_err(|error| format!("Invalid provider response: {error}"))?;
         let normalized = match protocol {
             OpenCodeGoProtocol::ChatCompletions => payload,
             OpenCodeGoProtocol::Responses => normalize_responses_response(&payload),
@@ -940,6 +974,78 @@ pub async fn fetch_opencode_go_models(api_key: String) -> Result<Vec<OpenCodeGoM
     models.dedup_by(|left, right| left.id == right.id);
     if models.is_empty() { return Err("OpenCode Go returned no models".to_string()); }
     Ok(models)
+}
+
+fn provider_transport_error(error: reqwest::Error) -> String {
+    let detail = crate::redaction::sanitize(&format!("{error:?}"));
+    if detail.to_ascii_lowercase().contains("tls") {
+        format!("TLS 安全连接建立失败，请检查当前网络或代理节点。请求尚未到达模型接口。详细原因：{detail}")
+    } else {
+        detail
+    }
+}
+
+#[tauri::command]
+pub async fn fetch_commandcode_models(api_key: String) -> Result<Vec<OpenCodeGoModel>, String> {
+    if api_key.trim().is_empty() {
+        return Err("CommandCode API Key is required".to_string());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("unable to create HTTP client: {error}"))?;
+    let response = client
+        .get(format!("{COMMANDCODE_BASE_URL}/models"))
+        .bearer_auth(api_key.trim())
+        .header(reqwest::header::USER_AGENT, format!("OpsNest/{}", env!("CARGO_PKG_VERSION")))
+        .send()
+        .await
+        .map_err(|error| format!("CommandCode 模型列表请求失败：{}", provider_transport_error(error)))?;
+    let status = response.status();
+    let raw = response.text().await.map_err(|error| error.to_string())?;
+    if !status.is_success() {
+        return Err(format!("CommandCode returned {}: {}", status.as_u16(), raw.chars().take(400).collect::<String>()));
+    }
+    let payload: Value = serde_json::from_str(&raw).map_err(|error| format!("invalid CommandCode model list: {error}"))?;
+    let items = payload.get("data").and_then(Value::as_array).ok_or_else(|| "CommandCode response did not contain a model list".to_string())?;
+    let mut models = items.iter().filter_map(|item| {
+        let id = item.get("id")?.as_str()?.trim();
+        (!id.is_empty()).then(|| OpenCodeGoModel { id: id.to_string(), protocol: commandcode_protocol_from_item(item) })
+    }).collect::<Vec<_>>();
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    if models.is_empty() { return Err("CommandCode returned no models".to_string()); }
+    Ok(models)
+}
+
+pub async fn test_commandcode_connection(api_key: &str, model: &str, api_mode: Option<&str>) -> Result<String, String> {
+    if api_key.trim().is_empty() || model.trim().is_empty() {
+        return Err("CommandCode API Key and model are required".to_string());
+    }
+    let mode = api_mode.unwrap_or("chat-completions");
+    let raw = post_chat(
+        "commandcode",
+        Some(mode),
+        Some("opsnest-model-test"),
+        COMMANDCODE_BASE_URL,
+        api_key,
+        model,
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role":"user","content":"Call the provided opsnest_connection_test tool with ok=true. Do not answer with prose."}],
+            "max_tokens": 64,
+            "tools": [{"type":"function","function":{"name":"opsnest_connection_test","description":"Return ok=true; do not perform external actions.","parameters":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}}}],
+            "tool_choice":"auto"
+        }),
+        Duration::from_secs(30),
+        None,
+    ).await?;
+    let payload: Value = serde_json::from_str(&raw).map_err(|error| format!("CommandCode response was invalid: {error}"))?;
+    let message = payload.get("choices").and_then(|choices| choices.get(0)).and_then(|choice| choice.get("message"));
+    if message.and_then(|item| item.get("tool_calls")).and_then(Value::as_array).map_or(true, Vec::is_empty) {
+        return Err("Connection succeeded, but the selected model did not return the required tool-call format.".to_string());
+    }
+    Ok(serde_json::json!({"message":"Connection successful · tool-call verified · CommandCode","contextLength":Value::Null}).to_string())
 }
 
 pub async fn test_opencode_go_connection(api_key: &str, model: &str) -> Result<String, String> {
@@ -2222,9 +2328,30 @@ mod tests {
         assert!(super::recover_request("503 unavailable", &mut messages));
     }
     use super::{
-        cached_service_discovery, command_requires_approval, is_interactive_agent_command, normalize_assistant_message,
-        remember_service_discovery, safe_result_summary,
+        cached_service_discovery, command_requires_approval, commandcode_protocol_from_item,
+        is_interactive_agent_command, normalize_assistant_message, remember_service_discovery,
+        safe_result_summary, OpenCodeGoProtocol,
     };
+
+    #[test]
+    fn commandcode_catalog_selects_the_native_endpoint() {
+        assert!(matches!(
+            commandcode_protocol_from_item(&serde_json::json!({
+                "supported_endpoints": ["/provider/v1/chat/completions", "/provider/v1/responses"]
+            })),
+            Some(OpenCodeGoProtocol::ChatCompletions)
+        ));
+        assert!(matches!(
+            commandcode_protocol_from_item(&serde_json::json!({
+                "supported_endpoints": ["/provider/v1/messages"]
+            })),
+            Some(OpenCodeGoProtocol::Messages)
+        ));
+        assert!(commandcode_protocol_from_item(&serde_json::json!({
+            "supported_endpoints": []
+        }))
+        .is_none());
+    }
 
     #[test]
     fn service_discovery_cache_marks_recent_result() {

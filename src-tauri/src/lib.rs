@@ -359,6 +359,15 @@ async fn test_model_connection(
         );
         return Ok(result);
     }
+    if provider.as_deref() == Some("commandcode") {
+        let result = ai::test_commandcode_connection(&api_key, model, api_mode.as_deref()).await?;
+        let _ = append_debug_log(
+            "info".to_string(),
+            "CommandCode model connection test succeeded".to_string(),
+            Some(format!("model={model}, api_mode={}", api_mode.as_deref().unwrap_or("chat-completions"))),
+        );
+        return Ok(result);
+    }
     if base_url.is_empty() || model.is_empty() {
         return Err("API address and model name are required".to_string());
     }
@@ -615,6 +624,7 @@ pub fn run() {
             test_model_connection,
             fetch_model_names,
             ai::fetch_opencode_go_models,
+            ai::fetch_commandcode_models,
             ssh_scan::inspect_linux_server,
             ssh_scan::discover_linux_services,
             ssh_session::open_ssh_session,

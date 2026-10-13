@@ -661,7 +661,10 @@ async fn write_interactive_ssh_terminal_data(
         .ok_or_else(|| "SSH terminal is not connected".to_string())?;
     touch_activity(&shell);
     let normalized = data.replace('\r', "").replace('\n', "");
-    if record_input && !normalized.trim().is_empty() && normalized.trim() != "stty -echo" {
+    if record_input
+        && !normalized.trim().is_empty()
+        && !normalized.trim_start().starts_with("stty -echo")
+    {
         append_blackboard(&shell, "user_input", normalized);
     }
     // Ctrl+C and responses to a remote confirmation prompt must still reach
@@ -930,9 +933,9 @@ pub async fn set_interactive_ssh_native_input(session_id: String, enabled: bool)
     let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
     let token = format!("\u{1b}]777;opsnest-native-{id}\u{7}");
     let query = if enabled {
-        format!("if [ \"${{__OPSNEST_NATIVE_ACTIVE-}}\" != 1 ]; then __OPSNEST_NATIVE_PS1=\"${{PS1-}}\"; fi; __OPSNEST_NATIVE_ACTIVE=1; __OPSNEST_NATIVE_MARKER=$(printf '\\033]777;opsnest-native-{id}\\007'); if [ -n \"${{BASH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}\\\\[${{__OPSNEST_NATIVE_MARKER}}\\\\]\"; elif [ -n \"${{ZSH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}%{{${{__OPSNEST_NATIVE_MARKER}}%}}\"; else PS1=\"${{__OPSNEST_NATIVE_PS1}}${{__OPSNEST_NATIVE_MARKER}}\"; fi; stty -echo")
+        format!("if [ \"${{__OPSNEST_NATIVE_ACTIVE-}}\" != 1 ]; then __OPSNEST_NATIVE_PS1=\"${{PS1-}}\"; fi; __OPSNEST_NATIVE_ACTIVE=1; __OPSNEST_NATIVE_MARKER=$(printf '\\033]777;opsnest-native-{id}\\007'); if [ -n \"${{BASH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}\\\\[${{__OPSNEST_NATIVE_MARKER}}\\\\]\"; elif [ -n \"${{ZSH_VERSION-}}\" ]; then PS1=\"${{__OPSNEST_NATIVE_PS1}}%{{${{__OPSNEST_NATIVE_MARKER}}%}}\"; else PS1=\"${{__OPSNEST_NATIVE_PS1}}${{__OPSNEST_NATIVE_MARKER}}\"; fi; stty -echo -echonl 2>/dev/null || stty -echo")
     } else {
-        "if [ \"${__OPSNEST_NATIVE_ACTIVE-}\" = 1 ]; then PS1=\"$__OPSNEST_NATIVE_PS1\"; unset __OPSNEST_NATIVE_ACTIVE __OPSNEST_NATIVE_PS1 __OPSNEST_NATIVE_MARKER; fi; stty -echo".to_string()
+        "if [ \"${__OPSNEST_NATIVE_ACTIVE-}\" = 1 ]; then PS1=\"$__OPSNEST_NATIVE_PS1\"; unset __OPSNEST_NATIVE_ACTIVE __OPSNEST_NATIVE_PS1 __OPSNEST_NATIVE_MARKER; fi; stty -echo -echonl 2>/dev/null || stty -echo".to_string()
     };
     let code = query_current_shell(&session_id, &query).await?;
     if code != 0 { return Err("Unable to switch terminal echo mode".into()); }

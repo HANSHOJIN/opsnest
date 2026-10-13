@@ -110,8 +110,8 @@ type AppearancePreferences = {
 };
 
 type ModelPreferences = {
-  provider: "custom" | "openai" | "deepseek" | "openrouter" | "ollama" | "opencode-go";
-  apiMode: "chat-completions" | "responses";
+  provider: "custom" | "openai" | "deepseek" | "openrouter" | "ollama" | "commandcode" | "opencode-go";
+  apiMode: "chat-completions" | "responses" | "messages";
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -859,6 +859,7 @@ function SystemIconBadge({ system }: { system?: string }) {
 const APPEARANCE_FILE = "appearance.json";
 const MODEL_FILE = "model.json";
 const OPENCODE_GO_BASE_URL = "https://opencode.ai/zen/go/v1";
+const COMMANDCODE_BASE_URL = "https://api.commandcode.ai/provider/v1";
 const DEBUG_FILE = "debug.json";
 const SERVERS_FILE = "servers.json";
 const ACTIVITY_FILE = "activity.json";
@@ -8468,7 +8469,7 @@ function InteractiveTerminalPanel({
       }
       // `stty -echo` is an internal bootstrap command. The PTY may echo it
       // once before echo mode is disabled; keep the real login banner clean.
-      return visible.replace(/stty -echo/g, "");
+      return visible.replace(/stty -echo(?: -echonl)?(?: 2>\/dev\/null \|\| stty -echo)?/g, "");
     };
     // Register the output listener before opening the remote shell. A fast SSH
     // login can emit its first prompt immediately; subscribing afterwards
@@ -8641,7 +8642,7 @@ function InteractiveTerminalPanel({
               // attempt to leave the AI editor's echo mode before releasing
               // native ownership; otherwise the next `sudo`/`su` inherits an
               // invisible line editor and Ctrl+C appears to do nothing.
-              const recovered = await writeRawPtyInput("stty -echo\r");
+              const recovered = await writeRawPtyInput("stty -echo -echonl 2>/dev/null || stty -echo\r");
               if (recovered) {
                 rawNativeEchoRef.current = false;
                 nativePromptTokenRef.current = "";
@@ -10147,6 +10148,7 @@ function App() {
           saved.provider === "deepseek" ||
           saved.provider === "openrouter" ||
           saved.provider === "ollama" ||
+          saved.provider === "commandcode" ||
           saved.provider === "opencode-go"
             ? saved.provider
             : "custom";
@@ -10155,10 +10157,12 @@ function App() {
           ...DEFAULT_MODEL,
           ...saved,
           provider,
-          apiMode: saved.apiMode === "responses" ? "responses" : "chat-completions",
+          apiMode: saved.apiMode === "responses" || saved.apiMode === "messages" ? saved.apiMode : "chat-completions",
           baseUrl:
             provider === "opencode-go"
               ? OPENCODE_GO_BASE_URL
+              : provider === "commandcode"
+                ? COMMANDCODE_BASE_URL
               : saved.baseUrl?.trim() || preset?.baseUrl || DEFAULT_MODEL.baseUrl,
           model: saved.model?.trim() || preset?.model || DEFAULT_MODEL.model,
         });
