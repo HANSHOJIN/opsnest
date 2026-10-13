@@ -101,10 +101,6 @@ const shellCommandNames = new Set([
 export function isLikelyShellCommand(input: string) {
   const value = input.trim();
   if (!value) return false;
-  // Menu-driven shell scripts commonly ask for a bare numeric choice. Keep
-  // that input on the PTY even after the script has temporarily returned to
-  // the parent shell prompt.
-  if (/^\d+$/.test(value)) return true;
   if (value.startsWith("/cmd ")) return true;
   // A pasted shell block must stay on the PTY path.  In particular, brace
   // groups and control structures are valid commands even when their first
@@ -115,6 +111,12 @@ export function isLikelyShellCommand(input: string) {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter(Boolean);
+    // Pasted maintenance scripts often start with path variables such as
+    // OLD='/path/to/current' and NEW='/path/to/replacement'. Treat that
+    // unmistakable shell assignment prefix as a script even when later lines
+    // use commands outside the local command-name allowlist.
+    if (lines.length > 1 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(lines[0]))
+      return true;
     if (
       lines.some((line) => /^(?:\{|\}|\(|\)|if\b|then\b|elif\b|else\b|fi\b|for\b|while\b|until\b|do\b|done\b|case\b|esac\b)/.test(line))
     )
