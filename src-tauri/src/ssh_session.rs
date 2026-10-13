@@ -882,11 +882,11 @@ async fn query_current_shell(session_id: &str, query: &str) -> Result<i32, Strin
         .get(session_id).cloned().ok_or("SSH terminal is not connected")?;
     let _execution = tokio::time::timeout(Duration::from_secs(3), shell.execution.lock())
         .await.map_err(|_| "Terminal is busy; command discovery deferred")?;
-    let (start, prompt) = {
+    let start = {
         let output = shell.output.lock().map_err(|_| "SSH output lock failed")?;
-        let prompt = observed_shell_prompt(&String::from_utf8_lossy(&output))
+        observed_shell_prompt(&String::from_utf8_lossy(&output))
             .ok_or("The shell has not returned to a prompt")?;
-        (output.len(), prompt)
+        output.len()
     };
     let token = format!("__OPSNEST_QUERY_{}__", SystemTime::now()
         .duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos());
@@ -905,7 +905,11 @@ async fn query_current_shell(session_id: &str, query: &str) -> Result<i32, Strin
             // Consume the real prompt too, so a late query prompt cannot
             // release keyboard ownership of the user's next command.
             let tail = &text[index..];
-            if observed_shell_prompt(tail).as_deref() == Some(prompt.as_str()) {
+            // Prompts can contain clocks, counters, or shell-specific state
+            // that changes while this query runs. The unique completion
+            // marker proves our command finished; any returned shell prompt
+            // proves the interactive shell is ready again.
+            if observed_shell_prompt(tail).is_some() {
                 return Ok(code);
             }
         }

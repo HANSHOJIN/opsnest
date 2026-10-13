@@ -46,7 +46,10 @@ export class TerminalDispatcher {
       this.resolving = true;
       try {
         const route = await this.context.resolveUnknownCommand(trimmed);
-        if (route === "ai") allowTerminalHandoff = false;
+        // `auto-ai` is reserved for input that has no executable token (most
+        // often ordinary prose). Do not let a model misclassify a greeting as
+        // a shell command and send it through the terminal handoff tool.
+        if (route === "ai" || route === "auto-ai") allowTerminalHandoff = false;
         if (route === "cancel") return;
         if (route === "command") {
           this.context.onCommand(command);

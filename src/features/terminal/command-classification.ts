@@ -101,6 +101,10 @@ const shellCommandNames = new Set([
 export function isLikelyShellCommand(input: string) {
   const value = input.trim();
   if (!value) return false;
+  // Menu-driven shell scripts commonly ask for a bare numeric choice. Keep
+  // that input on the PTY even after the script has temporarily returned to
+  // the parent shell prompt.
+  if (/^\d+$/.test(value)) return true;
   if (value.startsWith("/cmd ")) return true;
   // A pasted shell block must stay on the PTY path.  In particular, brace
   // groups and control structures are valid commands even when their first
