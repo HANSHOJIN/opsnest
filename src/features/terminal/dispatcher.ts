@@ -37,6 +37,15 @@ export class TerminalDispatcher {
       }
       return;
     }
+    // A multiline paste in the SSH terminal is treated as a shell script by
+    // default. Natural-language multiline prompts remain available through
+    // the explicit /AI prefix, so long scripts never depend on a command-name
+    // allowlist or the first line's spelling.
+    if (!forcedAi && /[\r\n]/.test(trimmed)) {
+      this.context.onCommand(command);
+      await this.context.writeCommand(command);
+      return;
+    }
     if (!forcedAi && this.context.looksLikeCommand(trimmed)) {
       this.context.onCommand(command);
       await this.context.writeCommand(command);
